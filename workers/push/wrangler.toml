@@ -1,0 +1,16 @@
+# Cloudflare Worker that sends Web Push (RFC 8030) for the TMA Family App.
+# Deployed by .github/workflows/deploy-push-worker.yml; see README.md here.
+name = "tma-push"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+# Holds the VAPID key pair ("vapid:v1") and the SHA-256 of the relay secret
+# ("relay:secret-sha256"). Already created on the TMA Cloudflare account.
+[[kv_namespaces]]
+binding = "TMA_PUSH"
+id = "8d4b2d2e7e914753bbe663f16051e751"
+
+[vars]
+# VAPID "sub" claim: who push services contact about this sender.
+VAPID_SUBJECT = "mailto:timberlanemusictma@gmail.com"
