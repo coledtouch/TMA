@@ -1,5 +1,7 @@
 import * as nodeCrypto from 'node:crypto';
+import { createMemoryServices } from '../server/memory';
 import type { CreateOrderInput, Logger } from '../server/services';
+import { buildSettings } from '../server/settings';
 import {
   buildOrderBody,
   createPayPalGateway,
@@ -83,11 +85,20 @@ describe('helpers', () => {
     expect(parseAmount(12)).toBeUndefined();
   });
 
-  it('chooses live only for "live"/"production"', () => {
+  it('chooses live only for "live"/"production"/"prod"', () => {
     expect(paypalEnv('live')).toBe('live');
     expect(paypalEnv(' Production ')).toBe('live');
+    expect(paypalEnv('prod')).toBe('live');
     expect(paypalEnv('sandbox')).toBe('sandbox');
     expect(paypalEnv('')).toBe('sandbox');
+  });
+
+  it('agrees with the environment the core tells the browser to load', () => {
+    // The browser loads the SDK for PublicSettings.paypalEnv; the gateway must call the same PayPal.
+    for (const value of ['live', 'LIVE', ' prod ', 'Production', 'production ', 'sandbox', 'test', '', 'prd']) {
+      const pub = buildSettings([{ rowNumber: 2, data: { Key: 'PAYPAL_ENV', Value: value } }], createMemoryServices()).pub;
+      expect(paypalEnv(value), value).toBe(pub.paypalEnv);
+    }
   });
 
   it('maps capture statuses', () => {
@@ -267,19 +278,55 @@ describe('captureOrder', () => {
     expect(get.url).toBe(`${SANDBOX}/v2/checkout/orders/ORDER1`);
   });
 
-  it('maps a declined instrument to DECLINED and other errors to FAILED', () => {
+  it('maps a declined instrument to DECLINED and other business errors to FAILED', () => {
     routes({ capture: () => ({ code: 422, body: { details: [{ issue: 'INSTRUMENT_DECLINED' }] } }) });
     expect(gateway().captureOrder('ORDER1', 'r').status).toBe('DECLINED');
-    routes({ capture: () => ({ code: 500, body: { name: 'INTERNAL_SERVER_ERROR' } }) });
-    expect(gateway().captureOrder('ORDER1', 'r')).toMatchObject({ status: 'FAILED', message: expect.stringContaining('INTERNAL_SERVER_ERROR') });
+    routes({ capture: () => ({ code: 422, body: { details: [{ issue: 'ORDER_NOT_APPROVED' }] } }) });
+    expect(gateway().captureOrder('ORDER1', 'r')).toMatchObject({ status: 'FAILED', message: expect.stringContaining('ORDER_NOT_APPROVED') });
+    expect(gas.fetch.requests.filter((r) => r.url.endsWith('/capture'))).toHaveLength(2); // one per call: definite answers aren't retried
   });
 
-  it('returns FAILED (not a throw) when PayPal cannot be reached', () => {
+  it('never calls a 5xx, 429 or timeout "failed": asks again with the same request id, then reports UNKNOWN', () => {
+    for (const reply of [{ code: 500, body: { name: 'INTERNAL_SERVER_ERROR' } }, { code: 503 }, { code: 429, body: { name: 'RATE_LIMIT_REACHED' } }, { code: 200, body: {} }]) {
+      routes({ capture: () => reply });
+      gas.fetch.requests.length = 0;
+      expect(gateway().captureOrder('ORDER1', 'cap-ORDER1'), String(reply.code)).toMatchObject({ status: 'UNKNOWN' });
+      const captures = gas.fetch.requests.filter((r) => r.url.endsWith('/capture'));
+      expect(captures.map((r) => r.headers['PayPal-Request-Id'])).toEqual(['cap-ORDER1', 'cap-ORDER1']);
+    }
     gas.fetch.handler = (r) => {
       if (r.url.endsWith('/oauth2/token')) return { code: 200, body: { access_token: 'AT', expires_in: 100 } };
+      throw new Error(`Timeout: ${r.url}`);
+    };
+    expect(gateway().captureOrder('ORDER1', 'r')).toMatchObject({ status: 'UNKNOWN' });
+  });
+
+  it('recovers a capture that went through when the first reply was lost', () => {
+    let calls = 0;
+    routes({
+      capture: (r) => {
+        calls += 1;
+        if (calls === 1) throw new Error(`Timeout: ${r.url}`);
+        return { code: 201, body: captureBody() }; // PayPal replays the original capture for the same PayPal-Request-Id
+      },
+    });
+    expect(gateway().captureOrder('ORDER1', 'cap-ORDER1')).toMatchObject({ status: 'COMPLETED', captureId: 'CAP1', grossCents: 25798 });
+  });
+
+  it('reports an already-captured order it cannot read back as UNKNOWN, not FAILED', () => {
+    routes({
+      capture: () => ({ code: 422, body: { details: [{ issue: 'ORDER_ALREADY_CAPTURED' }] } }),
+      get: () => ({ code: 503, body: {} }),
+    });
+    expect(gateway().captureOrder('ORDER1', 'r').status).toBe('UNKNOWN');
+  });
+
+  it('returns FAILED (not a throw) when PayPal cannot be reached before capturing', () => {
+    gas.fetch.handler = () => {
       throw new Error('DNS error: api-m.sandbox.paypal.com');
     };
     expect(gateway().captureOrder('ORDER1', 'r')).toEqual({ status: 'FAILED', message: 'Could not reach PayPal. Please try again.' });
+    expect(gas.fetch.requests.some((r) => r.url.endsWith('/capture'))).toBe(false);
   });
 
   it('rejects order ids that are not PayPal ids without calling PayPal', () => {

@@ -6,6 +6,7 @@ import type { IsoDate } from '../shared/types';
 import { Model } from './data';
 import { Db } from './db';
 import { ApiError } from './errors';
+import type { DeliveryJob } from './notify';
 import type { RowData, Services } from './services';
 import { nyDate, truncate } from './util';
 
@@ -20,6 +21,11 @@ export interface Ctx {
   /** Queue a Log row; written by flushLog() (inside the write lock). */
   log(kind: string, detail: string): void;
   flushLog(): void;
+  /**
+   * Notifications planned while holding the write lock, sent by flushDeliveries() after it is
+   * released (see notify.ts). null = deliver() sends right away.
+   */
+  deliveries: DeliveryJob[] | null;
 }
 
 const MAX_LOG_DETAIL = 500;
@@ -34,6 +40,7 @@ export function createCtx(services: Services): Ctx {
     m: new Model(services, db),
     now,
     today: nyDate(now),
+    deliveries: null,
     log(kind, detail) {
       pending.push({ At: now, Kind: kind, Detail: truncate(detail, MAX_LOG_DETAIL) });
     },

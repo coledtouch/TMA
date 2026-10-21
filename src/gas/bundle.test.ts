@@ -251,5 +251,56 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
         gas.fetch.handler = handler;
       }
     });
+
+    /** Type a value under a header of the Ledger tab, in a new row. */
+    const typeCredit = (amount: number, description: string) => {
+      const ledger = gas.spreadsheet.getSheetByName('Ledger')!;
+      const headers = ledger.dump()[0] as string[];
+      const row = ledger.getLastRow() + 1;
+      const values: Record<string, string | number> = { Date: new Date().toISOString().slice(0, 10), StudentID: 'S0001', Type: 'Fundraiser', Description: description, Amount: amount };
+      headers.forEach((h, i) => {
+        if (h in values) ledger.write(row, i + 1, values[h]);
+      });
+    };
+
+    it('sends notifications only after releasing the script lock', () => {
+      typeCredit(10, 'Bake sale');
+      const lockedSends: string[] = [];
+      const sendEmail = gas.mail.sendEmail.bind(gas.mail);
+      gas.mail.sendEmail = (message) => {
+        if (gas.lock.held) lockedSends.push(String(message.to));
+        sendEmail(message);
+      };
+      // The push Worker carries push and (unless paused) email too: none of that under the lock either.
+      const handler = gas.fetch.handler;
+      gas.fetch.handler = (r) => {
+        if (gas.lock.held && (r.url === `${WORKER}/send` || r.url === `${WORKER}/email`)) lockedSends.push(r.url);
+        return handler(r);
+      };
+      try {
+        const before = gas.mail.sent.length;
+        g.syncTick();
+        expect(gas.mail.sent.slice(before).filter((m) => m.subject === '+$10.00 for Avery')).toHaveLength(2);
+        expect(lockedSends).toEqual([]);
+        expect(gas.lock.held).toBe(false);
+      } finally {
+        gas.fetch.handler = handler;
+      }
+    });
+
+    it('does not tell families their balance fell to $0 when the Ledger "Amount" header is renamed', () => {
+      const ledger = gas.spreadsheet.getSheetByName('Ledger')!;
+      const amountColumn = (ledger.dump()[0] as string[]).indexOf('Amount') + 1;
+      ledger.write(1, amountColumn, 'Amount (USD)');
+      const before = gas.mail.sent.length;
+      g.syncTick();
+      expect(gas.mail.sent.slice(before)).toEqual([]);
+      const log = gas.spreadsheet.getSheetByName('Log')!.dump();
+      expect(log.some((row) => row.some((cell) => String(cell).includes('The Ledger tab has no "Amount" column')))).toBe(true);
+
+      ledger.write(1, amountColumn, 'Amount');
+      g.syncTick();
+      expect(gas.mail.sent.slice(before)).toEqual([]);
+    });
   });
 });

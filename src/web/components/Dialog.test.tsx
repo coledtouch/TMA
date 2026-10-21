@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it } from 'vitest';
-import { Dialog } from './Dialog';
+import { ConfirmDialog, Dialog } from './Dialog';
 
 function Harness() {
   const [open, setOpen] = useState(false);
@@ -66,5 +66,25 @@ describe('Dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Open' }));
     await user.click(document.querySelector('.dialog-backdrop') as HTMLElement);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it("reads a confirmation's message along with its title (role=alertdialog)", () => {
+    render(
+      <div id="root">
+        <ConfirmDialog
+          open
+          title="Cancel this request?"
+          message="Your request to apply $200.00 to Spring Trip will be withdrawn."
+          confirmLabel="Cancel request"
+          cancelLabel="Keep it"
+          danger
+          onConfirm={() => undefined}
+          onCancel={() => undefined}
+        />
+      </div>,
+    );
+    const dialog = screen.getByRole('alertdialog', { name: 'Cancel this request?' });
+    expect(dialog).toHaveAccessibleDescription('Your request to apply $200.00 to Spring Trip will be withdrawn.');
+    expect(screen.getByRole('button', { name: 'Keep it' })).toHaveFocus();
   });
 });

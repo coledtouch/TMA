@@ -43,6 +43,14 @@ export interface Store {
   update(table: TableName, rowNumber: number, patch: RowData): void;
   /** Replace all data rows (used for _Snapshot). */
   overwrite(table: TableName, rows: RowData[]): void;
+  /**
+   * Canonical headers the tab actually has (after aliases), or null when the tab is missing.
+   * Lets the core tell a column the treasurer renamed from a blank cell. Optional: a store
+   * without it is assumed to have every column.
+   */
+  columns?(table: TableName): readonly string[] | null;
+  /** Forget memoized reads of a tab so the next read() sees edits made meanwhile (e.g. in the Sheets UI). */
+  invalidate?(table: TableName): void;
 }
 
 export interface Cache {
@@ -134,7 +142,12 @@ export interface CreateOrderInput {
 }
 
 export interface CaptureResult {
-  status: 'COMPLETED' | 'PENDING' | 'DECLINED' | 'FAILED';
+  /**
+   * DECLINED/FAILED: PayPal definitely did not take the money. UNKNOWN: no definite answer (network
+   * error, timeout, PayPal 5xx/429, unreadable reply) even after asking again, so the payment may
+   * have gone through; it must never be reported to the payer as "not charged".
+   */
+  status: 'COMPLETED' | 'PENDING' | 'DECLINED' | 'FAILED' | 'UNKNOWN';
   captureId?: string;
   grossCents?: Cents;
   payerEmail?: string;

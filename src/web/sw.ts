@@ -146,14 +146,18 @@ self.addEventListener('push', (event) => {
     message = { title: FALLBACK_TITLE, body: '', url: DEFAULT_ROUTE, topic: 'announcements' };
   }
   // iOS revokes push permission from apps that receive a push without showing a notification.
-  const shown = self.registration.showNotification(message.title, {
+  const options: NotificationOptions & { renotify?: boolean } = {
     body: message.body,
     icon: inScope(ICON_PATH),
     badge: inScope(BADGE_PATH),
     tag: message.tag,
     data: { url: message.url },
     lang: 'en',
-  });
+    // A notice replaces one with the same tag still in the tray (e.g. a second credit for a
+    // student); without renotify, Chrome does that silently. renotify without a tag throws.
+    ...(message.tag ? { renotify: true } : {}),
+  };
+  const shown = self.registration.showNotification(message.title, options);
   event.waitUntil(Promise.allSettled([shown, tellWindows({ type: 'push', message })]).then(() => undefined));
 });
 

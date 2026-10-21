@@ -15,8 +15,11 @@ will maintain it and for contributors adding features. Contracts live in code:
 * About 300 families. Today TMA runs on **one Google Sheet + Gmail + Facebook**, with
   everything uploaded by hand. The school cannot share family emails, so families
   must be able to **sign themselves up**.
-* **No new spending.** Everything must run on free tiers: TMA's own Google account, GitHub Pages,
-  and Cloudflare's free Workers plan (for push notifications). One opt-in exception: email from
+* **No new spending.** Everything must run on free tiers: TMA's own Google account, GitHub,
+  and Cloudflare's free Workers plan (the app's host and push notifications). The one fixed cost is
+  the app's web address `mytma.org` (Cloudflare Registrar, about $10–12 a year, renewing every
+  October; registered October 2026), which must stay on auto-renew: whoever holds the name controls
+  the app's origin. One opt-in exception: email from
   `noreply@mytma.org` uses Cloudflare Email Sending, which needs the Workers Paid plan ($5 a month,
   3,000 emails included). With `EMAIL_VIA = gmail`, or whenever the Worker can't send, email goes
   out with TMA's Gmail for free (§6).
@@ -59,8 +62,19 @@ will maintain it and for contributors adding features. Contracts live in code:
            PayPal JS SDK buttons in the page ⇄ PayPal (orders created/captured server-side)
 ```
 
-* **Static hosting** (free): GitHub Pages, built and published by `.github/workflows/deploy-pages.yml`.
-  The only build setting is `VITE_API_URL` (the Apps Script `/exec` URL).
+* **App hosting** (free): `https://mytma.org`, the Cloudflare Worker `tma-app` (`workers/app`) serving
+  `dist/` through its static-assets binding, built and published by
+  `.github/workflows/deploy-app-cloudflare.yml` with the push Worker's two repository secrets. The
+  `mytma.org` registration and zone are in that same Cloudflare account (moving accounts:
+  `docs/SETUP.md` §5F). The only build setting is `VITE_API_URL` (the Apps Script `/exec` URL). While it is unset the
+  workflow builds against TMA's test spreadsheet (`TEST_API_URL` in the workflow); going live means
+  setting it. The run summary names the backend either way. See §9.2.
+* **One origin for the live app.** localStorage (session token, cached bootstrap with students' names
+  and balances, §10 "Live and demo in one build") is per origin, not per path, and every GitHub Pages
+  site of one owner shares `https://<owner>.github.io`. So the live build is served only from
+  `mytma.org`: `tma-app` redirects `www.mytma.org` and any `*.workers.dev` address there, and
+  `.github/workflows/deploy-pages.yml` publishes a **demo-only** build to GitHub Pages
+  (`VITE_API_URL` forced empty, whatever the variable says).
 * **Push Worker** (free): `workers/push`, a Cloudflare Worker deployed by
   `.github/workflows/deploy-push-worker.yml`, live at `https://tma-push.coleciprari.workers.dev`
   (Settings `PUSH_RELAY_URL`). Apps Script keeps each browser's push subscription in the Devices tab
@@ -73,8 +87,8 @@ will maintain it and for contributors adding features. Contracts live in code:
   localStorage-persisted copy of the sample sheet (`src/demo`). PayPal and push are simulated. A build
   without `VITE_API_URL` is always the demo. A live build opens the demo when the address has `?demo`
   (or someone taps *See a demo with sample data* on the sign-in screen) and keeps it in that browser
-  until **Exit demo** (§10 "Live and demo in one build"). So `https://<owner>.github.io/<repo>/?demo`
-  stays the board's prototype link after the site goes live.
+  until **Exit demo** (§10 "Live and demo in one build"). So `https://mytma.org/?demo` stays the
+  board's prototype link after the site goes live.
 
 ### Directory layout
 
@@ -86,6 +100,7 @@ src/demo/     browser wiring of the core with in-memory services (demo mode)
 src/web/      React PWA: screens, components, api client, push, install, PayPal UI, sw.ts
 apps-script/  Code.js (generated, committed so volunteers can copy/paste), appsscript.json
 workers/push/ Cloudflare Worker that delivers Web Push (own package.json, tests, wrangler.toml)
+workers/app/  Cloudflare Worker that serves the built app at https://mytma.org (tests, wrangler.toml)
 scripts/      build-gas.mjs, make-icons.mjs
 docs/         this spec, SETUP, SHEET, PAYMENTS, BOARD-FAQ
 e2e/          Playwright tests (demo, demo inside a live build) and README screenshots
@@ -112,8 +127,11 @@ e2e/          Playwright tests (demo, demo inside a live build) and README scree
 * **Emails**: trim + lower-case. Families match on `Email` or `Parent 2 Email`.
 * **Status** blank means `Active` for Families/Students (treasurer rows), `Going` for Enrollments,
   `Open` for Activities, `Completed` for Payments, `Pending` for Redemptions.
-* **IDs**: new Family/Student IDs are `F`/`S` + 4-digit zero-padded (max numeric suffix + 1).
-  Redemption IDs are `R-` + first 8 hex chars of a uuid. Announcement IDs are `A-` + 8 hex.
+* **IDs**: new Family/Student IDs are `F`/`S` + 4-digit zero-padded, one above the highest ID still
+  **referenced anywhere**, not just in Families/Students: StudentIDs in Students, Ledger, Enrollments,
+  Payments, Redemptions and `_Snapshot`; FamilyIDs in Families, Students.FamilyID and
+  Redemptions.FamilyID. Deleting a family's rows therefore never lets a new sign-up inherit its funds,
+  enrollments, payments or requests through a reused ID. Redemption IDs are `R-` + first 8 hex chars of a uuid. Announcement IDs are `A-` + 8 hex.
   Treasurer rows may have any ID text. Students with blank `StudentID` are ignored (logged).
 * `Ledger` rows with blank StudentID or zero amount are ignored.
 * **Never** store derived values in treasurer tabs except the documented columns
@@ -128,14 +146,25 @@ e2e/          Playwright tests (demo, demo inside a live build) and README scree
   unless something was paid):
   * `paidFromFunds` = −Σ ledger.amount where `activityId` matches.
   * `paidDirect` = Σ payments.amount with status `Completed` for that student+activity.
-  * `remaining` = max(0, cost − paidFromFunds − paidDirect).
+  * `pendingPayment` = Σ payments.amount with status `Pending` (still clearing, e.g. an eCheck);
+    exposed as `ActivityAccount.pendingPaymentCents`.
+  * `remaining` = max(0, cost − paidFromFunds − paidDirect − pendingPayment). A payment that is still
+    clearing isn't "paid", but reminders, "Left to pay", the `createOrder` limit and the room for fund
+    requests never ask for that money again.
 
 ## 4. Authentication (src/server/auth.ts)
 
 Passwordless email codes. No Google account is required for parents.
 
 1. `auth.requestCode {email}`: validate the format. Rate limit is 5 codes per email per hour
-   (cache key `otp-rl:<email>`). Generate a 6-digit code and store
+   (cache key `otp-rl:<email>`). Codes share the day's email quota with notifications, and Apps Script
+   can't see who is asking, so for emails the sheet doesn't know yet (not a guardian on any Families
+   row, not in Preferences or Devices, not in `ADMIN_EMAILS`) there are two more limits:
+   `NEW_EMAIL_CODES_PER_HOUR` = 30 codes per hour script-wide (`otp-rl:new-emails`), and none once
+   the quota is down to the last `KNOWN_EMAIL_CODE_RESERVE` = 40 recipients, which are kept for known
+   emails. Either answers `RATE_LIMITED` ("new sign-ups are paused for a while"), logs, and writes one
+   `auth` Log row per hour. Every check runs **before** a new code is made, so a refused request never
+   replaces a code already emailed. Then generate a 6-digit code and store
    `hmac(TOKEN_SECRET, email+code)` in cache `otp:<email>` for 10 minutes with
    `attempts=0`. Email it with subject "Your TMA sign-in code: 123456". **Always**
    respond `{sent:true}` whether or not the email is known; anyone may sign up.
@@ -159,24 +188,25 @@ preflight, which Apps Script cannot answer). The body is `ApiRequest` JSON and t
 (`UNAUTHORIZED`). `admin.*` requires an admin (`FORBIDDEN`).
 Validate every param defensively (types, lengths: names ≤ 80, notes ≤ 500, title ≤ 120, body ≤ 2000).
 
-Writes run inside `services.withLock`.
+Writes run inside `services.withLock`. Notifications a write produces are only planned under the lock
+and sent after it is released (§6), so slow email, push or SMS calls never keep other writes waiting.
 
 | Action | Behavior |
 | --- | --- |
 | `me.bootstrap` | Build `Bootstrap` for the caller (see §5.1). |
 | `household.save` | See §5.2. Returns fresh Bootstrap. |
-| `prefs.save` | Sanitize: channel/topic booleans; schools/ensembles must be in Settings lists; `smsPhone` digits only (10–15 digits) or removed. Upsert `Preferences` row for the caller's email. `sms` may only be true when `Settings.SMS_ENABLED` and a phone is set. |
+| `prefs.save` | Sanitize: channel/topic booleans; schools/ensembles must be in Settings lists; `smsPhone` must be a US/Canada (NANP) number: 10 digits, or 11 starting with 1, with a valid area code and exchange; anything else, including international and premium numbers, is removed (stored prefs are re-sanitized on read). Upsert `Preferences` row for the caller's email. `sms` may only be true when `Settings.SMS_ENABLED` and a phone is set. |
 | `push.register` | `token` is the browser's `PushSubscription` as JSON (≤ 4096 chars), checked the way the push Worker checks it (`src/server/push-subscription.ts`): endpoint `https://` on the default port, no credentials, ≤ 2048 chars, host on the Worker's allowlist (§9.1; otherwise `BAD_REQUEST` "This browser's push service isn't supported. Try Chrome, Safari, Firefox or Edge."); `p256dh` a 65-byte P-256 point, `auth` 16 bytes (base64url or base64). Stored as the canonical token `{"endpoint","keys":{"p256dh","auth"}}`: host lower-cased, keys base64url without padding, no `expirationTime`. In `mode==='demo'` only, a `demo-…` token is accepted instead. Anything else (including old-style tokens) → `BAD_REQUEST`. Rate limit 30 per email per hour. Upsert `Devices` **by endpoint**, so a browser that re-subscribes with new keys updates its row: set Email, FamilyID, Token, User Agent, Last Seen. The device moves to whoever signs in on it. Max 10 devices per email; drop the least recently seen. Returns the device count for the email. |
 | `push.unregister` | `token` is the stored token or the browser's raw subscription JSON; only its endpoint matters (demo: the `demo-…` token itself). Blank out the **caller's own** rows for that endpoint. Anything unparseable → `BAD_REQUEST`, which the app ignores. |
 | `push.test` | Send "Test notification ✅ / Notifications are working on this device." to the caller's devices (push only). |
 | `redemption.request` | Caller's family must be Active, the student Active and in the family, the activity Open and `allowFunds`, enrollment Going. Amount is an integer ≥ 100 (=$1) and ≤ available funds and ≤ (remaining − pending requests for that activity). Append a `Redemptions` row (Pending). Notify admins (§6, admin message). |
 | `redemption.cancel` | Only the caller's family's own **Pending** request → Cancelled. |
-| `payment.createOrder` | Requires `settings.onlinePaymentsEnabled` and `payments.enabled()` (otherwise `NOT_CONFIGURED`). Same ownership checks; activity `allowOnlinePayment`. `minPayment ≤ amount ≤ remaining`. Fee: `coverFee ? grossUpCents(amount, FEE_PERCENT, FEE_FIXED) : none`. Call `payments.createOrder`. Cache `order:<orderId>` → JSON {email, familyId, studentId, activityId, amountCents, feeCents, grossCents} for 6 h. |
-| `payment.captureOrder` | Load the cached order (`NOT_FOUND` if missing/expired) and require the same email. If a Payments row with Reference == captureId or Reference == orderId already exists → return it (idempotent). Call `payments.captureOrder(orderId, 'cap-'+orderId)`. Status COMPLETED **and** grossCents equal to the expected gross → append Payments row {Date today, StudentID, ActivityID, Amount, Fee Covered, Gross, Method 'PayPal', Reference captureId, Payer Email, Status Completed}, log, notify the family (topic `payments`). PENDING → append with Status Pending. Anything else → `PAYMENT_FAILED`. |
-| `admin.overview` | Stats, pending redemptions (with names, available, remaining), pending households with up to 3 match candidates per student (§5.3), last 50 Log rows. |
-| `admin.decideRedemption` | Pending only (`CONFLICT` otherwise). Approved: re-validate available funds (excluding this request) and remaining; if short → `CONFLICT` with a clear message. Append a Ledger row {Date today, StudentID, Type 'Redemption', Description 'Applied to <activity name>', Amount −x, ActivityID, Reference = request id, Entered By = admin email}. Update the redemption row (Status, Decided, Decided By, Admin Note, Notified=now). Update `_Snapshot` for that student so the sync doesn't double-notify. Notify the family (topic `payments`). Denied: update the row and notify. |
+| `payment.createOrder` | Requires `settings.onlinePaymentsEnabled` and `payments.enabled()` (otherwise `NOT_CONFIGURED`). Same ownership checks; activity `allowOnlinePayment`. `minPayment ≤ amount ≤ remaining` (when a payment that is still clearing covers the rest, the message says it is "still being processed"). Fee: `coverFee ? grossUpCents(amount, FEE_PERCENT, FEE_FIXED) : none`. Call `payments.createOrder`. Cache `order:<orderId>` → JSON {email, familyId, studentId, activityId, amountCents, feeCents, grossCents} for 6 h. |
+| `payment.captureOrder` | Load the cached order (`NOT_FOUND` if missing/expired) and require the same email. If a Payments row with Reference == captureId or Reference == orderId already exists → return it (idempotent). Before calling PayPal, re-check `remaining` under the write lock (another guardian, a second tab or a clearing payment may have paid meanwhile): an order that would overpay is not captured → `PAYMENT_FAILED` "…paid in the meantime, so this payment was stopped and you were not charged" (skipped after an unconfirmed capture). Call `payments.captureOrder(orderId, 'cap-'+orderId)`. Status COMPLETED **and** grossCents equal to the expected gross → append Payments row {Date today, StudentID, ActivityID, Amount, Fee Covered, Gross, Method 'PayPal', Reference captureId, Payer Email, Status Completed}, log, notify the family (topic `payments`). PENDING → append with Status Pending. DECLINED/FAILED (PayPal definitely took nothing) → `PAYMENT_FAILED`. `UNKNOWN` or a thrown gateway error (network, timeout, 5xx/429, unreadable reply, even after the gateway asked once more with the same `PayPal-Request-Id`) → `INTERNAL` with a message that never says "not charged", a `payment-error` Log row, a "Payment needs review" alert to admins, and the cached order kept and marked unconfirmed so capturing it again records the payment if it went through. The app asks once more by itself before showing "We couldn't confirm your payment". |
+| `admin.overview` | Stats, pending redemptions (with names, available, remaining), pending households with up to 3 match candidates per student (§5.3), last 50 Log rows. Each pending household may carry `warnings`, shown above *Approve*: a pending student whose ID already has Ledger/Enrollments/Payments/Redemptions rows, a non-pending student already linked to a pending household, or Redemptions rows that already carry the household's FamilyID. |
+| `admin.decideRedemption` | Pending only (`CONFLICT` otherwise). Approved: if the treasurer already typed a Ledger row with Reference = request id, post nothing more and skip the checks below (one shared check with the sync, so a request is never debited twice). Otherwise re-validate available funds (excluding this request) and remaining; if short → `CONFLICT` with a clear message. Append a Ledger row {Date today, StudentID, Type 'Redemption', Description 'Applied to <activity name>', Amount −x, ActivityID, Reference = request id, Entered By = admin email}. Update the redemption row (Status, Decided, Decided By, Admin Note, Notified=now). Update `_Snapshot` for that student so the sync doesn't double-notify. Notify the family (topic `payments`). Denied: update the row and notify. |
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
-| `admin.announce` | Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. |
+| `admin.announce` | Refuse (`CONFLICT` "already sent N minutes ago") the same title and body sent within the last 15 minutes, so a retry after the app gave up waiting can't send it twice. Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. The app waits up to 6 minutes for this and for `admin.runSync` (30 s for everything else). |
 | `admin.runSync` | Run `syncTick()` and return its report. |
 
 ### 5.1 Bootstrap
@@ -209,8 +239,16 @@ Writes run inside `services.withLock`.
   the family. Update grade/school/ensembles/instrument (names too while the student is Pending; for
   Active students a name change is ignored, and the change is logged for the treasurer).
   Students without `id` are appended as Pending (the family stays Active, and only that student awaits review).
-  Students omitted from the input are **not** deleted.
-* Inactive family → `FORBIDDEN` ("Please contact TMA").
+  Students omitted from the input are **not** deleted. Groups on a student's row that aren't in
+  Settings.ENSEMBLES (typed by the treasurer, or dropped from the list later) have no checkbox in the
+  app, so the form leaves them out and the server keeps them.
+* Inactive family → `FORBIDDEN` ("Please contact TMA"). An Inactive (e.g. rejected) household counts
+  only for its **first** guardian: someone it listed as second guardian has no household and can sign up
+  with their own.
+* `leave: true` ("This isn't my household" in the app, shown to a second guardian only): takes the
+  caller's email (name, email, phone of the second slot) off the household and saves nothing else;
+  `guardians`/`students` are ignored. The first guardian gets `BAD_REQUEST`. The caller can then sign up
+  with their own household. Someone may have typed this email as second guardian without asking.
 
 ### 5.3 Match candidates
 
@@ -235,8 +273,17 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
   kept back for sign-in codes (`SIGN_IN_EMAIL_RESERVE`; codes and notifications share one quota); skip
   with a log otherwise. Sent with `mailer.sendMany` when the mailer has it (one call for the batch,
   one result per recipient), else `send` one by one; a failed email doesn't use up quota, so the
-  next recipients may take its place. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
+  next recipients may take its place. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone
+  (US/Canada only, §5), and only to guardians of **Active** (TMA-verified) households and to
+  `ADMIN_EMAILS`: texts cost TMA money and anyone can sign in and save a number.
   Admin-chosen channels further restrict announcements.
+* **When it is sent.** `deliver()` first plans who gets what (reads only). Inside a write (every write
+  action, `syncTick`, `dailyTick`; `app.ts` sets `ctx.deliveries`) the plan is queued and
+  `flushDeliveries()` sends it after the write lock is released, then takes the lock briefly to drop
+  the device tokens the push service rejected (found by token on a fresh read) and write the Log rows.
+  It never throws, and queued notices still go out if the action failed afterwards. The counts
+  `deliver()` returned are filled in when sent, so `admin.announce`'s `delivered` and the tick reports
+  stay right.
 * Each delivery batch is logged in `Log` (kind `notify`, detail "topic: title → push n, email n, sms n").
 
 **Email delivery.** Every email (sign-in codes §4, notifications, announcements, admin alerts and the
@@ -251,7 +298,7 @@ dashboard); the core doesn't know the route. In Apps Script it is `src/gas/mail.
    Settings `SUPPORT_EMAIL` when it is one plain address (else its default). `send()` (sign-in
    codes, the test) posts one message; `sendMany()` (notifications) posts up to 10 per request,
    each request under 200 KB, 5 requests at a time with `UrlFetchApp.fetchAll`, so an announcement
-   to every family takes seconds inside the write lock. The Worker sends From
+   to every family takes seconds (sent after the write lock is released, see above). The Worker sends From
    `Timberlane Music Association <noreply@mytma.org>` (its own config, never the request), and only
    for the secret pinned by its `EMAIL_KEY` secret (§9.1).
 2. `401` → `POST /register` again (at most once per execution, shared with push) and retry once.
@@ -307,18 +354,41 @@ Use `formatCents`; use first names only for students in notifications (privacy o
 ## 7. Scheduled work (src/server/sync.ts)
 
 `syncTick()` runs every 15 minutes (Apps Script time trigger). Each step catches its own errors
-into `report.errors` so one failure doesn't block the rest:
+into `report.errors` so one failure doesn't block the rest. Rules for every step:
+
+* **Settle first.** Sheets saves each cell as it is typed, so a row typed in the sheet (an
+  announcement, or an Approved/Denied decision) is acted on only once its content (title, body, date,
+  audience, link; or status, admin note, amount, IDs, decided-by) has looked the same for at least
+  5 minutes (`SETTLE_MS`; first-seen time in CacheService). Any change restarts the wait. In practice it
+  goes out at the first sync after the row stops changing, 15–30 minutes after typing. Future-dated rows
+  start settling ahead of time, so they still go out on time. `report.waiting` counts rows still
+  settling; the Admin screen and the sheet menu say so.
+* **Check the columns.** When a step needs a column the tab doesn't have (renamed header, missing tab:
+  the Store's optional `columns(table)`), the step is skipped with a clear error instead of reading
+  every row as blank. Needed: Redemptions RequestID, StudentID, ActivityID, Amount, Status, Notified;
+  the Ledger tab with StudentID, Amount, Reference to post (the app never creates a fresh Ledger tab);
+  Announcements Date, Title, Body, Schools, Ensembles, Sent; Payments, Enrollments and Events for the
+  daily reminders. The error repeats every tick until the header is fixed.
+* **Stamp the right row.** Notices are sent after the lock is released (§6). Before writing `Notified`
+  or `Sent`, the tab is read again (`Db.refresh`, the Store's optional `invalidate`) and the stamp goes to
+  the row that still holds the same item (same RequestID, or the same announcement content), preferring
+  the original row. An item that was deleted or edited meanwhile is left for the next tick. The Ledger
+  row is posted before the stamp, so a failure in between can't leave a request Notified without its
+  debit.
 
 1. **Sheet-approved redemptions**: for each redemption with Status Approved/Denied and blank
-   `Notified`: if Approved and no Ledger row has Reference == id → append the Ledger row (as in
+   `Notified`, once settled: if Approved and no Ledger row has Reference == id → append the Ledger row (as in
    `admin.decideRedemption`) and update the snapshot for the student. Notify. Set `Notified` = now
    (and Decided if blank).
 2. **Balance changes**: compute all verified-or-not student balances. If `_Snapshot` is empty → write
    it and send nothing (first run). Otherwise for each student whose balance differs from the
    snapshot (new students count as previous 0), notify the family (topic `balance`) if the student
-   has a family. Then overwrite `_Snapshot`.
-3. **Queued announcements**: rows with blank `Sent` whose Date is blank or ≤ today: deliver to all
-   matching recipients (all channels allowed), set Sent = now. "All recipients" = all guardian emails
+   has a family. Then overwrite `_Snapshot`. If the Ledger has no usable rows but the snapshot has
+   non-zero balances (a renamed or emptied tab), refuse and leave `_Snapshot` alone.
+3. **Queued announcements**: rows with blank `Sent`, once settled, whose Date is blank or before today,
+   or is today and it is 8 AM New York time or later (`ANNOUNCE_FROM_HOUR`; a dated announcement
+   shouldn't buzz phones just after midnight): deliver to all matching recipients (all channels
+   allowed), set Sent = now. "All recipients" = all guardian emails
    of non-Inactive families **plus** any email in Preferences/Devices (people who signed in but have no family yet).
 
 `dailyTick()` runs once a day around 8 AM:
@@ -515,6 +585,29 @@ service-account key. The full reference is `workers/push/README.md`.
   and `CLOUDFLARE_ACCOUNT_ID`. Rotating keys and moving to another Cloudflare account:
   `docs/SETUP.md` §5 and `workers/push/README.md`.
 
+### 9.2 App Worker (workers/app, Cloudflare)
+
+The front door for `https://mytma.org`: `wrangler.toml` binds the custom domains `mytma.org` and
+`www.mytma.org`, serves `../../dist` as static assets with `run_worker_first = true` and
+`not_found_handling = "single-page-application"`, and sets `workers_dev = false` and
+`preview_urls = false` (no second origin). `src/index.ts` (`handle`):
+
+* `www.mytma.org` or any `*.workers.dev` host → 301 to `https://mytma.org` with the same path and query.
+* Every response gets HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy` and `Permissions-Policy`.
+* `Cache-Control: no-cache` for `/`, `*.html`, `sw.js`, `*.webmanifest` and `registerSW.js`, so a
+  release reaches phones promptly; `public, max-age=31536000, immutable` for a successful
+  `/assets/*` answer (Vite fingerprints those files).
+* A `/assets/*` request that the assets binding answers with HTML (its SPA fallback for a missing
+  file, status 200) becomes a plain-text **404 with `Cache-Control: no-store`**, so a page from an
+  older release asking for a replaced chunk never gets HTML cached for a year under a script's URL.
+* It reads and stores no family data.
+* Deployed by `.github/workflows/deploy-app-cloudflare.yml` (the Worker's tests and typecheck,
+  `npm run build:web`, `wrangler deploy --config workers/app/wrangler.toml` with the pinned Wrangler
+  from `workers/push`, then a check of `https://mytma.org`) on pushes that touch the app's code or
+  `workers/app/`, or by hand. Changing `VITE_API_URL` starts no workflow, so it must be run by hand
+  afterwards (`docs/SETUP.md` §7).
+
 ## 10. Browser app (src/web)
 
 Mobile-first React 19 app, hash routing, no UI framework. Plain CSS with design tokens.
@@ -669,7 +762,9 @@ export function PayPalCheckout(props: {
   and the browser won't subscribe with a new key while it exists) → `pushManager.subscribe({userVisibleOnly:
   true, applicationServerKey})` → `canonicalToken` (a push service outside the Worker's allowlist is
   unsubscribed and answered with the `unsupported` message) → `push.register` → save the record
-  `{token, key, at}` in localStorage `tma.push`. The previous token is unregistered (best effort) only
+  `{token, key, email, at}` in localStorage `tma.push` (`email` = the account that registered it, from
+  the session token). A record made by a different account doesn't count as on: that account sees
+  `ready`, not `enabled`. Records saved before `email` existed behave as before. The previous token is unregistered (best effort) only
   when its endpoint differs; with the same endpoint that would delete the row just registered.
 * `refreshPushRegistration(api, key)` runs from `App.tsx` once the bootstrap is loaded, again whenever
   `pushPublicKey` changes, and on the `tma:pushsubscriptionchange` window event. It acts only when the
@@ -678,11 +773,18 @@ export function PayPalCheckout(props: {
   replaced, each phone follows the new key the next time the app is opened), and re-registers when the
   token or key changed or the last registration is over 7 days old (keeps Last Seen fresh). If a new
   subscription can't be made, it clears the record so the screen offers *Turn on notifications* again.
-  It never turns push on by itself.
+  A record another account left behind (e.g. its session expired without signing out) is turned off:
+  the browser is unsubscribed and the record cleared, without registering the new account, so that
+  account's Devices row is dropped as gone at the next send. It never turns push on by itself.
 * Races: enable, disable and refresh each bump a counter. A refresh that was overtaken stops before
   changing anything, and takes its registration back out only if push was turned off meanwhile.
 * `disablePush`: `push.unregister` (an expired session still clears the device) → unsubscribe the
-  browser → clear the record. Sign-out calls it, waiting at most 4 s.
+  browser → clear the record. *Turn off notifications* throws on failure and keeps everything so the
+  parent can retry. Sign-out calls `disablePush(api, { signingOut: true })`, waiting at most 4 s: it
+  sends `push.unregister` at once (while the session token still exists) and, without waiting for it,
+  unsubscribes the browser and clears the record, ignoring any failure. So even offline, or when the
+  tab closes, the browser is unsubscribed; the push service then answers 404/410 and Apps Script deletes
+  the row.
 * Demo mode: permission (for real pop-ups) + register a fake token `demo-<uuid>`, recorded in
   `tma.demo.push`; notifications come from the demo PushSender. The demo never touches the browser's
   real push subscription, which belongs to the live app.
@@ -733,6 +835,12 @@ export function PayPalCheckout(props: {
   includes `workers/push/tsconfig.json`. It checks the RFC 8291 Appendix A vector
   byte for byte, decrypts real output with an independent receiver, verifies the VAPID JWT signature,
   and drives every endpoint against an in-memory KV with a mocked `fetch`.
+* `workers/app`: its own Vitest config (`workers/app/vitest.config.ts`), run by `npm test` and by the
+  app's deploy workflow; `npm run typecheck` includes `workers/app/tsconfig.json`. `index.test.ts`
+  drives `handle` with a fake assets binding (redirects, headers, caching, the SPA fallback for a
+  missing asset). `hosting.test.ts` checks the hosting setup itself: the Pages workflow builds only
+  the demo, the mytma.org workflow has no built-in backend, `wrangler.toml` has no workers.dev
+  address, and the docs point families and `APP_URL` at `https://mytma.org/`.
 * `src/demo/flow.test.ts`: the board walkthrough through the demo client (parent requests funds and pays,
   treasurer approves and verifies a household, announces, posts a credit → `tma:push` to the parent).
 * `src/web`: Vitest + Testing Library in jsdom (`// @vitest-environment jsdom` docblock).

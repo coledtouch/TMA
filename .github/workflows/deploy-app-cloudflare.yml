@@ -1,13 +1,20 @@
 # Builds the web app and publishes it at https://mytma.org on Cloudflare
-# (Worker "tma-app" in workers/app, serving dist/ as static assets).
+# (Worker "tma-app" in workers/app, serving dist/ as static assets). This is
+# the only place the real app is served (see docs/SETUP.md, step 7).
 #
 # Uses the same repository secrets as the push Worker:
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
-# and these optional repository variables (Settings → Secrets and variables →
-# Actions → Variables). They are public: they end up in the app's JavaScript.
-#   VITE_API_URL   Apps Script web app URL (ends in /exec). When it is not set,
-#                  mytma.org uses TMA's test spreadsheet backend below; the demo
-#                  stays available at https://mytma.org/?demo.
+# (the mytma.org zone must be in that same Cloudflare account) and this
+# repository variable (Settings → Secrets and variables → Actions → Variables).
+# It is public: it ends up in the app's JavaScript.
+#   VITE_API_URL   Apps Script web app URL (ends in /exec) of the spreadsheet
+#                  the app works on. While it is not set, mytma.org works on
+#                  TMA's test spreadsheet (TEST_API_URL below); set it to the
+#                  real spreadsheet's URL to go live. Either way
+#                  https://mytma.org/?demo is the demo link for the board.
+# Changing the variable starts no workflow: run this one by hand afterwards
+# (Actions → Deploy app to mytma.org (Cloudflare) → Run workflow). The run's
+# summary shows which backend the app was built with.
 # Without the secrets the workflow still tests and builds, then skips the deploy.
 name: Deploy app to mytma.org (Cloudflare)
 
@@ -39,6 +46,10 @@ jobs:
     name: Build and deploy
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # TMA's test spreadsheet ("TMA App - Test Data"), used only while the
+      # VITE_API_URL variable is unset. Going live = setting the variable.
+      TEST_API_URL: https://script.google.com/macros/s/AKfycbxwPf9fdNK8kNu9objZgwTcANg-11Qgr2AiuIPzSxXXSQAe98T1EXPBQ2pU5sENTeYAFA/exec
     steps:
       - name: Check out the code
         uses: actions/checkout@v7
@@ -76,8 +87,19 @@ jobs:
       - name: Build the web app
         run: npm run build:web
         env:
-          # Test spreadsheet backend ("TMA App - Test Data"); override with the variable.
-          VITE_API_URL: ${{ vars.VITE_API_URL || 'https://script.google.com/macros/s/AKfycbxwPf9fdNK8kNu9objZgwTcANg-11Qgr2AiuIPzSxXXSQAe98T1EXPBQ2pU5sENTeYAFA/exec' }}
+          VITE_API_URL: ${{ vars.VITE_API_URL || env.TEST_API_URL }}
+
+      - name: Report the backend
+        env:
+          VARIABLE: ${{ vars.VITE_API_URL }}
+        run: |
+          if [ -n "$VARIABLE" ]; then
+            echo "Backend (VITE_API_URL): $VARIABLE" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Backend::The app works on the spreadsheet behind $VARIABLE"
+          else
+            echo "Backend: TMA's TEST spreadsheet ($TEST_API_URL), because the VITE_API_URL variable is not set." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Test spreadsheet::VITE_API_URL is not set, so mytma.org works on TMA's test spreadsheet. To go live, set the variable to the real spreadsheet's /exec URL and run this workflow again."
+          fi
 
       # Same pinned Wrangler as the push Worker (workers/push/package-lock.json).
       - name: Install Wrangler

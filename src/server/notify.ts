@@ -8,6 +8,7 @@
 import { TABLES } from '../shared/schema';
 import type { DeliveryCounts, NotificationChannel, NotificationTopic, PushMessage } from '../shared/types';
 import type { Ctx } from './context';
+import { inWriteLock } from './context';
 import type { FamilyRec } from './data';
 import { renderEmail } from './email';
 import type { Notice } from './messages';
@@ -61,11 +62,28 @@ const DEVICE_COLUMNS = TABLES.Devices.headers;
  */
 export const SIGN_IN_EMAIL_RESERVE = 20;
 
-/** Deliver one notice to a list of recipient emails. */
-export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice, opts: DeliverOptions = {}): DeliveryCounts {
-  const counts = zeroCounts();
+/**
+ * Texts cost TMA money per message, and anyone can sign in and save a phone number, so SMS goes only
+ * to guardians of households TMA has verified (Active) and to admins.
+ */
+function mayText(ctx: Ctx, email: string): boolean {
+  return ctx.m.settings().adminEmails.includes(email) || ctx.m.familyForEmail(email)?.status === 'Active';
+}
+
+/** One notice, planned for its recipients (reads only) and sent later (network only). */
+export interface DeliveryJob {
+  notice: Notice;
+  tokens: string[];
+  mailTo: string[];
+  smsTo: string[];
+  /** What was delivered: the object deliver() returned, filled in when the job is sent. */
+  counts: DeliveryCounts;
+}
+
+/** Who gets `notice` on which channel, from each recipient's prefs. Reads the sheet; sends nothing. */
+function planDelivery(ctx: Ctx, recipients: readonly string[], notice: Notice, opts: DeliverOptions): DeliveryJob | null {
   const emails = unique(recipients.map(normEmail).filter(isEmail));
-  if (emails.length === 0) return counts;
+  if (emails.length === 0) return null;
 
   const settings = ctx.m.settings();
   const allowed = { push: true, email: true, sms: true, ...opts.channels };
@@ -86,13 +104,63 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
       for (const d of ctx.m.devicesFor(email)) tokens.push(d.token);
     }
     if (emailOn && (opts.ignorePrefs || prefs.channels.email)) mailTo.push(email);
-    if (smsOn && prefs.smsPhone && (opts.ignorePrefs || prefs.channels.sms)) smsTo.push(prefs.smsPhone);
+    if (smsOn && prefs.smsPhone && (opts.ignorePrefs || prefs.channels.sms) && mayText(ctx, email)) smsTo.push(prefs.smsPhone);
   }
+  return { notice, tokens: unique(tokens), mailTo, smsTo: unique(smsTo), counts: zeroCounts() };
+}
 
-  if (tokens.length > 0) counts.push = sendPush(ctx, unique(tokens), notice);
+/**
+ * Deliver one notice to a list of recipient emails. When the caller holds the write lock
+ * (ctx.deliveries is set, see app.ts), the notice is only planned here and sent by
+ * flushDeliveries() after the lock is released, so slow push/email/SMS calls never keep other
+ * writes waiting. The returned counts are filled in once it is sent.
+ */
+export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice, opts: DeliverOptions = {}): DeliveryCounts {
+  const job = planDelivery(ctx, recipients, notice, opts);
+  if (!job) return zeroCounts();
+  if (ctx.deliveries) {
+    ctx.deliveries.push(job);
+    return job.counts;
+  }
+  removeDevices(ctx, sendJob(ctx, job));
+  return job.counts;
+}
+
+/**
+ * Send everything deliver() queued (call it after releasing the write lock). Then, briefly under
+ * the lock again, drop the device tokens the push service rejected (found by token, as rows may
+ * have changed meanwhile) and write the Log rows. Never throws. Returns the totals.
+ */
+export function flushDeliveries(ctx: Ctx): DeliveryCounts {
+  const jobs = ctx.deliveries ?? [];
+  ctx.deliveries = null;
+  const total = zeroCounts();
+  if (jobs.length === 0) return total;
+  const invalid = new Set<string>();
+  for (const job of jobs) {
+    try {
+      for (const token of sendJob(ctx, job)) invalid.add(token);
+    } catch (err) {
+      ctx.s.logger.error(`Could not send "${job.notice.title}"`, errorMessage(err));
+    }
+    addCounts(total, job.counts);
+  }
+  try {
+    inWriteLock(ctx, () => removeDevices(ctx, invalid));
+  } catch (err) {
+    ctx.s.logger.error('Could not record notification results', errorMessage(err));
+  }
+  return total;
+}
+
+/** Push, email and SMS for one job (network only; never throws). Returns the push tokens reported invalid. */
+function sendJob(ctx: Ctx, job: DeliveryJob): string[] {
+  const { notice, counts } = job;
+  const settings = ctx.m.settings();
+  const invalid = job.tokens.length > 0 ? sendPush(ctx, job.tokens, notice, counts) : [];
 
   let quotaSkipped = 0;
-  if (mailTo.length > 0) {
+  if (job.mailTo.length > 0) {
     // One quota read per batch (each read is a service call in Apps Script).
     let quota = safely(ctx, 'mailer.remainingQuota', () => ctx.s.mailer.remainingQuota(), 0) - SIGN_IN_EMAIL_RESERVE;
     const { html, text } = renderEmail({
@@ -106,19 +174,19 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
     const subject = oneLine(notice.title, 150);
     // Up to `quota` recipients at a time; a failed email doesn't use up quota, so the next round may take more.
     let next = 0;
-    while (next < mailTo.length && quota > 0) {
-      const batch = mailTo.slice(next, next + quota);
+    while (next < job.mailTo.length && quota > 0) {
+      const batch = job.mailTo.slice(next, next + quota);
       next += batch.length;
       const sent = sendEmails(ctx, batch, { subject, html, text });
       counts.email += sent;
       quota -= sent;
     }
-    quotaSkipped = mailTo.length - next;
+    quotaSkipped = job.mailTo.length - next;
   }
 
-  if (smsTo.length > 0) {
+  if (job.smsTo.length > 0) {
     const message = oneLine(`TMA: ${notice.title} – ${notice.pushBody ?? notice.body}`, 320);
-    for (const phone of unique(smsTo)) {
+    for (const phone of job.smsTo) {
       const sent = safely(
         ctx,
         'sms.send',
@@ -137,7 +205,7 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
       ? ` (${quotaSkipped} email skipped: daily quota used up; the last ${SIGN_IN_EMAIL_RESERVE} are kept for sign-in codes)`
       : '';
   ctx.log('notify', `${notice.topic}: ${notice.title} → push ${counts.push}, email ${counts.email}, sms ${counts.sms}${skipped}`);
-  return counts;
+  return invalid;
 }
 
 /**
@@ -176,8 +244,8 @@ function sendEmails(ctx: Ctx, recipients: string[], content: Omit<MailMessage, '
   return sent;
 }
 
-/** Send one push batch; remove tokens the push service reports as invalid. Returns delivered count. */
-function sendPush(ctx: Ctx, tokens: string[], notice: Notice): number {
+/** Send one push batch; count deliveries into `counts`. Returns the tokens the push service reported invalid. */
+function sendPush(ctx: Ctx, tokens: string[], notice: Notice, counts: DeliveryCounts): string[] {
   const message: PushMessage = {
     title: oneLine(notice.title, 120),
     body: oneLine(notice.pushBody ?? notice.body, 240),
@@ -186,20 +254,23 @@ function sendPush(ctx: Ctx, tokens: string[], notice: Notice): number {
   };
   if (notice.tag) message.tag = notice.tag;
   const results = safely<PushResult[]>(ctx, 'push.send', () => ctx.s.push.send(tokens, message), []);
-  let ok = 0;
-  const invalid = new Set<string>();
+  const invalid: string[] = [];
   results.forEach((result, i) => {
-    if (result === 'ok') ok++;
-    else if (result === 'invalid' && i < tokens.length) invalid.add(tokens[i]);
+    if (result === 'ok') counts.push++;
+    else if (result === 'invalid' && i < tokens.length) invalid.push(tokens[i]);
   });
-  if (invalid.size > 0) {
-    for (const device of ctx.m.devices()) {
-      if (!invalid.has(device.token)) continue;
-      safely(ctx, 'remove invalid device', () => ctx.db.clear('Devices', device.row, DEVICE_COLUMNS), undefined);
-    }
-    ctx.log('push', `Removed ${invalid.size} expired device token(s)`);
+  return invalid;
+}
+
+/** Blank out the Devices rows holding tokens the push service rejected (expired or unsubscribed). */
+function removeDevices(ctx: Ctx, invalid: Iterable<string>): void {
+  const dead = new Set(invalid);
+  if (dead.size === 0) return;
+  for (const device of ctx.m.devices()) {
+    if (!dead.has(device.token)) continue;
+    safely(ctx, 'remove invalid device', () => ctx.db.clear('Devices', device.row, DEVICE_COLUMNS), undefined);
   }
-  return ok;
+  ctx.log('push', `Removed ${dead.size} expired device token(s)`);
 }
 
 // ---------------------------------------------------------------------------

@@ -350,9 +350,10 @@ login && npx wrangler deploy`.
 
 Deploying new code keeps the KV contents and the `EMAIL_KEY` secret, so the
 link with Apps Script, the key pair and email survive every deploy. To move the Worker to another Cloudflare
-account (new KV namespace id in `wrangler.toml`, new repository secrets,
+account (together with the app's Worker `tma-app` and the `mytma.org` domain:
+new repository secrets first, then the new KV namespace id in `wrangler.toml`,
 `PUSH_RELAY_URL`, then Set up), follow
-[docs/SETUP.md, step 5F](../../docs/SETUP.md#f-moving-the-worker-to-another-cloudflare-account).
+[docs/SETUP.md, step 5F](../../docs/SETUP.md#f-moving-to-another-cloudflare-account).
 
 ## Plan and limits
 

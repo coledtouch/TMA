@@ -30,6 +30,11 @@ import { hmacSha256Hex, sha256Hex, toHex } from './sha256';
 
 export interface MemoryDb {
   tables: Partial<Record<TableName, RowData[]>>;
+  /**
+   * Tests only: the canonical headers a tab "has", to act out a header the treasurer renamed
+   * (values under other headers are then not read) or, with null, a missing tab. Absent = every header.
+   */
+  headers?: Partial<Record<TableName, string[] | null>>;
 }
 
 export interface Outbox {
@@ -133,7 +138,19 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
     return rows;
   };
 
+  /** Headers a tab has when a test set them; writing a known column adds it back, like the sheet adapter. */
+  const visible = (table: TableName): string[] | null | undefined => db.headers?.[table];
+  const addHeaders = (table: TableName, rows: RowData[]) => {
+    const headers = visible(table);
+    if (!headers) return;
+    for (const row of rows) for (const key of Object.keys(row)) if (!headers.includes(key)) headers.push(key);
+  };
+
   return {
+    columns(table) {
+      const headers = visible(table);
+      return headers === undefined ? TABLES[table].headers.slice() : headers === null ? null : headers.slice();
+    },
     ensureTable(table) {
       if (db.tables[table]) return { created: false, addedColumns: [] };
       db.tables[table] = [];
@@ -141,10 +158,13 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
       return { created: true, addedColumns: [] };
     },
     read(table) {
+      if (visible(table) === null) return [];
+      const headers = visible(table);
       const rows = db.tables[table] ?? [];
       const out: StoredRow[] = [];
       rows.forEach((row, i) => {
         const data = clean(table, row);
+        if (headers) for (const key of Object.keys(data)) if (!headers.includes(key)) delete data[key];
         if (!isBlankRow(data)) out.push({ rowNumber: i + 2, data });
       });
       return out;
@@ -152,7 +172,9 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
     append(table, rows) {
       if (rows.length === 0) return;
       const target = tableRows(table);
-      for (const row of rows) target.push(clean(table, row));
+      const cleaned = rows.map((row) => clean(table, row));
+      for (const row of cleaned) target.push(row);
+      addHeaders(table, cleaned);
       changed();
     },
     update(table, rowNumber, patch) {
@@ -161,7 +183,9 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
       if (!rows || !Number.isInteger(rowNumber) || index < 0 || index >= rows.length) {
         throw new Error(`Row ${rowNumber} of ${table} does not exist`);
       }
-      rows[index] = { ...clean(table, rows[index]), ...clean(table, patch) };
+      const cleaned = clean(table, patch);
+      rows[index] = { ...clean(table, rows[index]), ...cleaned };
+      addHeaders(table, [cleaned]);
       changed();
     },
     overwrite(table, rows) {

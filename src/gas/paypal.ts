@@ -7,6 +7,7 @@
  * Properties and is never logged or returned.
  */
 import type { Cache, CaptureResult, CreateOrderInput, Logger, PaymentGateway } from '../server/services';
+import { parsePaypalEnv } from '../server/settings';
 import { clamp, clip, isRecord, parseJson, pick, pickString } from './util';
 
 export const PAYPAL_API = {
@@ -24,7 +25,7 @@ const MAX_ORDER_CENTS = 10000000; // $100,000 sanity cap
 export interface PayPalConfig {
   clientId: string;
   secret: string | null;
-  /** Settings PAYPAL_ENV: "live" (or "production") uses real money; anything else is the sandbox. */
+  /** Settings PAYPAL_ENV: "live" (or "production"/"prod") uses real money; anything else is the sandbox. */
   env: string;
 }
 
@@ -47,8 +48,9 @@ interface HttpResult {
   body: unknown;
 }
 
+/** The same parser the core uses for PublicSettings.paypalEnv, so the browser SDK and this gateway agree. */
 export function paypalEnv(value: string): 'live' | 'sandbox' {
-  return /^(live|production)$/i.test(value.trim()) ? 'live' : 'sandbox';
+  return parsePaypalEnv(value);
 }
 
 /** "251.23" for 25123 cents. */
@@ -128,6 +130,23 @@ export function mapCaptureStatus(status: unknown): CaptureResult['status'] {
 
 function firstIssue(body: unknown): string | undefined {
   return pickString(body, 'details', 0, 'issue') ?? pickString(body, 'name') ?? pickString(body, 'error');
+}
+
+function hasCapture(body: unknown): boolean {
+  return isRecord(pick(body, 'purchase_units', 0, 'payments', 'captures', 0));
+}
+
+/**
+ * A capture reply that proves PayPal did not take the money: a 4xx business error. Timeouts (408),
+ * conflicts with a request still in progress (409), throttling (429), 5xx and odd 2xx/3xx replies
+ * don't prove anything.
+ */
+function definiteFailure(code: number): boolean {
+  return code >= 400 && code < 500 && code !== 408 && code !== 409 && code !== 425 && code !== 429;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function validateOrder(input: CreateOrderInput): void {
@@ -217,6 +236,11 @@ export function createPayPalGateway(deps: PayPalDeps): PaymentGateway {
       throw new Error(`PayPal could not create the order (${firstIssue(body) ?? `HTTP ${code}`}).`);
     },
 
+    /**
+     * Capture once; when the outcome is ambiguous (the capture may have happened), ask again with the
+     * same PayPal-Request-Id, which PayPal answers with the original result instead of charging twice.
+     * Still no definite answer -> UNKNOWN, never FAILED: "not charged" must only be said when true.
+     */
     captureOrder(orderId: string, requestId: string): CaptureResult {
       if (typeof orderId !== 'string' || !ORDER_ID.test(orderId)) {
         return { status: 'FAILED', message: 'Invalid PayPal order id.' };
@@ -224,28 +248,49 @@ export function createPayPalGateway(deps: PayPalDeps): PaymentGateway {
       const r = resolve();
       if (!r) return { status: 'FAILED', message: 'PayPal is not configured.' };
       try {
-        const path = `/v2/checkout/orders/${orderId}`;
-        const { code, body } = call(r, 'post', `${path}/capture`, {}, {
-          'PayPal-Request-Id': clip(requestId, 108),
-          Prefer: 'return=representation',
-        });
-        if (code === 200 || code === 201) return parseCapture(body);
+        accessToken(r); // nothing has been sent to the capture endpoint yet, so a failure here is definite
+      } catch (error) {
+        logger.error('PayPal capture not attempted', { message: errorText(error) });
+        return { status: 'FAILED', message: 'Could not reach PayPal. Please try again.' };
+      }
+      const path = `/v2/checkout/orders/${orderId}`;
 
-        const issue = firstIssue(body);
-        if (code === 422 && issue === 'ORDER_ALREADY_CAPTURED') {
-          // Captured by an earlier attempt: read the order to recover the capture.
+      /** The order's capture, read back from PayPal; null when that fails too. */
+      const readOrder = (): CaptureResult | null => {
+        try {
           const order = call(r, 'get', path);
-          if (order.code === 200) return parseCapture(order.body);
+          if (order.code === 200 && hasCapture(order.body)) return parseCapture(order.body);
+          logger.error('PayPal order lookup failed', { status: order.code, issue: firstIssue(order.body) });
+        } catch (error) {
+          logger.error('PayPal order lookup error', { message: errorText(error) });
         }
+        return null;
+      };
+
+      /** One capture call; null = no definite answer. */
+      const capture = (): CaptureResult | null => {
+        let res: HttpResult;
+        try {
+          res = call(r, 'post', `${path}/capture`, {}, { 'PayPal-Request-Id': clip(requestId, 108), Prefer: 'return=representation' });
+        } catch (error) {
+          // A timeout or dropped connection after PayPal received the request may still have charged.
+          logger.error('PayPal capture error', { message: errorText(error) });
+          return null;
+        }
+        const { code, body } = res;
+        if ((code === 200 || code === 201) && hasCapture(body)) return parseCapture(body);
+        const issue = firstIssue(body);
+        if (code === 422 && issue === 'ORDER_ALREADY_CAPTURED') return readOrder(); // captured by an earlier attempt
         logger.error('PayPal capture failed', { status: code, issue, debugId: pickString(body, 'debug_id') });
+        if (!definiteFailure(code)) return null;
         if (issue === 'INSTRUMENT_DECLINED') {
           return { status: 'DECLINED', message: 'The payment method was declined. Please try another card or account.' };
         }
         return { status: 'FAILED', message: `PayPal could not complete the payment (${issue ?? `HTTP ${code}`}).` };
-      } catch (error) {
-        logger.error('PayPal capture error', { message: error instanceof Error ? error.message : String(error) });
-        return { status: 'FAILED', message: 'Could not reach PayPal. Please try again.' };
-      }
+      };
+
+      const result = capture() ?? capture();
+      return result ?? { status: 'UNKNOWN', message: 'PayPal did not confirm whether the payment went through.' };
     },
   };
 }

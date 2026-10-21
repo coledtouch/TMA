@@ -36,6 +36,8 @@ const WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})
 export interface SheetStore extends Store {
   /** Forget memoized reads (all tabs, or one). Called after taking the script lock. */
   invalidate(table?: TableName): void;
+  /** Canonical headers the tab has (from its header row), or null when the tab is missing. */
+  columns(table: TableName): readonly string[] | null;
 }
 
 export interface SheetStoreOptions {
@@ -230,6 +232,11 @@ class SpreadsheetStore implements SheetStore {
     const missing = layout ? def.headers.filter((h) => !layout.columns.has(h)) : [];
     if (layout && missing.length > 0) this.addColumns(layout, missing);
     return { created: false, addedColumns: missing };
+  }
+
+  columns(table: TableName): readonly string[] | null {
+    const layout = this.layout(table);
+    return layout ? [...layout.columns.keys()] : null;
   }
 
   read(table: TableName): StoredRow[] {

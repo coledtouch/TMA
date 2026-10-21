@@ -70,6 +70,21 @@ export class Db {
     this.bump(table);
   }
 
+  /**
+   * Read the tab again from the sheet, dropping what this request (and the store) memoized: the
+   * treasurer can insert, delete or sort rows at any time, and the script lock doesn't stop that.
+   */
+  refresh(table: TableName): void {
+    this.store.invalidate?.(table);
+    this.cache.delete(table);
+    this.bump(table);
+  }
+
+  /** Canonical headers the tab has; null = the tab is missing; undefined = the store can't tell. */
+  columns(table: TableName): readonly string[] | null | undefined {
+    return this.store.columns ? this.store.columns(table) : undefined;
+  }
+
   ensureTable(table: TableName): { created: boolean; addedColumns: string[] } {
     const result = this.store.ensureTable(table);
     this.cache.delete(table);

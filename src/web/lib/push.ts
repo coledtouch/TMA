@@ -14,10 +14,12 @@
  * browser's real push subscription, which belongs to the live app.
  *
  * What this device registered is remembered per mode in localStorage
- * (storageKeys(mode).push): {token, key?, at}.
+ * (storageKeys(mode).push): {token, key?, email?, at}. A record another
+ * account made doesn't count as "on" for whoever is signed in now.
  */
-import { errorMessage, isApiError, type ApiClient } from '../api/client';
+import { errorMessage, isApiError, readStoredToken, type ApiClient } from '../api/client';
 import { currentAppMode } from './mode';
+import { sessionEmail } from './session';
 import { readJson, removeItem, storageKeys, writeJson } from './storage';
 
 export type PushSupport = 'ready' | 'enabled' | 'needs-install' | 'blocked' | 'unsupported' | 'not-configured';
@@ -203,6 +205,8 @@ interface PushRecord {
   token: string;
   /** Live: the VAPID public key the subscription was made with. */
   key?: string;
+  /** The account it was registered for (lower case), when known. */
+  email?: string;
   /** When the token was last sent to TMA (ISO time). */
   at: string;
 }
@@ -216,6 +220,7 @@ function readRecord(mode: PushMode): PushRecord | null {
   return {
     token,
     ...(typeof raw.key === 'string' && raw.key ? { key: raw.key } : {}),
+    ...(typeof raw.email === 'string' && raw.email ? { email: raw.email } : {}),
     at: typeof raw.at === 'string' ? raw.at : '',
   };
 }
@@ -228,8 +233,8 @@ function safeParse(text: string): unknown {
   }
 }
 
-function saveRecord(mode: PushMode, token: string, key?: string): void {
-  const record: PushRecord = { token, ...(key ? { key } : {}), at: new Date().toISOString() };
+function saveRecord(mode: PushMode, token: string, key: string | undefined, email: string | null): void {
+  const record: PushRecord = { token, ...(key ? { key } : {}), ...(email ? { email } : {}), at: new Date().toISOString() };
   writeJson(storageKeys(mode).push, record);
 }
 
@@ -257,6 +262,20 @@ function differentDevice(a: string, b: string): boolean {
   return ea === null || ea !== endpoint(b);
 }
 
+/** Who is signed in through `api` (from the session token), or null when unknown. */
+function signedInEmail(api: ApiClient): string | null {
+  return sessionEmail(api.getToken(), api.mode);
+}
+
+/**
+ * Did another account register this device? That happens when its sign-out
+ * couldn't reach TMA or its session expired. Unknown on either side (records
+ * from before the email was kept) counts as no.
+ */
+function registeredByOther(record: PushRecord, email: string | null): boolean {
+  return record.email !== undefined && email !== null && record.email !== email;
+}
+
 function registeredLongAgo(record: PushRecord): boolean {
   const at = Date.parse(record.at);
   return Number.isNaN(at) || Date.now() - at > REREGISTER_AFTER_MS;
@@ -278,10 +297,16 @@ let generation = 0;
 // Support state
 // ---------------------------------------------------------------------------
 
+/** This device's record, unless another account made it (then push isn't on for whoever is signed in now). */
+function ownRecord(mode: PushMode): PushRecord | null {
+  const record = readRecord(mode);
+  return record && !registeredByOther(record, sessionEmail(readStoredToken(mode), mode)) ? record : null;
+}
+
 function supportNow(mode: PushMode, publicKey: string | undefined): PushSupport {
   if (mode === 'demo') {
     // Demo notifications always reach the in-app banner, whatever the browser.
-    return readRecord('demo') ? 'enabled' : 'ready';
+    return ownRecord('demo') ? 'enabled' : 'ready';
   }
   if (!applicationServerKey(publicKey)) return 'not-configured';
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return 'unsupported';
@@ -291,7 +316,7 @@ function supportNow(mode: PushMode, publicKey: string | undefined): PushSupport 
     return 'unsupported';
   }
   if (Notification.permission === 'denied') return 'blocked';
-  if (Notification.permission === 'granted' && readRecord('live')) return 'enabled';
+  if (Notification.permission === 'granted' && ownRecord('live')) return 'enabled';
   return 'ready';
 }
 
@@ -372,7 +397,7 @@ function userAgent(): string {
 async function registerToken(api: ApiClient, mode: PushMode, token: string, key?: string): Promise<void> {
   const previous = readRecord(mode);
   await api.call('push.register', { token, userAgent: userAgent() });
-  saveRecord(mode, token, key);
+  saveRecord(mode, token, key, signedInEmail(api));
   if (previous && differentDevice(previous.token, token)) {
     // The server only removes it if it belongs to the signed-in parent.
     await api.call('push.unregister', { token: previous.token }).catch(() => undefined);
@@ -464,13 +489,23 @@ async function unsubscribeBrowser(): Promise<void> {
   }
 }
 
+export interface DisablePushOptions {
+  /**
+   * Signing out: the parent can't retry once signed out, so the browser is
+   * unsubscribed and the record forgotten even when TMA can't be reached (or
+   * is slow). The push service then answers "gone" and TMA drops the row on
+   * its next send, so the household's notifications stop reaching this device.
+   */
+  signingOut?: boolean;
+}
+
 /**
  * Turn off notifications on this device: remove the token from TMA's list and
  * unsubscribe the browser. Throws ApiError when TMA can't be reached (nothing
- * changes then, so the parent can retry). An expired session still clears the
- * device.
+ * changes then, so the parent can retry), except when signing out. An expired
+ * session still clears the device.
  */
-export async function disablePush(api: ApiClient): Promise<void> {
+export async function disablePush(api: ApiClient, options: DisablePushOptions = {}): Promise<void> {
   const mode: PushMode = api.mode;
   const record = readRecord(mode);
   if (!record) {
@@ -478,13 +513,21 @@ export async function disablePush(api: ApiClient): Promise<void> {
     return;
   }
   generation++;
-  if (api.getToken()) {
-    try {
-      await api.call('push.unregister', { token: record.token });
-    } catch (err) {
-      if (!isApiError(err, 'UNAUTHORIZED')) throw err;
-    }
+  // Sent now, while the session token is still there.
+  const unregistered = api.getToken()
+    ? api.call('push.unregister', { token: record.token }).then(
+        () => undefined,
+        (err: unknown) => {
+          if (!isApiError(err, 'UNAUTHORIZED')) throw err;
+        },
+      )
+    : Promise.resolve();
+  if (options.signingOut) {
+    clearRecord(mode);
+    await Promise.all([unregistered.catch(() => undefined), mode === 'live' ? unsubscribeBrowser() : undefined]);
+    return;
   }
+  await unregistered;
   if (mode === 'live') await unsubscribeBrowser();
   clearRecord(mode);
 }
@@ -496,10 +539,23 @@ export async function disablePush(api: ApiClient): Promise<void> {
  * here and permission is still granted: gets the current subscription,
  * re-subscribes when it is missing or was made with another key, and
  * re-registers when the subscription changed (or once a week). Never turns
- * push on by itself. Best effort; never throws.
+ * push on by itself: a registration another account left here is turned off.
+ * Best effort; never throws.
  */
 export async function refreshPushRegistration(api: ApiClient, publicKey?: string): Promise<void> {
-  if (api.mode !== 'live' || !api.getToken() || !publicKey) return;
+  if (api.mode !== 'live' || !api.getToken()) return;
+  const email = signedInEmail(api);
+  const stale = readRecord('live');
+  if (stale && registeredByOther(stale, email)) {
+    // Someone else turned push on here and it never got turned off: stop their household's
+    // notifications reaching whoever uses the device now (TMA drops their row once the push
+    // service reports the subscription gone). This person can turn it on for themselves.
+    generation++;
+    clearRecord('live');
+    await unsubscribeBrowser();
+    return;
+  }
+  if (!publicKey) return;
   const key = applicationServerKey(publicKey);
   if (!key || supportNow('live', publicKey) !== 'enabled') return;
   const gen = ++generation;
@@ -529,7 +585,7 @@ export async function refreshPushRegistration(api: ApiClient, publicKey?: string
       if (!readRecord('live')) await api.call('push.unregister', { token }).catch(() => undefined);
       return;
     }
-    saveRecord('live', token, trimmedKey);
+    saveRecord('live', token, trimmedKey, email);
     if (differentDevice(record.token, token)) {
       await api.call('push.unregister', { token: record.token }).catch(() => undefined);
     }

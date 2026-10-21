@@ -116,6 +116,24 @@ describe('SheetStore.read', () => {
   });
 });
 
+describe('SheetStore.columns', () => {
+  it('lists the canonical columns a tab has (aliases included), and null for a missing tab', () => {
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Ledger', [['Student ID', 'Amount (USD)', 'Amount ($)', 'Notes'], ['S1', 5, 5, '']]));
+    const s = store();
+    expect(s.columns('Ledger')).toEqual(['StudentID', 'Amount']); // "Amount ($)" is an alias; "Amount (USD)" isn't
+    expect(s.columns('Events')).toBeNull();
+  });
+
+  it('sees a header renamed in the Sheets UI after invalidate(table)', () => {
+    const sheet = gas.spreadsheet.addSheet(FakeSheet.withRows('Announcements', [['Title', 'Sent'], ['Hello', '']]));
+    const s = store();
+    expect(s.columns('Announcements')).toEqual(['Title', 'Sent']);
+    sheet.write(1, 2, 'Sent At');
+    s.invalidate('Announcements');
+    expect(s.columns('Announcements')).toEqual(['Title']);
+  });
+});
+
 describe('SheetStore.ensureTable', () => {
   it('creates a missing tab with a bold, frozen header row and the header note', () => {
     const result = store().ensureTable('Families');

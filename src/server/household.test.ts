@@ -95,6 +95,46 @@ describe('household.save: sign-up', () => {
     expect(h.rows('Families').pop()).toMatchObject({ Email: NEW_PARENT, 'Parent 2 Email': 'alex.rivera@example.org' });
   });
 
+  it('never reuses a StudentID that other tabs still refer to', () => {
+    const h = harness();
+    // S0007's Students row is gone (deleted on request, or not imported yet), but its money rows remain.
+    h.services.db.tables.Ledger?.push({ Date: '2026-09-01', StudentID: 'S0007', Type: 'Credit', Description: 'Carried over', Amount: 450 });
+    h.services.db.tables.Enrollments?.push({ StudentID: 's0009', ActivityID: 'FL27', Status: 'Going' });
+    h.services.db.tables.Payments?.push({ Date: '2026-09-01', StudentID: 'S0010', ActivityID: 'FL27', Amount: 100, Method: 'Check' });
+    h.services.db.tables._Snapshot = [{ StudentID: 'S0011', Balance: 12, Updated: '2026-10-01' }];
+    h.services.db.tables.Redemptions?.push({ RequestID: 'R-00000012', StudentID: 'S0012', ActivityID: 'FL27', Amount: 5, Status: 'Denied' });
+
+    const token = h.signIn(NEW_PARENT);
+    const b = h.ok('household.save', signupInput({ students: [{ firstName: 'Any', lastName: 'Name', grade: '10', school: 'High School', ensembles: [] }] }), token);
+    expect(b.students.map((s) => s.student.id)).toEqual(['S0013']);
+
+    // After a plain approval the new student starts from nothing.
+    h.ok('admin.reviewHousehold', { familyId: b.me.familyId, decision: 'approve', links: [] }, h.signIn(TREASURER));
+    const after = h.ok('me.bootstrap', {}, token);
+    expect(after.students[0]).toMatchObject({ verified: true, balanceCents: 0, activities: [] });
+    expect(after.ledger).toEqual([]);
+  });
+
+  it('never reuses a FamilyID that Students or Redemptions still refer to', () => {
+    const h = harness();
+    // F0004's Families row was deleted, but a treasurer student still points at it.
+    h.services.db.tables.Students?.push({
+      StudentID: 'S0100',
+      FamilyID: 'F0004',
+      'First Name': 'Riley',
+      'Last Name': 'Doe',
+      Grade: 10,
+      School: 'High School',
+      Status: 'Active',
+    });
+    h.services.db.tables.Ledger?.push({ Date: '2026-09-01', StudentID: 'S0100', Type: 'Credit', Description: 'Sale', Amount: 300 });
+    h.services.db.tables.Redemptions?.push({ RequestID: 'R-00000005', FamilyID: 'F0005', StudentID: 'S0100', ActivityID: 'FL27', Amount: 5, Status: 'Denied' });
+
+    const b = h.ok('household.save', signupInput({ students: [] }), h.signIn(NEW_PARENT));
+    expect(b.me.familyId).toBe('F0006');
+    expect(b.students).toEqual([]);
+  });
+
   it('allows a household with no students yet', () => {
     const h = harness();
     const b = h.ok('household.save', { guardians: [{ name: 'Sam Rivera', email: NEW_PARENT }], students: [] }, h.signIn(NEW_PARENT));
@@ -138,6 +178,34 @@ describe('household.save: existing household', () => {
       ['Nora', 'Pending'],
     ]);
     expect(h.services.outbox.mail.find((m) => m.to === TREASURER)?.subject).toBe('New student to review');
+  });
+
+  it("keeps groups the treasurer typed that aren't on the Settings list when a parent saves", () => {
+    const h = harness();
+    const avery = h.services.db.tables.Students?.find((r) => r.StudentID === 'S0001');
+    if (!avery) throw new Error('missing S0001');
+    avery.Ensembles = 'Band, Pit Orchestra';
+    const token = h.signIn(PARENT);
+    // The app has no checkbox for "Pit Orchestra", so the form sends only the groups on the list.
+    h.ok(
+      'household.save',
+      {
+        guardians: [{ name: 'Jordan Thompson', email: PARENT }],
+        students: [{ id: 'S0001', firstName: 'Avery', lastName: 'Thompson', grade: '11', school: 'High School', ensembles: ['Band', 'Jazz Band'] }],
+      },
+      token,
+    );
+    expect(h.rows('Students').find((r) => r.StudentID === 'S0001')?.Ensembles).toBe('Band, Jazz Band, Pit Orchestra');
+    // Groups on the list are still the parent's to change.
+    h.ok(
+      'household.save',
+      {
+        guardians: [{ name: 'Jordan Thompson', email: PARENT }],
+        students: [{ id: 'S0001', firstName: 'Avery', lastName: 'Thompson', grade: '11', school: 'High School', ensembles: [] }],
+      },
+      token,
+    );
+    expect(h.rows('Students').find((r) => r.StudentID === 'S0001')?.Ensembles).toBe('Pit Orchestra');
   });
 
   it('updates names of Pending students', () => {
@@ -189,6 +257,44 @@ describe('household.save: existing household', () => {
     expect(
       h.err('household.save', { guardians: [{ name: 'Jordan Thompson', email: PARENT }, { name: 'Priya', email: NGUYEN }] }, jordan).code,
     ).toBe('CONFLICT');
+  });
+
+  it('lets an email someone else typed in as second guardian leave, and sign up on its own', () => {
+    const h = harness();
+    const VICTIM = 'real.parent@example.org';
+    const mallory = h.signIn(NEW_PARENT);
+    h.ok('household.save', { guardians: [{ name: 'Mallory', email: NEW_PARENT }, { name: 'Pat Real', email: VICTIM }], students: [] }, mallory);
+    const victim = h.signIn(VICTIM);
+    expect(h.ok('me.bootstrap', {}, victim).me).toMatchObject({ familyId: 'F0004', familyStatus: 'Pending' });
+
+    const left = h.ok('household.save', { guardians: [{ name: 'Pat Real', email: VICTIM }], students: [], leave: true }, victim);
+    expect(left.me).toMatchObject({ familyId: null, familyStatus: 'None' });
+    expect(h.rows('Families').find((r) => r.FamilyID === 'F0004')).toMatchObject({ Email: NEW_PARENT, 'Parent 2 Email': '', 'Parent 2 Name': '' });
+
+    const own = h.ok(
+      'household.save',
+      { guardians: [{ name: 'Pat Real', email: VICTIM }], students: [{ firstName: 'Avery', lastName: 'Real', grade: '11', school: 'High School', ensembles: [] }] },
+      victim,
+    );
+    expect(own.me).toMatchObject({ familyId: 'F0005', familyStatus: 'Pending' });
+    expect(h.ok('me.bootstrap', {}, mallory).students).toEqual([]);
+    // A first guardian (now including Pat, of their own household) can't leave in the app.
+    expect(h.err('household.save', { guardians: [{ name: 'Pat Real', email: VICTIM }], students: [], leave: true }, victim).code).toBe('BAD_REQUEST');
+    expect(h.err('household.save', { guardians: [], students: [], leave: true }, h.signIn(PARENT)).code).toBe('BAD_REQUEST');
+  });
+
+  it('does not lock a second guardian out when the household that listed them is rejected', () => {
+    const h = harness();
+    const VICTIM = 'real.parent@example.org';
+    h.ok('household.save', { guardians: [{ name: 'Mallory', email: NEW_PARENT }, { name: 'Pat Real', email: VICTIM }], students: [] }, h.signIn(NEW_PARENT));
+    h.ok('admin.reviewHousehold', { familyId: 'F0004', decision: 'reject' }, h.signIn(TREASURER));
+
+    const victim = h.signIn(VICTIM);
+    expect(h.ok('me.bootstrap', {}, victim).me.familyStatus).toBe('None');
+    const own = h.ok('household.save', { guardians: [{ name: 'Pat Real', email: VICTIM }], students: [] }, victim);
+    expect(own.me).toMatchObject({ familyId: 'F0005', familyStatus: 'Pending' });
+    // The rejected household's own first guardian still has to contact TMA.
+    expect(h.err('household.save', { guardians: [{ name: 'Mallory', email: NEW_PARENT }], students: [] }, h.signIn(NEW_PARENT)).code).toBe('FORBIDDEN');
   });
 
   it('refuses Inactive households', () => {

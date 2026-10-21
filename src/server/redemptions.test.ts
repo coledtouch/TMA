@@ -140,6 +140,31 @@ describe('admin.decideRedemption', () => {
     expect(avery.activities[0]).toMatchObject({ paidFromFundsCents: 20000, paidDirectCents: 35000, remainingCents: 130000 });
   });
 
+  it('does not post a second Ledger row when the treasurer already typed it (Reference = request ID)', () => {
+    const h = harness();
+    // SHEET.md: "make sure its Reference is the RequestID, and the app won't add a second one".
+    h.services.db.tables.Ledger?.push({
+      Date: '2026-10-21',
+      StudentID: 'S0001',
+      Type: 'Redemption',
+      Description: 'Applied to FL27',
+      Amount: -200,
+      ActivityID: 'FL27',
+      Reference: 'R-7f3a9c21',
+    });
+    const admin = h.signIn(TREASURER);
+    h.clearOutbox();
+    const { redemption } = h.ok('admin.decideRedemption', { id: 'R-7f3a9c21', decision: 'Approved' }, admin);
+    expect(redemption.status).toBe('Approved');
+    expect(h.rows('Ledger').filter((r) => r.Reference === 'R-7f3a9c21').map((r) => r.Amount)).toEqual([-200]);
+    expect(h.rows('Redemptions')[0]).toMatchObject({ Status: 'Approved', Notified: '2026-10-21T14:00:00.000Z' });
+    expect(h.services.outbox.mail.find((m) => m.to === PARENT)?.text).toContain('Remaining: $1,300.00.');
+
+    const avery = h.ok('me.bootstrap', {}, h.signIn(PARENT)).students[0];
+    expect(avery).toMatchObject({ balanceCents: 44000, pendingCents: 0, availableCents: 44000 });
+    expect(avery.activities[0]).toMatchObject({ paidFromFundsCents: 20000, remainingCents: 130000 });
+  });
+
   it('denies with a note and notifies the family', () => {
     const h = harness();
     const admin = h.signIn(TREASURER);

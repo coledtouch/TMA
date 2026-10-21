@@ -3,7 +3,11 @@
 name = "tma-app"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
-workers_dev = true
+# The app has one address, mytma.org: no tma-app.<subdomain>.workers.dev copy
+# and no per-version preview addresses (each would be a separate origin with
+# its own sign-ins). src/index.ts also redirects any workers.dev request.
+workers_dev = false
+preview_urls = false
 
 # Cloudflare creates the DNS records and certificates for these.
 routes = [

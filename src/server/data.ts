@@ -614,9 +614,14 @@ export class Model {
     return (byEmail.get(normEmail(email)) ?? []).slice();
   }
 
-  /** The caller's household (Inactive only when it is the sole match). */
+  /**
+   * The caller's household (Inactive only when it is the sole match). An Inactive household counts
+   * only for its first guardian: anyone can type an email into the second-guardian slot, so a
+   * rejected household must not lock that email's owner out of signing up with their own.
+   */
   familyForEmail(email: string): FamilyRec | null {
-    return this.familiesWithEmail(email)[0] ?? null;
+    const key = normEmail(email);
+    return this.familiesWithEmail(key).find((f) => f.status !== 'Inactive' || f.slots[0].email === key) ?? null;
   }
 
   // Students ---------------------------------------------------------------

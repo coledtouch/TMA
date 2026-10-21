@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Bootstrap, HouseholdInput } from '../../shared/types';
 import { ApiError } from '../api/client';
-import { fakeApi, makeBootstrap } from '../test/fixtures';
+import { fakeApi, makeBootstrap, makeStudent } from '../test/fixtures';
 import { renderScreen } from '../test/render';
 import { Household } from './Household';
 
@@ -120,6 +120,77 @@ describe('Household', () => {
     expect(input.students[1]).toMatchObject({ id: 'S0002' });
     expect(input.guardians).toEqual([{ name: 'Jordan Thompson', email: 'parent@example.com', phone: '603-555-0101' }]);
     expect(await screen.findByText('Household saved.')).toBeInTheDocument();
+  });
+
+  it("still saves when a student's sheet row has groups that aren't on TMA's list", async () => {
+    const base = makeBootstrap();
+    // The treasurer typed "Pit Orchestra" (not in Settings.ENSEMBLES) and a different case for Jazz Band.
+    const avery = makeStudent();
+    const data = makeBootstrap({
+      students: [{ ...avery, student: { ...avery.student, ensembles: ['Band', 'jazz band', 'Pit Orchestra'] } }, base.students[1]],
+    });
+    const api = fakeApi({
+      // Like the server (household.ts): every group must be one of Settings.ENSEMBLES.
+      'household.save': (input) => {
+        const known = data.settings.ensembles;
+        if (input.students.some((st) => st.ensembles?.some((e) => !known.includes(e)))) {
+          throw new ApiError('BAD_REQUEST', 'Student 1: choose groups from the list.');
+        }
+        return data;
+      },
+    });
+    renderScreen(<Household />, { api, data });
+    const user = userEvent.setup();
+
+    const students = screen.getByRole('group', { name: 'Students' });
+    expect(within(students).getAllByRole('checkbox', { name: 'Jazz Band' })[0]).toBeChecked();
+    const phone = screen.getByLabelText(/Cell phone/);
+    await user.clear(phone);
+    await user.type(phone, '603-555-0199');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Household saved.')).toBeInTheDocument();
+    const input = api.call.mock.calls.find(([a]) => a === 'household.save')?.[1] as HouseholdInput;
+    expect(input.students[0].ensembles).toEqual(['Band', 'Jazz Band']);
+    expect(input.guardians[0].phone).toBe('603-555-0199');
+  });
+
+  it("lets a second guardian take their email off a household that isn't theirs", async () => {
+    const data = makeBootstrap({
+      me: { email: 'second@example.com', name: 'Sam Lee', familyId: 'F0001', familyStatus: 'Pending', isAdmin: false },
+      family: {
+        id: 'F0001',
+        guardians: [
+          { name: 'Jordan Thompson', email: 'parent@example.com' },
+          { name: 'Sam Lee', email: 'second@example.com' },
+        ],
+        status: 'Pending',
+        member: false,
+      },
+    });
+    const left = { ...newFamilyData(), me: { ...newFamilyData().me, email: 'second@example.com', name: 'second' } };
+    const api = fakeApi({ 'household.save': () => left });
+    const harness = renderScreen(<Household />, { api, data });
+    const user = userEvent.setup();
+
+    expect(screen.getByText(/Jordan Thompson added your email to this household/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: "This isn't my household" }));
+    const dialog = screen.getByRole('alertdialog', { name: 'Take your email off this household?' });
+    expect(dialog).toHaveAccessibleDescription(/no longer see this household's students/);
+    await user.click(within(dialog).getByRole('button', { name: 'Remove my email' }));
+
+    expect(api.call).toHaveBeenCalledWith('household.save', { guardians: [], students: [], leave: true });
+    await waitFor(() => expect(harness.data()).toBe(left));
+    expect(await screen.findByText(/You can set up your own/)).toBeInTheDocument();
+    // The form starts over for their own household.
+    expect(screen.getByRole('heading', { name: 'Set up your household' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Email')).toHaveValue('second@example.com');
+    expect(screen.queryByRole('button', { name: "This isn't my household" })).not.toBeInTheDocument();
+  });
+
+  it("doesn't offer leaving to the first guardian or to a new family", () => {
+    renderScreen(<Household />, { api: fakeApi(), data: makeBootstrap() });
+    expect(screen.queryByRole('button', { name: "This isn't my household" })).not.toBeInTheDocument();
   });
 
   it('shows server errors such as an email already on another household', async () => {

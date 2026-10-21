@@ -63,6 +63,24 @@ function captureErrorMessage(err: unknown): string {
   return CAPTURE_UNCERTAIN;
 }
 
+/** Pause before asking the server once more about a capture with no clear answer. */
+export const CAPTURE_RETRY_DELAY_MS = 1500;
+
+/**
+ * Capture the order, asking once more when the answer was unclear (network, timeout, server or
+ * PayPal trouble). That can't charge twice: the server returns the payment it already recorded, and
+ * captures with the same PayPal-Request-Id. It often turns "couldn't confirm" into a receipt.
+ */
+async function captureWithRetry(api: ApiClient, orderId: string) {
+  try {
+    return await api.call('payment.captureOrder', { orderId });
+  } catch (err) {
+    if (isApiError(err) && err.code !== 'INTERNAL') throw err;
+    await new Promise((resolve) => setTimeout(resolve, CAPTURE_RETRY_DELAY_MS));
+    return api.call('payment.captureOrder', { orderId });
+  }
+}
+
 function orderParams(order: PayPalOrder) {
   return {
     studentId: order.studentId,
@@ -197,7 +215,7 @@ function LiveButtons({
           onApprove: async ({ orderID }) => {
             if (alive.current) setStatus('processing');
             try {
-              const { payment } = await latest.current.api.call('payment.captureOrder', { orderId: orderID });
+              const { payment } = await captureWithRetry(latest.current.api, orderID);
               if (alive.current) setNote('Payment received — thank you!');
               latest.current.onPaid(payment);
             } catch (err) {
@@ -305,7 +323,7 @@ function DemoButtons({ latest }: { latest: { current: PayPalCheckoutProps } }) {
     try {
       const { orderId } = await api.call('payment.createOrder', orderParams(order));
       phase = 'capture';
-      const { payment } = await api.call('payment.captureOrder', { orderId });
+      const { payment } = await captureWithRetry(api, orderId);
       latest.current.onPaid(payment);
     } catch (err) {
       latest.current.onError(phase === 'create' ? createErrorMessage(err) : captureErrorMessage(err));

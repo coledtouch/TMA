@@ -48,9 +48,15 @@ function stringList(value: unknown): string[] | null {
 }
 
 /**
+ * A US/Canada (NANP) mobile number as digits: 10 digits, or 11 starting with 1, with a valid area
+ * code and exchange. Texts cost TMA money, so international and premium-rate numbers are refused.
+ */
+const SMS_PHONE_RE = /^1?[2-9]\d{2}[2-9]\d{6}$/;
+
+/**
  * Sanitize prefs from the browser or the Preferences tab. Unknown or missing
  * fields fall back to `fallback`; schools/ensembles must be in Settings;
- * smsPhone keeps digits only (10–15) or is dropped; sms needs SMS_ENABLED and a phone.
+ * smsPhone keeps digits only (a US number, see SMS_PHONE_RE) or is dropped; sms needs SMS_ENABLED and a phone.
  */
 export function sanitizePrefs(input: unknown, settings: AppSettings, fallback: NotificationPrefs): NotificationPrefs {
   const src = isRecord(input) ? input : {};
@@ -74,7 +80,7 @@ export function sanitizePrefs(input: unknown, settings: AppSettings, fallback: N
 
   const phoneIn: unknown = src.smsPhone === undefined ? fallback.smsPhone : src.smsPhone;
   const digits = typeof phoneIn === 'string' || typeof phoneIn === 'number' ? String(phoneIn).replace(/\D/g, '') : '';
-  if (digits.length >= 10 && digits.length <= 15) prefs.smsPhone = digits;
+  if (SMS_PHONE_RE.test(digits)) prefs.smsPhone = digits;
 
   if (!settings.smsSetting || !prefs.smsPhone) prefs.channels.sms = false;
   return prefs;

@@ -4,7 +4,7 @@
  */
 import type { IsoDateTime } from '../shared/types';
 import type { Ctx } from './context';
-import { rateLimit } from './context';
+import { inWriteLock, rateLimit } from './context';
 import { renderEmail } from './email';
 import { ApiError, badRequest, fail } from './errors';
 import * as v from './validate';
@@ -14,6 +14,18 @@ const CODE_TTL_SECONDS = 600;
 const MAX_CODE_ATTEMPTS = 5;
 const CODES_PER_HOUR = 5;
 const MAX_TOKEN_LENGTH = 2048;
+/**
+ * Codes per hour, script-wide, for emails the sheet doesn't know yet (new sign-ups). Apps Script
+ * can't see the caller's address, so this is what stops one person from spending the whole shared
+ * daily email quota on made-up addresses.
+ */
+export const NEW_EMAIL_CODES_PER_HOUR = 30;
+/**
+ * The last daily email recipients are kept for sign-in codes to emails the sheet already knows
+ * (guardians, people who saved notification settings or a phone, admins), so families on the
+ * sheet can still sign in after a flood of codes to unknown addresses.
+ */
+export const KNOWN_EMAIL_CODE_RESERVE = 40;
 
 interface OtpEntry {
   /** hmac(TOKEN_SECRET, "otp|email|code") */
@@ -48,6 +60,31 @@ function readOtp(raw: string | null): OtpEntry | null {
   }
 }
 
+/** The sheet already knows this email: a guardian on any household, someone with saved settings or a phone, or an admin. */
+function isKnownEmail(ctx: Ctx, email: string): boolean {
+  return (
+    ctx.m.settings().adminEmails.includes(email) ||
+    ctx.m.familiesWithEmail(email).length > 0 ||
+    ctx.m.preferences().has(email) ||
+    ctx.m.devicesFor(email).length > 0
+  );
+}
+
+/** A sign-in limit for new emails was hit: log it (and once an hour in the Log tab, so admins see a flood). */
+function newEmailLimitHit(ctx: Ctx, detail: string): void {
+  ctx.s.logger.error(detail);
+  const flag = 'otp-new-email-limit-logged';
+  if (ctx.s.cache.get(flag)) return;
+  ctx.s.cache.put(flag, '1', 3600);
+  try {
+    inWriteLock(ctx, () => ctx.log('auth', detail));
+  } catch (err) {
+    ctx.s.logger.error('Could not write the Log row', errorMessage(err));
+  }
+}
+
+const NEW_EMAILS_PAUSED = 'Lots of people are signing up right now, so new sign-ups are paused for a while. Please try again later or contact TMA.';
+
 /** auth.requestCode: always answers {sent:true}; anyone may sign up with any email. */
 export function requestCode(ctx: Ctx, params: v.Params): { sent: true; devCode?: string } {
   const email = v.email(params.email);
@@ -56,14 +93,9 @@ export function requestCode(ctx: Ctx, params: v.Params): { sent: true; devCode?:
   const perHour = ctx.s.mode === 'demo' ? 100 : CODES_PER_HOUR;
   rateLimit(ctx, `otp-rl:${email}`, perHour, 3600, 'Too many codes requested for this email. Please wait an hour and try again.');
 
-  const code = ctx.s.crypto.randomDigits(6);
-  if (!/^\d{6}$/.test(code)) throw new Error('randomDigits returned an invalid code');
-  const entry: OtpEntry = { h: otpHash(ctx, secret, email, code), a: 0, x: ctx.now.getTime() + CODE_TTL_SECONDS * 1000 };
-  ctx.s.cache.put(`otp:${email}`, JSON.stringify(entry), CODE_TTL_SECONDS);
+  if (ctx.s.mode === 'demo') return { sent: true, devCode: issueCode(ctx, secret, email) };
 
-  if (ctx.s.mode === 'demo') return { sent: true, devCode: code };
-
-  const settings = ctx.m.settings();
+  // Every check runs before a new code replaces one the person may already have in their inbox.
   let quota = 0;
   try {
     quota = ctx.s.mailer.remainingQuota();
@@ -73,6 +105,21 @@ export function requestCode(ctx: Ctx, params: v.Params): { sent: true; devCode?:
   if (quota <= 0) {
     fail('RATE_LIMITED', "TMA has reached today's email limit. Please try again tomorrow or contact TMA.");
   }
+  if (!isKnownEmail(ctx, email)) {
+    if (quota <= KNOWN_EMAIL_CODE_RESERVE) {
+      newEmailLimitHit(ctx, `Sign-in codes to new emails paused: only ${quota} emails left today (the last ${KNOWN_EMAIL_CODE_RESERVE} are kept for families on the sheet)`);
+      fail('RATE_LIMITED', NEW_EMAILS_PAUSED);
+    }
+    try {
+      rateLimit(ctx, 'otp-rl:new-emails', NEW_EMAIL_CODES_PER_HOUR, 3600, NEW_EMAILS_PAUSED);
+    } catch (err) {
+      newEmailLimitHit(ctx, `Sign-in codes to new emails paused: more than ${NEW_EMAIL_CODES_PER_HOUR} in an hour`);
+      throw err;
+    }
+  }
+
+  const code = issueCode(ctx, secret, email);
+  const settings = ctx.m.settings();
   const { html, text } = renderEmail({
     orgName: settings.pub.orgName,
     title: 'Your sign-in code',
@@ -88,6 +135,15 @@ export function requestCode(ctx: Ctx, params: v.Params): { sent: true; devCode?:
     fail('INTERNAL', "We couldn't send the email right now. Please try again in a few minutes.");
   }
   return { sent: true };
+}
+
+/** Make a new 6-digit code for `email` (replacing any earlier one) and remember only its HMAC. */
+function issueCode(ctx: Ctx, secret: string, email: string): string {
+  const code = ctx.s.crypto.randomDigits(6);
+  if (!/^\d{6}$/.test(code)) throw new Error('randomDigits returned an invalid code');
+  const entry: OtpEntry = { h: otpHash(ctx, secret, email, code), a: 0, x: ctx.now.getTime() + CODE_TTL_SECONDS * 1000 };
+  ctx.s.cache.put(`otp:${email}`, JSON.stringify(entry), CODE_TTL_SECONDS);
+  return code;
 }
 
 /** auth.verifyCode: at most 5 attempts per issued code; success deletes the code and returns a session. */

@@ -166,6 +166,19 @@ function fakeApi(mode: 'demo' | 'live', fail?: ApiError): ApiClient & { calls: C
   };
 }
 
+/** A session token for `email` (ARCHITECTURE.md §4: base64url(JSON{e, v, x}) + "." + hmac). */
+function sessionTokenFor(email: string): string {
+  const payload = btoa(JSON.stringify({ e: email, v: 1, x: Date.now() + 86_400_000 }));
+  return `${payload.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}.signature`;
+}
+
+/** `email` signed in on this device: the stored session (getPushSupport) and the client's token. */
+function signedInAs(email: string, api: ApiClient & { calls: Call[] }): ApiClient & { calls: Call[] } {
+  const token = sessionTokenFor(email);
+  localStorage.setItem(LIVE.session, token);
+  return { ...api, getToken: () => token };
+}
+
 function tokensOf(calls: Call[]): Array<[ApiAction, string]> {
   return calls.map((c) => [c.action, (c.params as { token: string }).token]);
 }
@@ -586,6 +599,47 @@ describe('disablePush', () => {
     expect(sub.unsubscribe).not.toHaveBeenCalled();
   });
 
+  it('on sign-out, unsubscribes the browser and forgets the device even when TMA cannot be reached', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    const api = fakeApi('live', new ApiError('INTERNAL', 'Network problem'));
+    await expect(disablePush(api, { signingOut: true })).resolves.toBeUndefined();
+    expect(tokensOf(api.calls)).toEqual([['push.unregister', tokenFor(ENDPOINT_1)]]);
+    // The push service now answers "gone", so TMA drops the row on its next send.
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(liveRecord()).toBeNull();
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
+  });
+
+  it('on sign-out, does not wait for a slow TMA before unsubscribing the browser', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    let fail!: (err: unknown) => void;
+    const api: ApiClient = {
+      mode: 'live',
+      getToken: () => 'session-token',
+      setToken: () => undefined,
+      call: () => new Promise<never>((_, reject) => (fail = reject)),
+    };
+    const signingOut = disablePush(api, { signingOut: true });
+    // Sign-out waits at most 4 s, and the tab may be closed right after: don't depend on TMA answering.
+    await vi.waitFor(() => expect(sub.unsubscribe).toHaveBeenCalledTimes(1));
+    expect(liveRecord()).toBeNull();
+    fail(new ApiError('INTERNAL', 'The TMA server took too long to answer.'));
+    await expect(signingOut).resolves.toBeUndefined();
+  });
+
+  it('on sign-out in the demo, forgets the demo token even when the call fails', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    localStorage.setItem(DEMO.push, JSON.stringify({ token: 'demo-abc', at: '' }));
+    await disablePush(fakeApi('demo', new ApiError('INTERNAL', 'oops')), { signingOut: true });
+    expect(localStorage.getItem(DEMO.push)).toBeNull();
+    expect(sub.unsubscribe).not.toHaveBeenCalled();
+  });
+
   it('still clears the device when the session has expired', async () => {
     pushCapableBrowser({ permission: 'granted' }).existing(ENDPOINT_1, KEY);
     storeLiveRecord(ENDPOINT_1);
@@ -675,6 +729,39 @@ describe('refreshPushRegistration', () => {
     await refreshPushRegistration(api, KEY);
     expect(tokensOf(api.calls)).toEqual([['push.register', tokenFor(ENDPOINT_1)]]);
     expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
+  });
+
+  it('remembers which account turned push on, and keeps quiet for that account', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const avery = signedInAs('parent@example.com', fakeApi('live'));
+    expect(await enablePush(avery, KEY)).toEqual({ ok: true });
+    expect(liveRecord()).toMatchObject({ token: tokenFor(ENDPOINT_1), email: 'parent@example.com' });
+
+    avery.calls.length = 0;
+    await refreshPushRegistration(avery, KEY);
+    expect(avery.calls).toEqual([]);
+    expect(pushManager.current?.unsubscribe).not.toHaveBeenCalled();
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('enabled');
+  });
+
+  it("turns off another account's registration left on this device (failed sign-out or expired session)", async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    localStorage.setItem(
+      LIVE.push,
+      JSON.stringify({ token: tokenFor(ENDPOINT_1), key: KEY, email: 'parent@example.com', at: new Date().toISOString() }),
+    );
+    const other = signedInAs('nguyen@example.com', fakeApi('live'));
+
+    // The device isn't on for the person signed in now, whatever the browser says…
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
+    await refreshPushRegistration(other, KEY);
+
+    // …and the first family's notifications stop: the push service will answer "gone" for their row.
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(liveRecord()).toBeNull();
+    expect(other.calls).toEqual([]); // never moved to this account without asking
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
   });
 
   it('re-registers an unchanged subscription after a week', async () => {

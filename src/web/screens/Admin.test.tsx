@@ -203,6 +203,26 @@ describe('Admin', () => {
     expect(api.call).toHaveBeenCalledWith('admin.reviewHousehold', { familyId: 'F0003', decision: 'reject' });
   });
 
+  it('shows what to check in the sheet before approving a household', async () => {
+    const overview = makeOverview();
+    overview.pendingHouseholds[0].warnings = [
+      'S0006 (Sofia Ortiz) already has rows in Ledger, Enrollments from an earlier student with this ID. Fix the IDs in the sheet before approving.',
+    ];
+    renderScreen(<Admin />, { api: fakeApi({ 'admin.overview': () => overview }), data: adminData() });
+    const card = await screen.findByRole('article', { name: 'Household Marcus Ortiz' });
+    const check = within(card).getByRole('group', { name: 'Check the sheet before approving' });
+    expect(check).toHaveTextContent('S0006 (Sofia Ortiz) already has rows in Ledger, Enrollments');
+    // Shown above the decision buttons.
+    const approve = within(card).getByRole('button', { name: 'Approve household' });
+    expect(check.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows no check list for a household with nothing to check', async () => {
+    renderScreen(<Admin />, { api: fakeApi({ 'admin.overview': () => makeOverview() }), data: adminData() });
+    const card = await screen.findByRole('article', { name: 'Household Marcus Ortiz' });
+    expect(within(card).queryByRole('group', { name: 'Check the sheet before approving' })).not.toBeInTheDocument();
+  });
+
   it('composes, previews, confirms and sends an announcement', async () => {
     const api = fakeApi({
       'admin.overview': () => makeOverview(),
@@ -268,6 +288,29 @@ describe('Admin', () => {
     const report = await screen.findByLabelText('Sync report');
     expect(within(report).getByText('Balance changes').nextSibling).toHaveTextContent('2');
     expect(within(report).getByText('3 push · 2 email · 0 text')).toBeInTheDocument();
+    expect(within(report).queryByText(/typed in the sheet changed/)).not.toBeInTheDocument();
+  });
+
+  it('says when rows typed in the sheet are still waiting to settle', async () => {
+    const api = fakeApi({
+      'admin.overview': () => makeOverview(),
+      'admin.runSync': () => ({
+        ranAt: '2026-10-21T12:00:00.000Z',
+        balanceChanges: 0,
+        redemptionsPosted: 0,
+        announcementsSent: 0,
+        remindersSent: 0,
+        notifications: { push: 0, email: 0, sms: 0 },
+        errors: [],
+        waiting: 2,
+      }),
+    });
+    renderScreen(<Admin />, { api, data: adminData() });
+    const user = userEvent.setup();
+    await screen.findByText('Recent activity');
+    await user.click(screen.getByRole('button', { name: 'Run sync now' }));
+    const report = await screen.findByLabelText('Sync report');
+    expect(within(report).getByText(/2 rows typed in the sheet changed in the last few minutes/)).toBeInTheDocument();
   });
 
   it('shows an error with retry when the overview fails', async () => {

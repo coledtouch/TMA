@@ -1,16 +1,14 @@
-# Publishes the web app to GitHub Pages at https://<owner>.github.io/<repo>/.
+# Publishes the DEMO of the web app to GitHub Pages at
+# https://<owner>.github.io/<repo>/: sample families, simulated PayPal and push.
 #
-# One-time setup (see docs/SETUP.md, step 7):
+# It never builds the real app, whatever VITE_API_URL says. Every GitHub Pages
+# site of one owner shares the origin https://<owner>.github.io, so any of
+# them could read the sign-in (a 120-day session) and cached family data the
+# real app keeps in the browser. The real app is served only from its own
+# address, https://mytma.org (.github/workflows/deploy-app-cloudflare.yml).
+#
+# One-time setup (optional; see docs/SETUP.md, step 7):
 #   Settings → Pages → Source: GitHub Actions
-#   Settings → Secrets and variables → Actions → Variables:
-#     VITE_API_URL             Apps Script web app URL (ends in /exec)
-# This value is public (it ends up in the site's JavaScript), so it is a
-# variable, not a secret. Push needs no variable: the app gets the push
-# Worker's public key from Apps Script.
-#
-# With no variable set, the site is the DEMO: sample families, simulated
-# PayPal and push. With it set, the site is the real app, and
-# https://<owner>.github.io/<repo>/?demo is the demo link for the board.
 name: Deploy to GitHub Pages
 
 on:
@@ -48,10 +46,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build the web app
+      - name: Build the web app (demo only)
         run: npm run build:web
         env:
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Always empty: see the top of this file.
+          VITE_API_URL: ''
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6

@@ -207,6 +207,16 @@ export function paymentReviewNotice(firstName: string, activityName: string, ref
   };
 }
 
+export function paymentUnconfirmedNotice(firstName: string, activityName: string, grossCents: Cents, orderId: string): Notice {
+  return {
+    topic: 'admin',
+    title: 'Payment needs review',
+    body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app did not record it. Look up PayPal order ${orderId}: if it was captured, add it to the Payments tab so the family isn't asked to pay again.`,
+    url: '#/admin',
+    tag: `payreview-${orderId}`,
+  };
+}
+
 export function testNotice(): Notice {
   return {
     topic: 'test',

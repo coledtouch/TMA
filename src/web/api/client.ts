@@ -58,6 +58,14 @@ const DEFAULT_ERROR_MESSAGE = 'Something went wrong. Please try again.';
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * Admin actions that send to every family (or run the whole sync) may take minutes in Apps Script,
+ * which allows 6 per execution. Giving up after 30 s would show a failure for an announcement that
+ * is still going out and invite a second send, so these wait as long as Apps Script can run.
+ */
+export const SLOW_ACTION_TIMEOUT_MS = 6 * 60_000;
+const SLOW_ACTIONS: readonly ApiAction[] = ['admin.announce', 'admin.runSync'];
+
 /** Map anything thrown by `call()` to a message a parent can read. */
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message;
@@ -123,10 +131,13 @@ export function createLiveClient(apiUrl: string, options: LiveClientOptions = {}
       const request: ApiRequest<A> = { action, params, token: sentToken };
       const controller = new AbortController();
       let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, timeoutMs);
+      const timer = setTimeout(
+        () => {
+          timedOut = true;
+          controller.abort();
+        },
+        SLOW_ACTIONS.includes(action) ? Math.max(timeoutMs, SLOW_ACTION_TIMEOUT_MS) : timeoutMs,
+      );
 
       let text: string;
       try {

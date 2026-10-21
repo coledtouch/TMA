@@ -20,7 +20,10 @@ spreadsheet, and every setting.
 * **Header spelling is forgiving.** Capital letters, spaces and punctuation are ignored, so
   `Student ID`, `student_id` and `StudentID` all work. Some columns also accept other common names
   (listed below as "also accepted").
-* **Don't rename the tabs.** The app finds them by name.
+* **Don't rename the tabs.** The app finds them by name. If a column the 15-minute sync needs is
+  missing or renamed beyond recognition, the sync skips that job and the Log tab (and *TMA App → Run
+  sync now*) says which column is missing, every run until the header is fixed. It never treats the
+  column as blank.
 * **Money is in dollars:** `50`, `50.00`, `$1,250.50` all work. A negative can be written `-25` or `(25.00)`.
 * **Dates** can be real sheet dates or text like `2026-11-14` or `11/14/2026`. The app reads them
   as typed, even if the spreadsheet's own time zone (*File → Settings*) isn't New York, and the
@@ -30,6 +33,9 @@ spreadsheet, and every setting.
   and line breaks also work. Names are matched to the spelling in Settings regardless of capitals.
 * **IDs** (FamilyID, StudentID, ActivityID) can be any text you like but must be unique. Capitals
   don't matter (`fl27` = `FL27`). **Never change an ID once it is in use**: other tabs refer to it.
+  New IDs the app makes for sign-ups are always above every ID still used anywhere in the sheet
+  (Ledger, Payments, Enrollments and Redemptions included), so a new student never inherits rows
+  left behind by a deleted one.
 * If the menu **TMA App** is missing, reload the page. *TMA App → Set up / repair tabs* re-creates
   any missing tab, header or setting. It never deletes or reorders anything, so it is safe to run any time.
 
@@ -64,7 +70,7 @@ are **Active**.
 | The music department says who is going on a trip | Add the trip in **Activities** once, then one **Enrollments** row per student. | The trip appears on their Trips tab with cost, due dates and remaining. If something is still owed, reminders go out 14, 7 and 1 days before the Due Date. |
 | A check or cash comes in | Add a **Payments** row: Method `Check` (or `Cash`), the check number in Reference, Status `Completed`. | The trip's "paid" goes up the next time they open the app. |
 | A parent asks to use funds for a trip | Approve or deny it in the app (*More → Board tools → Fund requests*), **or** type `Approved`/`Denied` in the **Status** column of **Redemptions**. | A notification: *"Funds applied to Florida 2027"* or *"Funds request not approved"*. |
-| A new family signs up in the app | Review it in the app (*More → Board tools → New households*). If you already track their student, pick that record so the history and balance carry over. | *"You're all set! TMA verified your household."* |
+| A new family signs up in the app | Review it in the app (*More → Board tools → New households*). If you already track their student, pick that record so the history and balance carry over. If the card says *Check the sheet before approving*, fix what it lists first. | *"You're all set! TMA verified your household."* |
 | You want to tell families something | Write it in the app (*Board tools → Send an announcement*), or add a row to **Announcements** and leave **Sent** blank. | Push/email to the families whose school, group and topic choices match. |
 | A concert or meeting is scheduled | Add a row to **Events**. | It shows under News, and a reminder goes out the day before. |
 
@@ -93,7 +99,7 @@ One row per household.
 | **Email** | First parent's email. **This is how they sign in.** Also accepted: Parent Email, Parent 1 Email, Guardian Email, Email Address. | `jordan@example.com` (capitals don't matter) |
 | **Phone** | Optional cell. Also accepted: Cell, Cell Phone, Parent Phone, Parent 1 Phone, Mobile. | `603-555-0142` |
 | **Parent 2 Name** | Optional second guardian. Also accepted: Guardian 2, Guardian 2 Name, Second Parent. | `Casey Thompson` |
-| **Parent 2 Email** | Optional. Either parent's email can sign in to the same household. Also accepted: Guardian 2 Email, Second Email. | `casey@example.com` |
+| **Parent 2 Email** | Optional. Either parent's email can sign in to the same household. If someone typed it there by mistake, that person can tap *This isn't my household* in the app, which clears the three Parent 2 cells. Also accepted: Guardian 2 Email, Second Email. | `casey@example.com` |
 | **Parent 2 Phone** | Optional. Also accepted: Guardian 2 Phone, Parent 2 Cell. | |
 | **Status** | `Active` = verified. `Pending` = signed up in the app, waiting for your review. `Inactive` = archived or rejected. **Blank = Active.** | Also understood: Verified/Approved (Active); New/Review (Pending); Archived, Merged, Rejected, Graduated, Left, Closed, Removed (Inactive). |
 | **Member** | Paid-up TMA member this year (for your records). Also accepted: TMA Member, Membership. | `TRUE` / `FALSE` |
@@ -228,10 +234,12 @@ Requests from families to apply activity funds to a trip. **The app adds these r
 | **Admin Note** | Optional message to the family, included when a request is denied. | You (optional) |
 | **Notified** | When the family was told. **Leave this alone.** A blank Notified on an Approved/Denied row is what tells the app to act. | App |
 
-When you type `Approved` here, within about 15 minutes the app adds the matching **Ledger** row
-(negative Amount, the ActivityID, Reference = the RequestID), fills in Decided and Notified, and
-notifies the family. **Don't add that Ledger row yourself.** (If you already did, make sure its
-Reference is the RequestID, and the app won't add a second one.)
+When you type `Approved` here, the app adds the matching **Ledger** row (negative Amount, the
+ActivityID, Reference = the RequestID), fills in Decided and Notified, and notifies the family. It
+waits until the row has looked the same for about 5 minutes, so it never acts on a half-typed row:
+expect it 15 to 30 minutes after your last change to the row. **Don't add that Ledger row yourself.**
+(If you already did, make sure its Reference is the RequestID, and the app won't add a second one,
+whether you approve in the sheet or in the app.)
 
 ### Announcements
 
@@ -240,13 +248,17 @@ News for families.
 | Column | Meaning | Example |
 | --- | --- | --- |
 | **ID** | Optional. Announcements sent from the app get an ID like `A-9f8e7d6c`. | |
-| **Date** | Blank or today = send at the next sync. A future date = send on that day. | `2026-11-01` |
+| **Date** | Blank = send at the next sync. Today or a future date = send on that day, from 8 AM. | `2026-11-01` |
 | **Title** | Short headline. | `Florida 2027 deposit reminder` |
 | **Body** | The message. Push notifications show the first 180 characters. | |
 | **Schools** | Who it's for. **Blank = everyone.** | `High School` |
 | **Ensembles** | Which groups. **Blank = everyone.** | `Chorus` |
 | **Link** | Optional web link. | `https://…` |
 | **Sent** | **Leave blank.** The app fills in the time when it sends. Clearing it would send the announcement again. | |
+
+An announcement typed here goes out once the row has looked the same for about 5 minutes, at the
+next 15-minute sync after that, so finish typing it before you walk away. (Announcements sent from
+the app go out at once.)
 
 Who receives it: if both Schools and Ensembles are filled in, a family must match one of each.
 If only one is filled in, matching that one is enough. Families who haven't picked any schools or
@@ -285,7 +297,7 @@ app uses it on the next request. You don't need to redeploy.
 | --- | --- | --- |
 | `ORG_NAME` | Timberlane Music Association | Name shown in the app, in emails and on the PayPal checkout. |
 | `SUPPORT_EMAIL` | timberlanemusictma@gmail.com | Where families can email TMA with questions (shown in the app). Also the **Reply-To** of every email the app sends, so replies to `noreply@mytma.org` reach TMA. |
-| `APP_URL` | *(blank)* | The app's web address, e.g. `https://<owner>.github.io/<repo>/`. Used for the "Open the TMA app" button in emails. With no address, emails have no button. |
+| `APP_URL` | *(blank)* | The app's web address: `https://mytma.org/` (see [SETUP.md step 7](SETUP.md#7-put-the-app-online-at-mytmaorg)). Used for the "Open the TMA app" button in emails. With no address, emails have no button. Never a `github.io` address: that copy is only the demo. |
 | `ADMIN_EMAILS` | *(blank)* | Comma-separated emails of board members who get **Board tools** in the app (approve fund requests, verify households, send announcements) and get alerts about new sign-ups and fund requests. They sign in to the app with these emails. |
 | `SCHOOLS` | High School, Middle School, Elementary | School levels families can pick. If you rename one, update the Students tab to match. |
 | `ENSEMBLES` | Band, Marching Band, Jazz Band, Orchestra, Chorus, Guitar | Groups families can pick. |
@@ -303,7 +315,7 @@ app uses it on the next request. You don't need to redeploy.
 | `EMAIL_ENABLED` | TRUE | `FALSE` stops notification emails (push still works). **Sign-in codes are always emailed.** |
 | `EMAIL_VIA` | cloudflare | Which way the app's emails go out. `cloudflare` = from **noreply@mytma.org** through TMA's push Worker (Cloudflare Email Sending, see [SETUP.md](SETUP.md#email-from-noreplymytmaorg)); if the Worker can't send one, that email goes out with Gmail instead. `gmail` = always from the Google account that runs the script. |
 | `SMS_ENABLED` | FALSE | `TRUE` offers text messages (needs Twilio, which costs about 1¢ per text; see SETUP.md). |
-| `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
+| `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
 | `TOKEN_VERSION` | 1 | Change it (e.g. to `2`) to **sign everyone out** of the app, for example after a board member leaves or a phone is lost. Everyone simply signs in again with a new code. |
 | `SESSION_DAYS` | 120 | How many days a sign-in lasts (1–400). |
 

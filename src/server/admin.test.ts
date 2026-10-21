@@ -84,6 +84,30 @@ describe('admin.overview', () => {
     expect(thompson?.students.map((s) => s.student.firstName)).toEqual(['Nora']);
   });
 
+  it('warns the reviewer about records that already point at a pending household or student', () => {
+    const h = harness();
+    // Rows left over from before this household signed up (e.g. a deleted family whose IDs were reused).
+    h.services.db.tables.Families?.push({ FamilyID: 'F0009', 'Parent Name': 'Pat New', Email: 'pat.new@example.org', Status: 'Pending' });
+    h.services.db.tables.Students?.push(
+      { StudentID: 'S0090', FamilyID: 'F0009', 'First Name': 'Any', 'Last Name': 'Name', Grade: 9, School: 'High School', Status: 'Pending' },
+      { StudentID: 'S0091', FamilyID: 'F0009', 'First Name': 'Riley', 'Last Name': 'Doe', Grade: 10, School: 'High School', Status: 'Active' },
+    );
+    h.services.db.tables.Ledger?.push({ Date: '2026-09-01', StudentID: 'S0090', Type: 'Credit', Description: 'Carried over', Amount: 450 });
+    h.services.db.tables.Enrollments?.push({ StudentID: 'S0090', ActivityID: 'FL27', Status: 'Going' });
+    h.services.db.tables.Redemptions?.push({ RequestID: 'R-00000009', FamilyID: 'F0009', StudentID: 'S0091', ActivityID: 'FL27', Amount: 5, Status: 'Denied' });
+
+    const o = h.ok('admin.overview', {}, h.signIn(TREASURER));
+    const pat = o.pendingHouseholds.find((p) => p.family.id === 'F0009');
+    expect(pat?.students.map((s) => s.student.id)).toEqual(['S0090']);
+    expect(pat?.warnings).toEqual([
+      expect.stringMatching(/^S0090 \(Any Name\) already has rows in Ledger, Enrollments from an earlier student/),
+      expect.stringMatching(/^S0091 \(Riley Doe, Active\) is already linked to F0009/),
+      expect.stringMatching(/^F0009 already has 1 row\(s\) in Redemptions/),
+    ]);
+    // Households with nothing to check carry no warnings.
+    expect(o.pendingHouseholds.find((p) => p.family.id === 'F0003')?.warnings).toBeUndefined();
+  });
+
   it('is admin-only', () => {
     const h = harness();
     expect(h.err('admin.overview', {}, h.signIn(PARENT)).code).toBe('FORBIDDEN');
@@ -285,6 +309,21 @@ describe('admin.announce', () => {
     expect(delivered.email).toBe(2);
     expect(batches.map((b) => b.length)).toEqual([2, 1]);
     expect(h.rows('Log').some((r) => String(r.Detail).includes('email skipped: daily quota used up'))).toBe(true);
+  });
+
+  it('refuses to send the same announcement twice in a row (a retry after the app timed out)', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    const params = { title: 'Concert moved', body: 'Now at 7 PM.', audience: {}, channels: { push: true, email: true } };
+    h.ok('admin.announce', params, admin);
+    h.clearOutbox();
+    expect(h.err('admin.announce', params, admin)).toEqual({ code: 'CONFLICT', message: expect.stringMatching(/already sent 1 minute ago/) });
+    expect(h.services.outbox.mail).toHaveLength(0);
+    expect(h.rows('Announcements').filter((r) => r.Title === 'Concert moved')).toHaveLength(1);
+    // A different message, or the same one much later, is fine.
+    h.ok('admin.announce', { ...params, body: 'Now at 7:30 PM.' }, admin);
+    h.services.setNow(new Date(Date.parse('2026-10-21T14:00:00.000Z') + 16 * 60 * 1000));
+    h.ok('admin.announce', params, h.signIn(TREASURER));
   });
 
   it('escapes HTML from titles and bodies in emails', () => {

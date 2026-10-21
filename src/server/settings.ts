@@ -27,7 +27,7 @@ export interface AppSettings {
 export const SETTING_NOTES: Readonly<Record<SettingKey, string>> = {
   ORG_NAME: 'Shown in the app, in emails and on PayPal checkout.',
   SUPPORT_EMAIL: 'Where families can reach TMA with questions.',
-  APP_URL: 'Web address of the TMA app (used for the button in emails). Example: https://example.github.io/tma/',
+  APP_URL: 'Web address of the TMA app (used for the button in emails): https://mytma.org/',
   ADMIN_EMAILS: 'Comma-separated emails of board members who can approve requests and send announcements in the app.',
   SCHOOLS: 'Comma-separated school levels families can pick.',
   ENSEMBLES: 'Comma-separated groups families can pick.',
@@ -57,6 +57,15 @@ export function settingKey(value: unknown): string {
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+/**
+ * Settings PAYPAL_ENV: "live", "production" or "prod" (any case, spaces ignored) mean real money;
+ * anything else is the sandbox. The browser's SDK (PublicSettings.paypalEnv) and the Apps Script
+ * gateway (src/gas/paypal.ts) both use this, so they can never pick different PayPal environments.
+ */
+export function parsePaypalEnv(value: string): 'live' | 'sandbox' {
+  return /^(live|production|prod)$/i.test(String(value ?? '').trim()) ? 'live' : 'sandbox';
 }
 
 function clampNumber(value: number, min: number, max: number, fallback: number): number {
@@ -120,7 +129,7 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
     onlinePaymentsEnabled:
       onlinePaymentsSetting && paypalClientId !== '' && safely(() => services.payments.enabled()),
     paypalClientId,
-    paypalEnv: /^(live|production|prod)$/i.test(get('PAYPAL_ENV')) ? 'live' : 'sandbox',
+    paypalEnv: parsePaypalEnv(get('PAYPAL_ENV')),
     minPaymentCents: minPayment > 0 ? Math.min(minPayment, 100000) : 500,
     otherPaymentInstructions: get('OTHER_PAYMENT_INSTRUCTIONS'),
     donateUrl: safeUrl(get('DONATE_URL')) ?? '',

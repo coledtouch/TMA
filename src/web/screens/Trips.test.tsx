@@ -60,6 +60,15 @@ describe('Trips', () => {
     expect(within(card).getByText(/Final payment due/)).toBeInTheDocument();
   });
 
+  it('explains a payment that is still processing, which "Left to pay" already leaves out', () => {
+    const data = makeBootstrap();
+    data.students[0] = makeStudent({ activities: [makeAccount({ pendingPaymentCents: 30000, remainingCents: 100000 })] });
+    setup(data);
+    const card = averyCard();
+    expect(within(card).getByText('$1,000.00')).toBeInTheDocument();
+    expect(within(card).getByText(/\$300\.00 payment still processing/)).toBeInTheDocument();
+  });
+
   it('shows an empty state for a student with no activities', () => {
     setup();
     expect(screen.getByText('No trips or activities yet')).toBeInTheDocument();
@@ -91,7 +100,9 @@ describe('Trips', () => {
       await user.clear(amount);
       await user.type(amount, '700');
       await user.click(within(dialog).getByRole('button', { name: 'Send request' }));
-      expect(within(dialog).getByText("That's more than Avery's available funds ($640.00).")).toBeInTheDocument();
+      // Announced, and focus goes back to the field so a screen reader reads it with its error.
+      expect(within(dialog).getByRole('alert')).toHaveTextContent("That's more than Avery's available funds ($640.00).");
+      expect(amount).toHaveFocus();
 
       await user.clear(amount);
       await user.type(amount, '0.50');

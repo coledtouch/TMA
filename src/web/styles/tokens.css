@@ -23,7 +23,8 @@
   --card: #ffffff;
   --card-2: #f6f1ef; /* inset panels inside cards */
   --line: #e7dedb;
-  --line-strong: #cfc3c0;
+  --line-strong: #cfc3c0; /* decorative dividers */
+  --control-line: #8a7d7c; /* input borders, off switches: >= 3:1 on surface, card and card-2 (WCAG 1.4.11) */
   --backdrop: rgba(20, 16, 16, 0.5);
 
   /* Status */
@@ -90,6 +91,7 @@
     --card-2: #272021;
     --line: #362c2d;
     --line-strong: #4d4041;
+    --control-line: #857677;
     --backdrop: rgba(0, 0, 0, 0.65);
 
     --success: #8fd6a6;

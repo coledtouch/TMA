@@ -131,7 +131,8 @@ describe('ledger math (§3)', () => {
     ],
     payments: [
       { id: 'p1', date: '', studentId: 'S1', activityId: 'FL27', amountCents: 30000, feeCents: 0, grossCents: 30000, method: 'Check', status: 'Completed' },
-      { id: 'p2', date: '', studentId: 'S1', activityId: 'FL27', amountCents: 99999, feeCents: 0, grossCents: 99999, method: 'PayPal', status: 'Pending' },
+      { id: 'p2', date: '', studentId: 'S1', activityId: 'FL27', amountCents: 20000, feeCents: 0, grossCents: 20000, method: 'PayPal', status: 'Pending' },
+      { id: 'p3', date: '', studentId: 'S1', activityId: 'FL27', amountCents: 99999, feeCents: 0, grossCents: 99999, method: 'PayPal', status: 'Failed' },
     ],
     redemptions: [
       { id: 'R1', requestedAt: '', email: '', familyId: 'F1', studentId: 'S1', activityId: 'FL27', amountCents: 40000, status: 'Pending' },
@@ -144,7 +145,15 @@ describe('ledger math (§3)', () => {
     expect(books.pending('S1')).toBe(40000);
     expect(books.available('S1')).toBe(0); // never below 0
     expect(books.accounts('S1')).toEqual([
-      expect.objectContaining({ paidFromFundsCents: 20000, paidDirectCents: 30000, paidCents: 50000, pendingRedemptionCents: 40000, remainingCents: 50000 }),
+      // The Pending (still clearing) payment isn't paid, but isn't left to pay either; the Failed one counts for nothing.
+      expect.objectContaining({
+        paidFromFundsCents: 20000,
+        paidDirectCents: 30000,
+        paidCents: 50000,
+        pendingRedemptionCents: 40000,
+        pendingPaymentCents: 20000,
+        remainingCents: 30000,
+      }),
     ]);
   });
 

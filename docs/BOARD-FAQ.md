@@ -30,7 +30,9 @@ student emails or phone numbers, photos, grades or any school records.
 
 In **TMA's own Google Sheet, in TMA's Google account**. The app's server is a script attached to
 that sheet. It runs inside Google and can open **only that one spreadsheet**, not the rest of TMA's
-Google Drive. There is no other database. Push notifications pass through a small program TMA runs
+Google Drive. There is no other database. Families open the app at **https://mytma.org**, TMA's own
+web address, where a second small program on Cloudflare hands out the app's files and stores nothing.
+Push notifications pass through a small program TMA runs
 on Cloudflare (the "push Worker", see below) and then through Apple's, Google's, Mozilla's or
 Microsoft's notification service to the phone. The app's emails go out through the same Worker (see
 "Who sends the app's emails?"). Card payments happen entirely on PayPal.
@@ -121,8 +123,10 @@ what's needed, and follow the music department's and district's guidance.
 
 ### What does it cost?
 
-**$0** to run, plus **$5 a month** for email from `noreply@mytma.org`. Google Sheet, Apps Script,
-Gmail, GitHub Pages and push notifications are all free at TMA's size. Sending email from TMA's own
+**$0** to run, plus about **$10–12 a year** for TMA's web address `mytma.org` and **$5 a month** for
+email from `noreply@mytma.org`. Google Sheet, Apps Script, Gmail, hosting the app at `mytma.org` and
+push notifications are all free at TMA's size. The web address is registered with Cloudflare and
+renews every October (first renewal October 2027). Sending email from TMA's own
 address needs Cloudflare's **Workers Paid** plan: $5 a month, which includes 3,000 emails a month
 (more than TMA normally sends), then $0.35 per 1,000. Without it the app emails from TMA's Gmail
 instead, for free, but with Google's limit of about 100 emails a day on a free account. Online
@@ -132,19 +136,27 @@ optional and cost about 1¢ each. Details: [PAYMENTS.md](PAYMENTS.md) and the
 
 ### What if the volunteer developer leaves?
 
-Nothing stops working. There are **no servers to maintain**, and the only subscription is
-Cloudflare's $5-a-month plan for email from `noreply@mytma.org`. It is a Google Sheet plus a script
-inside TMA's account, and a website hosted for free. The code and
+Nothing stops working, **as long as the web address `mytma.org` keeps being renewed** (see below).
+There are **no servers to maintain**, and two things are paid for: the web address (about $10–12 a
+year) and Cloudflare's $5-a-month plan for email from `noreply@mytma.org`. It is a Google Sheet plus a
+script inside TMA's account, and a website hosted for free. The code and
 step-by-step documentation are in the GitHub repository, so another volunteer can take over.
 Occasional updates may be needed if Google, PayPal or Apple change something.
 
-One piece lives outside Google: the **push Worker** on Cloudflare. Make sure TMA can sign in to the
-Cloudflare account it runs in, or move it to a TMA-owned account
-([SETUP.md, step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account)), and that someone
-on the board can see its bill. If the $5 plan lapsed, emails would simply come from TMA's Google
-account again instead of `noreply@mytma.org`. If the Worker ever stopped altogether, the app would
-keep working and emails would still go out (from TMA's Google account); only phone notifications
-would pause.
+Some pieces live outside Google, all in **one Cloudflare account**: the web address `mytma.org`, the
+small program that serves the app there, and the **push Worker** (the account whose Worker addresses
+end in `coleciprari.workers.dev`). Make sure TMA can sign in to it, or move everything to a TMA-owned account
+([SETUP.md, step 5F](SETUP.md#f-moving-to-another-cloudflare-account)), and that someone on the board
+can see its bills and gets its emails.
+
+* **Don't let `mytma.org` lapse.** Keep **auto-renew** on, with a payment method TMA controls. If the
+  registration expired, the app would stop opening on every family's phone, and whoever registered
+  `mytma.org` next would control the address families' phones trust, including the sign-ins and
+  family details the app keeps on each phone. Act at once on any email about a failed renewal.
+* If the $5 plan lapsed, emails would simply come from TMA's Google account again instead of
+  `noreply@mytma.org`.
+* If the push Worker ever stopped altogether, the app would keep working and emails would still go
+  out (from TMA's Google account); only phone notifications would pause.
 
 **To switch it off:** in the spreadsheet open *Extensions → Apps Script* → **Triggers** (delete
 the two schedules) and **Deploy → Manage deployments → Archive**. All the data stays in the
@@ -155,7 +167,10 @@ spreadsheet, exactly as the treasurer has always kept it.
 Delete their rows in **Families** and **Students**, and their email's rows in the hidden
 **Preferences** and **Devices** tabs (*View → Hidden sheets*). Keep the **Ledger** and **Payments**
 rows for TMA's financial records. They contain only a student ID and amounts. Once the household
-and student rows are gone, nobody can see that family's information in the app. There is nothing to
+and student rows are gone, nobody can see that family's information in the app. The app never
+gives a later sign-up a student or family ID that is still used in any tab, so those kept rows can't
+end up on someone else's account; if one ever looks like it might, the household review in the app
+says *Check the sheet before approving*. There is nothing to
 delete on Cloudflare: the push Worker keeps no family information.
 
 ### Can families stop emails and notifications?
@@ -185,8 +200,9 @@ volunteers whether or not TMA uses this app.
 2. **Share the spreadsheet** only with the treasurer and one or two board members, each with their
    own Google account, rather than sharing the password.
 3. Keep `ADMIN_EMAILS` current. Remove people when they leave the board.
-4. Know who can sign in to the Cloudflare account that runs the push Worker, and keep that list
-   short too.
+4. Know who can sign in to the Cloudflare account that holds `mytma.org` and runs the push Worker,
+   and keep that list short too. Keep `mytma.org` on **auto-renew** with a payment method TMA
+   controls, ideally in an account that belongs to TMA.
 5. Once a year, mark graduated students and departed families `Inactive`, and delete data you no
    longer need.
 6. Adopt the written activity-fund policy above.

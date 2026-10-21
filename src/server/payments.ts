@@ -10,7 +10,7 @@ import type { Ctx } from './context';
 import { rateLimit } from './context';
 import { toPayment, type PaymentRec } from './data';
 import { badRequest, conflict, fail, forbidden, notFound } from './errors';
-import { paymentReceivedNotice, paymentReviewNotice } from './messages';
+import { paymentReceivedNotice, paymentReviewNotice, paymentUnconfirmedNotice } from './messages';
 import { notifyAdmins, notifyFamily } from './notify';
 import type { CaptureResult } from './services';
 import { errorMessage, hex8, idKey, isRecord, truncate } from './util';
@@ -29,6 +29,8 @@ interface PendingOrder {
   feeCents: Cents;
   grossCents: Cents;
   captureId?: string;
+  /** An earlier capture got no definite answer: PayPal may already hold this payment. */
+  unconfirmed?: boolean;
 }
 
 function orderKey(orderId: string): string {
@@ -77,8 +79,15 @@ export function createOrder(
   if (!account || account.enrollmentStatus !== 'Going') {
     badRequest(`${student.firstName} isn't signed up as going on ${activity.name}.`);
   }
+  // remainingCents already leaves out payments still clearing, so nothing is paid twice.
   const remaining = account.remainingCents;
-  if (remaining <= 0) conflict(`${activity.name} is already paid in full.`);
+  if (remaining <= 0) {
+    conflict(
+      account.pendingPaymentCents
+        ? `A payment toward ${activity.name} is still being processed, so nothing is left to pay right now.`
+        : `${activity.name} is already paid in full.`,
+    );
+  }
   // A final balance smaller than the minimum may still be paid in full.
   const minimum = Math.min(settings.minPaymentCents, remaining);
   if (amount < minimum) badRequest(`The smallest online payment is ${formatCents(minimum)}.`);
@@ -139,12 +148,49 @@ export function captureOrder(ctx: Ctx, email: string, params: v.Params): { payme
   const existing = findPayment(ctx, [order.captureId, orderId]);
   if (existing) return { payment: toPayment(existing) };
 
+  const student = ctx.m.studentById(order.studentId);
+  const activity = ctx.m.activityById(order.activityId);
+  const firstName = student?.firstName ?? order.studentId;
+  const activityName = activity?.name ?? order.activityId;
+
+  // Re-check what's left (we hold the write lock): the other guardian, a second tab or an eCheck
+  // still clearing may have paid since this order was created. Not capturing means no charge.
+  // (Not after an unconfirmed capture: that payment may be what was recorded meanwhile, and asking
+  // PayPal again with the same PayPal-Request-Id can't charge twice.)
+  if (!order.captureId && !order.unconfirmed) {
+    const left = ctx.m.books().account(order.studentId, order.activityId)?.remainingCents ?? 0;
+    if (order.amountCents > left) {
+      ctx.log('payment', `${orderId}: not captured; ${formatCents(order.amountCents)} is more than the ${formatCents(left)} left for ${order.studentId} / ${order.activityId}`);
+      fail(
+        'PAYMENT_FAILED',
+        left > 0
+          ? `Part of this was paid in the meantime and only ${formatCents(left)} is left, so this payment was stopped and you were not charged. Please start again with the new amount.`
+          : `${activityName} was paid in the meantime, so this payment was stopped and you were not charged.`,
+      );
+    }
+  }
+
   let result: CaptureResult;
   try {
     result = ctx.s.payments.captureOrder(orderId, `cap-${orderId}`);
   } catch (err) {
+    // We can't tell whether PayPal took the money.
     ctx.s.logger.error('PayPal captureOrder failed', errorMessage(err));
-    return fail('PAYMENT_FAILED', "We couldn't confirm the payment with PayPal. Please try again in a minute.");
+    result = { status: 'UNKNOWN', message: errorMessage(err) };
+  }
+  if (result.status === 'UNKNOWN') {
+    // Never "you were not charged" here. Keep the cached order: capturing it again with the same
+    // PayPal-Request-Id records the payment if it went through. Admins check PayPal meanwhile.
+    ctx.s.cache.put(orderKey(orderId), JSON.stringify({ ...order, unconfirmed: true }), ORDER_TTL_SECONDS);
+    const detail = `${orderId}: PayPal did not confirm the capture of ${formatCents(order.grossCents)} (${result.message ?? 'no answer'}); check PayPal (${email}, ${order.studentId}, ${order.activityId})`;
+    ctx.log('payment-error', detail);
+    ctx.s.logger.error('Capture outcome unknown', detail);
+    // Once per order: the app asks again by itself after an unclear answer.
+    if (!order.unconfirmed) notifyAdmins(ctx, paymentUnconfirmedNotice(firstName, activityName, order.grossCents, orderId));
+    fail(
+      'INTERNAL',
+      "We couldn't confirm the payment with PayPal. If PayPal emailed you a receipt, it went through and TMA will record it. Please don't pay again until it shows in the app.",
+    );
   }
 
   const captureId = typeof result.captureId === 'string' && result.captureId.trim() !== '' ? result.captureId.trim() : undefined;
@@ -154,11 +200,6 @@ export function captureOrder(ctx: Ctx, email: string, params: v.Params): { payme
     const already = findPayment(ctx, [captureId]);
     if (already) return { payment: toPayment(already) };
   }
-
-  const student = ctx.m.studentById(order.studentId);
-  const activity = ctx.m.activityById(order.activityId);
-  const firstName = student?.firstName ?? order.studentId;
-  const activityName = activity?.name ?? order.activityId;
 
   if (result.status === 'COMPLETED') {
     if (result.grossCents !== order.grossCents) {

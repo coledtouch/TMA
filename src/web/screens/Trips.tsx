@@ -154,6 +154,12 @@ function AccountCard({
           directly
         </p>
       ) : null}
+      {account.pendingPaymentCents ? (
+        <p className="muted small">
+          {formatCents(account.pendingPaymentCents)} payment still processing. It counts as paid once it clears, so it's
+          not in "Left to pay".
+        </p>
+      ) : null}
 
       <DueDates account={account} />
 

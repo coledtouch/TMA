@@ -3,8 +3,10 @@
  * students, with only the information TMA needs.
  */
 import { useId, useState, type FormEvent } from 'react';
+import { normalizeHeader } from '../../shared/schema';
 import type { Bootstrap, HouseholdInput, RecordStatus } from '../../shared/types';
 import { errorMessage } from '../api/client';
+import { ConfirmDialog } from '../components/Dialog';
 import { CheckboxGroup, SelectField, TextField } from '../components/Field';
 import { Icon } from '../components/Icon';
 import { EmptyState } from '../components/States';
@@ -66,6 +68,19 @@ function initialGuardians(data: Bootstrap): GuardianForm[] {
   }));
 }
 
+/**
+ * A student's groups as the form's checkboxes name them. The sheet keeps names
+ * the treasurer typed that aren't on TMA's list (ARCHITECTURE.md §3), and a
+ * group can be dropped from the list later; the form has no box for those, so
+ * sending them would make every save fail ("choose groups from the list")
+ * with nothing on screen to fix. The server keeps them on the student's row
+ * (src/server/household.ts), so leaving them out here loses nothing.
+ */
+function knownEnsembles(ensembles: readonly string[], options: readonly string[]): string[] {
+  const chosen = new Set(ensembles.map(normalizeHeader));
+  return options.filter((o) => chosen.has(normalizeHeader(o)));
+}
+
 function initialStudents(data: Bootstrap): StudentForm[] {
   const existing = data.students.map(({ student: s }) => ({
     key: s.id,
@@ -75,7 +90,7 @@ function initialStudents(data: Bootstrap): StudentForm[] {
     lastName: s.lastName,
     grade: s.grade,
     school: s.school,
-    ensembles: s.ensembles.slice(),
+    ensembles: knownEnsembles(s.ensembles, data.settings.ensembles),
     instrument: s.instrument ?? '',
   }));
   return existing.length > 0 || data.family ? existing : [blankStudent()];
@@ -143,7 +158,8 @@ export function Household() {
       </div>
     );
   }
-  return <HouseholdForm />;
+  // A new form when the household changes (e.g. after leaving one), so it starts from the fresh data.
+  return <HouseholdForm key={data.family?.id ?? 'none'} />;
 }
 
 function HouseholdForm() {
@@ -159,6 +175,8 @@ function HouseholdForm() {
   const [busy, setBusy] = useState(false);
   const callerIsFirst = isNew || data.family?.guardians[0]?.email === me.email;
   const canAddGuardian = guardians.length < 2 && callerIsFirst;
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  const [leaving, setLeaving] = useState(false);
 
   const setGuardian = (i: number, patch: Partial<GuardianForm>) =>
     setGuardians((list) => list.map((g, j) => (j === i ? { ...g, ...patch } : g)));
@@ -192,6 +210,32 @@ function HouseholdForm() {
       setFormError(errorMessage(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * Second guardian only: someone may have typed this email on their household without asking.
+   * Taking it off lets this parent set up their own household (ARCHITECTURE.md §5.2).
+   */
+  async function leave() {
+    setLeaving(true);
+    setFormError(null);
+    try {
+      const fresh = await api.call('household.save', { guardians: [], students: [], leave: true });
+      setConfirmLeave(false);
+      replaceData(fresh);
+      toast('Your email is no longer on that household. You can set up your own.');
+      // The form starts over for their own household: show it from the top.
+      try {
+        window.scrollTo({ top: 0 });
+      } catch {
+        // jsdom / old browsers
+      }
+    } catch (err) {
+      setConfirmLeave(false);
+      setFormError(errorMessage(err));
+    } finally {
+      setLeaving(false);
     }
   }
 
@@ -419,6 +463,36 @@ function HouseholdForm() {
           </p>
         ) : null}
       </form>
+
+      {!callerIsFirst ? (
+        <section className="card stack" aria-labelledby={`${formId}-leave`}>
+          <h2 className="card-title" id={`${formId}-leave`}>
+            Not your household?
+          </h2>
+          <p className="muted small">
+            {data.family?.guardians[0]?.name || 'Another parent'} added your email to this household. If that's a
+            mistake, take your email off it. You can then set up your own household.
+          </p>
+          <button type="button" className="btn btn-secondary btn-block" onClick={() => setConfirmLeave(true)} disabled={busy || leaving}>
+            This isn't my household
+          </button>
+        </section>
+      ) : null}
+      <ConfirmDialog
+        open={confirmLeave}
+        title="Take your email off this household?"
+        message={
+          <p>
+            You'll no longer see this household's students, funds or trips in the app. The household itself doesn't
+            change. To join it again, ask {data.family?.guardians[0]?.name || 'the first parent'} to add your email.
+          </p>
+        }
+        confirmLabel="Remove my email"
+        danger
+        busy={leaving}
+        onConfirm={leave}
+        onCancel={() => setConfirmLeave(false)}
+      />
     </div>
   );
 }

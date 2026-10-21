@@ -418,6 +418,19 @@ export function HouseholdReview({ household: h, onDone }: { household: PendingHo
         </fieldset>
       ))}
 
+      {h.warnings && h.warnings.length > 0 ? (
+        <div className="callout callout-warning small" role="group" aria-labelledby={`${groupName}-warnings`}>
+          <Icon name="alert" size={16} />
+          <div>
+            <strong id={`${groupName}-warnings`}>Check the sheet before approving</strong>
+            <ul className="review-warnings">
+              {h.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
       {error ? (
         <p className="form-error" role="alert">
           {error}
@@ -652,6 +665,16 @@ export function TickReportView({ report }: { report: TickReport }) {
           </dd>
         </div>
       </dl>
+      {report.waiting ? (
+        <p className="callout callout-info small">
+          <Icon name="info" size={16} />
+          <span>
+            {report.waiting === 1
+              ? '1 row typed in the sheet changed in the last few minutes. It goes out at a later sync, once it stops changing.'
+              : `${report.waiting} rows typed in the sheet changed in the last few minutes. They go out at a later sync, once they stop changing.`}
+          </span>
+        </p>
+      ) : null}
       {report.errors.length > 0 ? (
         <ul className="callout callout-warning small report-errors">
           {report.errors.map((e, i) => (

@@ -1,6 +1,7 @@
 /**
  * Labelled form controls. Every input has a visible label; hints and errors
- * are tied to it with aria-describedby, and errors set aria-invalid.
+ * are tied to it with aria-describedby, errors set aria-invalid and are
+ * announced when they appear.
  */
 import { useId, type ComponentProps, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 
@@ -34,7 +35,8 @@ function FieldMessages({ hintId, errorId, hint, error }: { hintId: string; error
         </p>
       ) : null}
       {error ? (
-        <p className="field-error" id={errorId}>
+        // An alert, so it's announced even when focus doesn't move to the field (Enter pressed in it).
+        <p className="field-error" id={errorId} role="alert">
           {error}
         </p>
       ) : null}

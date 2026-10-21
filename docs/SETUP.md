@@ -1,9 +1,10 @@
 # Setting up the TMA Family App
 
-This guide takes you from nothing to a working app for TMA families. It takes **about an hour**,
-costs **$0** (plus **$5 a month** if emails should come from `noreply@mytma.org`, see
-[Email from noreply@mytma.org](#email-from-noreplymytmaorg)), and needs no programming, just careful
-clicking. Do it on a computer, not a phone.
+This guide takes you from nothing to a working app for TMA families. It takes **about an hour**
+and needs no programming, just careful clicking. Do it on a computer, not a phone. Setting up costs
+**$0**. Running it costs about **$10–12 a year** for TMA's web address `mytma.org`, which is already
+registered (see [step 7](#7-put-the-app-online-at-mytmaorg)), plus **$5 a month** if emails should
+come from `noreply@mytma.org` (see [Email from noreply@mytma.org](#email-from-noreplymytmaorg)).
 
 | Step | What you'll do | Time |
 | --- | --- | --- |
@@ -15,7 +16,7 @@ clicking. Do it on a computer, not a phone.
 | [5](#5-push-notifications-cloudflare-free) | Push notifications (Cloudflare, free). Already running: just check it. | 2 min |
 | [Email](#email-from-noreplymytmaorg) | Email from `noreply@mytma.org` (Cloudflare Workers Paid, $5/month). Without it, email comes from the Google account. | 15 min |
 | [6](#6-online-payments-paypal) | Online payments (PayPal). Optional, can be done later. | 15 min plus PayPal's approval |
-| [7](#7-host-the-app-on-github-pages) | Put the app online (GitHub Pages) | 10 min |
+| [7](#7-put-the-app-online-at-mytmaorg) | Put the app online at `https://mytma.org`. Already running: connect it to this spreadsheet. | 10 min |
 | [8](#8-optional-text-messages-twilio) | Text messages (Twilio). Optional, **costs money**. | 20 min plus carrier approval |
 | [9](#9-go-live-checklist-and-test-plan) | Go-live checklist and test | 30 min |
 | [10](#10-updating-the-app-later) | Updating the app later | |
@@ -143,7 +144,8 @@ in needs a valid, signed sign-in session, and each parent only ever gets their o
 ## 4. Turn on the schedules
 
 The app checks the sheet every 15 minutes (new credits, approvals typed into the sheet, queued
-announcements) and sends reminders once a day around 8 AM.
+announcements; a typed approval or announcement waits until the row has stayed the same for about
+5 minutes) and sends reminders once a day around 8 AM.
 
 1. If you are importing data, finish the import first, including the *Run sync now* step in
    [SHEET.md](SHEET.md#importing-the-existing-spreadsheet).
@@ -215,6 +217,9 @@ TMA**:
 * `CLOUDFLARE_API_TOKEN`: a Cloudflare API token made from the *Edit Cloudflare Workers* template.
 * `CLOUDFLARE_ACCOUNT_ID`: the ID of the Cloudflare account the Worker runs in.
 
+The app's own workflow (*Deploy app to mytma.org (Cloudflare)*, [step 7](#7-put-the-app-online-at-mytmaorg))
+uses the same two secrets, so both Workers and the web address `mytma.org` live in that one account.
+
 The Worker stays well inside Cloudflare's free plan: the script sends it at most 5 notifications per
 request, and it stores nothing but its own key pair and a scrambled (hashed) copy of the password.
 
@@ -247,33 +252,58 @@ expired and the script removes them from the Devices tab. Each of those phones s
 new key by itself **the next time the app is opened**. If a phone can't, the app shows *Turn on
 notifications* again.
 
-#### F. Moving the Worker to another Cloudflare account
+#### F. Moving to another Cloudflare account
 
-For example, to a Cloudflare account that belongs to TMA. Someone comfortable with GitHub should do
-this.
+For example, to a Cloudflare account that belongs to TMA. Everything TMA has on Cloudflare moves
+**together**: the push Worker (`tma-push`), the app's Worker (`tma-app`, [step 7](#7-put-the-app-online-at-mytmaorg))
+and the web address `mytma.org` (its registration and its DNS). They have to: both GitHub workflows
+use the same two secrets, the app's Worker can only answer at `mytma.org` from the account that holds
+the domain, and email from `noreply@mytma.org` needs the domain in the push Worker's account.
+Someone comfortable with GitHub should do this, at a quiet time: `https://mytma.org` is offline from
+the moment the domain move is accepted (step 4) until the app is deployed in the new account
+(step 7), so do steps 4 to 7 together. Emails come from the Google account until step 10 is done.
 
-1. Create a free Cloudflare account at **https://dash.cloudflare.com/sign-up**. Open
+1. Create a Cloudflare account at **https://dash.cloudflare.com/sign-up**. Open
    **Workers & Pages** once and, if asked, choose a `workers.dev` subdomain (it becomes part of the
-   Worker's address).
+   push Worker's address).
 2. *Storage & Databases → KV → Create* a namespace named `TMA_PUSH`. Copy its **ID**.
-3. In the GitHub repository, edit `workers/push/wrangler.toml`: under `[[kv_namespaces]]`, replace the
-   `id = "…"` value with the new ID. Commit to `main`.
-4. In Cloudflare: *My Profile → API Tokens → Create Token* → **Edit Cloudflare Workers** template →
-   choose the new account → *Continue to summary* → **Create Token**. Copy the token. Copy the
-   **Account ID** too (*Workers & Pages → Overview*, right-hand column).
-5. In GitHub: *Settings → Secrets and variables → Actions → Secrets*: update `CLOUDFLARE_API_TOKEN`
-   and `CLOUDFLARE_ACCOUNT_ID` with the new values.
-6. *Actions → Deploy push Worker (Cloudflare) → Run workflow* (branch `main`). When it finishes, the
-   run's summary shows the new address, `https://tma-push.<subdomain>.workers.dev`, and its health check.
-7. In the spreadsheet's **Settings** tab, set `PUSH_RELAY_URL` to the new address.
-8. In Apps Script → *Project Settings → Script Properties*, delete `PUSH_RELAY_SECRET` and
-   `PUSH_PUBLIC_KEY` (they belong to the old Worker). Then **TMA App → Set up / repair tabs**, and
-   check **TMA App → Status** shows the new address with ✓s. For email, the new account also needs
-   the Workers Paid plan, `mytma.org` onboarded and the `EMAIL_KEY` secret: follow
-   [Email from noreply@mytma.org](#email-from-noreplymytmaorg) A to E there.
-9. Phones follow the new key by themselves the next time the app is opened, as in E.
-10. Once everything works, delete the old Worker in the old account (*Workers & Pages → tma-push →
-    Settings → Delete*).
+3. *My Profile → API Tokens → Create Token* → **Edit Cloudflare Workers** template → choose the new
+   account, and all zones of that account under *Zone Resources* → *Continue to summary* → **Create
+   Token**. Copy the token. Copy the **Account ID** too (*Workers & Pages → Overview*, right-hand column).
+4. **Move `mytma.org`** (it must have been registered more than 10 days earlier):
+   1. In the **new** account: *Add a domain* → `mytma.org` → the **Free** plan. Skip the nameserver
+      instructions; the move takes care of them.
+   2. In the **old** account: `mytma.org` → *DNS → Settings*: turn **DNSSEC** off if it's on. Then
+      *Domain Registration → Manage Domains* → `mytma.org` → **Configuration** → move to another
+      account → **Start**, and give the new Account ID.
+   3. In the **new** account: *Domain Registration → Manage Domains* → **View Actions** → accept the
+      move (within five days, or it's cancelled). Wait until `mytma.org` shows as **Active** there.
+   4. The registration moves, but none of the old account's settings for the domain do. In the new
+      account, under *Manage Domains* → `mytma.org`: turn **Auto-renew** on and check the payment
+      method is one TMA controls. Turn DNSSEC back on if you want it.
+5. **Email, in the new account:** do [Email from noreply@mytma.org](#email-from-noreplymytmaorg) A
+   (Workers Paid) and B (onboard `mytma.org`).
+6. In GitHub: *Settings → Secrets and variables → Actions → Secrets*: update `CLOUDFLARE_API_TOKEN`
+   and `CLOUDFLARE_ACCOUNT_ID` with the new values. Do this **before** step 8: that commit starts a
+   deploy, which must go to the new account.
+7. *Actions → Deploy app to mytma.org (Cloudflare) → Run workflow* (branch `main`). It creates
+   `tma-app` in the new account and attaches `mytma.org` and `www.mytma.org` to it. Check that
+   **https://mytma.org** opens the app (a brand-new address can take a few minutes).
+8. In the GitHub repository, edit `workers/push/wrangler.toml`: under `[[kv_namespaces]]`, replace the
+   `id = "…"` value with the ID from step 2. Commit to `main`. That starts *Deploy push Worker
+   (Cloudflare)* (if it doesn't, run it by hand: *Actions → Deploy push Worker (Cloudflare) → Run
+   workflow*). When it finishes, the run's summary shows the new address,
+   `https://tma-push.<subdomain>.workers.dev`, and its health check.
+9. In the spreadsheet's **Settings** tab, set `PUSH_RELAY_URL` to the new address.
+10. In Apps Script → *Project Settings → Script Properties*, delete `PUSH_RELAY_SECRET` and
+    `PUSH_PUBLIC_KEY` (they belong to the old Worker). Then **TMA App → Set up / repair tabs**, and
+    check **TMA App → Status** shows the new address with ✓s. Then give the new Worker this
+    spreadsheet's email key and check email: [Email from noreply@mytma.org](#email-from-noreplymytmaorg)
+    D and E.
+11. Phones follow the new key by themselves the next time the app is opened, as in E. Families' sign-ins
+    on `mytma.org` keep working: the address hasn't changed.
+12. Once everything works, in the old account delete both Workers (*Workers & Pages → **tma-push** →
+    Settings → Delete*, then the same for **tma-app**) and cancel its Workers Paid plan.
 
 ## Email from noreply@mytma.org
 
@@ -299,7 +329,8 @@ free. (Check current prices on Cloudflare's
 **A. Upgrade the Cloudflare account** (dash.cloudflare.com, signed in to the account the push Worker
 runs in): *Workers & Pages → Plans* → **Workers Paid** → add a payment method.
 
-**B. Onboard the domain.** `mytma.org` is already on that Cloudflare account (it hosts the app).
+**B. Onboard the domain.** `mytma.org` is already on that Cloudflare account (it hosts the app,
+[step 7](#7-put-the-app-online-at-mytmaorg)).
 *Compute → Email Service → Email Sending → **Onboard Domain*** → choose `mytma.org` → follow the
 steps. Cloudflare lists the DNS records that prove the emails really come from `mytma.org` (SPF and
 DKIM); since it already runs the domain's DNS, accept its offer to add them. Wait until the domain
@@ -326,7 +357,7 @@ whose key it holds, so that nobody else can link themselves to the Worker and se
 
 Do this again whenever the spreadsheet gets a new Worker password: after
 [5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys) (another spreadsheet, or rotating the
-keys) or [5F](#f-moving-the-worker-to-another-cloudflare-account) (another Cloudflare account).
+keys) or [5F](#f-moving-to-another-cloudflare-account) (another Cloudflare account).
 
 **E. Check it.** In the spreadsheet: **TMA App → Status**. The Email line should read:
 
@@ -417,17 +448,18 @@ PayPal's nonprofit team whether trip payments (not just donations) qualify. Thei
 To switch online payments off at any time, set `ONLINE_PAYMENTS` to `FALSE`. Families then see the
 "Other ways to pay" instructions only.
 
-## 7. Host the app on GitHub Pages
+## 7. Put the app online at mytma.org
 
-The app itself (what families open) is a set of files that GitHub hosts for free. The repository
-includes a workflow (`.github/workflows/deploy-pages.yml`) that builds and publishes it.
+The app itself (what families open) is a set of files served at **`https://mytma.org`**, TMA's own
+web address, by a second small Cloudflare Worker (`tma-app`, code in `workers/app`) that stores
+nothing. It runs in the same Cloudflare account as the push Worker; that account also holds the
+`mytma.org` registration. The workflow `.github/workflows/deploy-app-cloudflare.yml` (**Deploy app to
+mytma.org (Cloudflare)**) builds and publishes it with the two repository secrets from
+[step 5D](#5-push-notifications-cloudflare-free), which are already set up. All that's left is to tell
+it which spreadsheet to work on:
 
-GitHub Pages is free for **public** repositories (private ones need a paid GitHub plan). The code
-contains no secrets, so a public repository is fine.
-
-1. In the repository on github.com: **Settings → Pages → Build and deployment → Source:
-   GitHub Actions**.
-2. **Settings → Secrets and variables → Actions → Variables** tab → **New repository variable**:
+1. In the repository on github.com: **Settings → Secrets and variables → Actions → Variables** tab →
+   **New repository variable** (or the pencil icon if it exists):
 
    | Name | Value |
    | --- | --- |
@@ -436,26 +468,48 @@ contains no secrets, so a public repository is fine.
    Use **Variables**, not *Secrets*. This value is public (it ends up in the app's code anyway),
    and the workflow reads it as a variable. Push notifications need no variable: the app gets the
    push Worker's key from the script.
-3. Open the **Actions** tab → **Deploy to GitHub Pages** → **Run workflow** → branch `main` →
-   **Run workflow**. (It also runs by itself whenever something is pushed to `main`.) Wait for the
-   green check, about 2–3 minutes.
-4. The app is now at **`https://<owner>.github.io/<repo>/`**, for example
-   `https://coledtouch.github.io/TMA/`. The address is also shown under *Settings → Pages*.
-5. In the spreadsheet's **Settings** tab set `APP_URL` to that address (with the `/` at the end).
-6. Open the address on your phone. The sign-in page should **not** show the *Demo* box (only a
-   small *See a demo with sample data* link at the bottom). If it shows the Demo box, the variable
-   wasn't picked up: check its name and run the workflow again.
+2. Open the **Actions** tab → **Deploy app to mytma.org (Cloudflare)** → **Run workflow** → branch
+   `main` → **Run workflow**. Changing the variable alone doesn't rebuild the app. Wait for the green
+   check, about 2–3 minutes. The run's summary shows **Backend (VITE_API_URL)**: check it is this
+   spreadsheet's `/exec` URL.
+3. In the spreadsheet's **Settings** tab set `APP_URL` to **`https://mytma.org/`** (with the `/` at
+   the end). It is the *Open the TMA app* button in every email.
+4. Open **https://mytma.org** on your phone. The sign-in page should **not** show the *Demo* box (only
+   a small *See a demo with sample data* link at the bottom). If the run's summary says *Backend:
+   TMA's TEST spreadsheet* instead of this spreadsheet's `/exec` URL, the variable wasn't picked up:
+   check its name and run the workflow again.
 
-**Whenever you change `VITE_API_URL`, run the workflow again.** The value is built into the app.
+**Whenever you change `VITE_API_URL`, run *Deploy app to mytma.org (Cloudflare)* again.** The value is
+built into the app. The workflow also runs by itself whenever the app's code changes on `main`.
 
-**Without the variable, the whole site is the demo.** With it, the demo is still one link away:
-**`https://<owner>.github.io/<repo>/?demo`** (for example `https://coledtouch.github.io/TMA/?demo`)
-opens the demo with made-up families. That browser stays in the demo, with a strip at the top
-saying so, until someone taps **Exit demo**. Demo sign-ins and data are kept apart from the real
-app's. Share the `?demo` link with the board as the prototype.
+**Without the variable, mytma.org works on TMA's test spreadsheet.** While TMA is testing, the
+workflow falls back to the [test spreadsheet](#test-spreadsheet)'s `/exec` URL (`TEST_API_URL` in the
+workflow file), and the run's summary says *Backend: TMA's TEST spreadsheet*. Going live means
+setting the variable to the real spreadsheet. Either way, the demo is still one link away:
+**`https://mytma.org/?demo`** opens the demo with made-up families. That browser stays in the demo,
+with a strip at the top saying so, until someone taps **Exit demo**. Demo sign-ins and data are kept
+apart from the real app's. Share the `?demo` link with the board as the prototype.
 
-*For developers:* any static host works too. Build with `VITE_API_URL` set (`npm run build:web`) and
-upload the `dist/` folder.
+**The web address `mytma.org`** is registered with Cloudflare Registrar in that same Cloudflare
+account (registered October 2026, renewed every October). It costs about **$10–12 a year**:
+Cloudflare charges the registry's price with no markup, and *Domain Registration → Manage Domains*
+shows the exact amount. In that account, make sure **Auto-renew** is on for `mytma.org` and the
+payment method is one TMA controls, and that a board member gets its emails. If the name ever
+lapsed, the app would stop opening on every phone, and whoever registered `mytma.org` next would
+control the address families' phones trust, with the sign-ins and family details the app keeps there.
+To move it to a TMA-owned Cloudflare account, see [step 5F](#f-moving-to-another-cloudflare-account).
+
+**The demo copy on GitHub Pages.** `.github/workflows/deploy-pages.yml` (**Deploy to GitHub Pages**)
+publishes a demo-only copy at `https://<owner>.github.io/<repo>/`, for example
+`https://coledtouch.github.io/TMA/`, if the repository has *Settings → Pages → Source: GitHub Actions*.
+It is always the demo, whatever `VITE_API_URL` says: every GitHub Pages site of one owner shares one
+web origin (`https://<owner>.github.io`), and a page on any of them could read the sign-in and family
+details the real app keeps in the browser. Don't give families that address, and don't use it as
+`APP_URL`.
+
+*For developers:* another host works too, but only at an address of its own (its own domain or
+subdomain, not a shared one like `<owner>.github.io`). Build with `VITE_API_URL` set
+(`npm run build:web`) and upload the `dist/` folder.
 
 ## 8. Optional: text messages (Twilio)
 
@@ -472,7 +526,9 @@ prices at [twilio.com](https://www.twilio.com/en-us/sms/pricing/us). Most groups
 4. Settings tab: `SMS_ENABLED` = `TRUE`.
 
 Families then see a **Text messages** option with a *Cell number for texts* box under
-*More → Notifications*.
+*More → Notifications*. Only US and Canadian cell numbers are accepted, and texts go only to
+guardians of households TMA has verified (Active) and to the board members in `ADMIN_EMAILS`, so
+someone who just signed up can't run up TMA's Twilio bill.
 
 ## 9. Go-live checklist and test plan
 
@@ -487,8 +543,10 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 - [ ] Settings: `ADMIN_EMAILS`, `SUPPORT_EMAIL`, `OTHER_PAYMENT_INSTRUCTIONS` and `DONATE_URL` are
       right, and `FEE_PERCENT` matches TMA's actual PayPal rate.
 - [ ] Data imported, and the first *Run sync now* done (see [SHEET.md](SHEET.md#importing-the-existing-spreadsheet)).
-- [ ] The app's address opens **without** the Demo box, and `VITE_API_URL` is this spreadsheet's
-      `/exec` URL (not the test spreadsheet's).
+- [ ] **https://mytma.org** opens **without** the Demo box, and the latest *Deploy app to mytma.org
+      (Cloudflare)* run's summary shows **this** spreadsheet's `/exec` URL (not the test
+      spreadsheet's). `APP_URL` is `https://mytma.org/`.
+- [ ] `mytma.org` has **Auto-renew** on, with a payment method TMA controls ([step 7](#7-put-the-app-online-at-mytmaorg)).
 - [ ] Only the treasurer and one or two board members can edit the spreadsheet (*Share* button).
 
 **Test plan** (two people, two phones, about 30 minutes)
@@ -513,15 +571,16 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 8. **Clean up.** Delete the test rows from Ledger, Payments, Redemptions, Enrollments and
    Activities, and mark the test household and student `Inactive`.
 
-**Launching to families.** Share the address by email, on Facebook and on TMA's website, with
+**Launching to families.** Share **https://mytma.org** by email, on Facebook and on TMA's website, with
 four steps: *open the link → Add to Home Screen → sign in with your email and set up your
 household → turn on notifications*. On a free Gmail account, **announce in waves** (for example one
 grade level per day), because sign-in codes count against the daily email limit. See [Quotas](#quotas).
 
 ## 10. Updating the app later
 
-**The app families open (GitHub Pages)** updates by itself whenever new code is pushed to `main`.
-Families see *"A new version of the app is ready"* with a **Reload** button.
+**The app families open (`https://mytma.org`)** updates by itself whenever the app's code changes on
+`main` (workflow *Deploy app to mytma.org (Cloudflare)*). Families see *"A new version of the app is
+ready"* with a **Reload** button. The demo copy on GitHub Pages updates the same way.
 
 **The server (Apps Script)** must be updated by hand when `apps-script/Code.js` changes:
 
@@ -644,23 +703,28 @@ is in that copy's `ADMIN_EMAILS`, so it can try *Board tools*). No real family's
 4. Optional: **TMA App → Install schedules** ([step 4](#4-turn-on-the-schedules)), so balance
    changes and reminders go out by themselves.
 5. In the GitHub repository: *Settings → Secrets and variables → Actions → Variables* → set
-   `VITE_API_URL` to that `/exec` URL (create it, or edit it with the pencil icon). Then *Actions →
-   Deploy to GitHub Pages → Run workflow* ([step 7](#7-host-the-app-on-github-pages)). Pick the
-   branch that holds the app's current code: `main`, or the work-in-progress branch the site is
-   published from while that work isn't merged into `main` yet. Changing the variable alone doesn't
-   rebuild the site.
-6. In the test spreadsheet's Settings, set `APP_URL` to `https://coledtouch.github.io/TMA/`.
+   `VITE_API_URL` to that `/exec` URL (create it, or edit it with the pencil icon). For TMA's own
+   test copy you can skip this: while the variable is unset, the workflow already uses its `/exec`
+   URL (`TEST_API_URL`). If you deploy the test copy as a *new* web app, its URL changes: set the
+   variable, or update `TEST_API_URL` in the workflow file. Then *Actions →
+   Deploy app to mytma.org (Cloudflare) → Run workflow* ([step 7](#7-put-the-app-online-at-mytmaorg)).
+   Pick the branch that holds the app's current code: `main`, or the work-in-progress branch the
+   site is published from while that work isn't merged into `main` yet. Changing the variable alone
+   doesn't rebuild the app. The run's summary shows the `/exec` URL it was built with.
+6. In the test spreadsheet's Settings, set `APP_URL` to `https://mytma.org/`.
 
-Now **`https://coledtouch.github.io/TMA/`** is the real app working on the test spreadsheet, and
-**`https://coledtouch.github.io/TMA/?demo`** still opens the demo with made-up families, for anyone
-who just wants to look around. While the test copy is linked to the push Worker, sign-in codes and
+Now **`https://mytma.org/`** is the real app working on the test spreadsheet, and
+**`https://mytma.org/?demo`** still opens the demo with made-up families, for anyone who just wants
+to look around. While the test copy is linked to the push Worker, sign-in codes and
 notification emails come from `noreply@mytma.org` through the Worker, with Reply-To set to the test
 copy's `SUPPORT_EMAIL` (see [Email from noreply@mytma.org](#email-from-noreplymytmaorg)). Only when the
 Worker can't send one does it come from the Google account that owns the test copy.
 
 **Moving to the real spreadsheet later.** Set up the real spreadsheet (steps 1 to 4), change
-`VITE_API_URL` to **its** `/exec` URL and run the Pages workflow again. Testers then have to sign in
-again, because their sign-ins belonged to the test copy. The push Worker is still linked to the test
+`VITE_API_URL` to **its** `/exec` URL, run *Deploy app to mytma.org (Cloudflare)* again and check
+that the run's summary shows the real spreadsheet's `/exec` URL ([step 7](#7-put-the-app-online-at-mytmaorg)).
+Until that run finishes, `https://mytma.org` keeps working on the test copy, so families' sign-ups
+would land there. Testers then have to sign in again, because their sign-ins belonged to the test copy. The push Worker is still linked to the test
 copy, so the real spreadsheet's setup shows *⚠ … already linked to a different Apps Script secret*.
 Follow [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys) to link the real
 spreadsheet instead. Testers who had notifications on get them again once they have signed in again.
@@ -717,5 +781,13 @@ sign-ins. So, until TMA has Google Workspace:
 * when sending an announcement to everyone from the app, tick only **Phone notification** (untick
   **Email**), or set `EMAIL_ENABLED` to `FALSE` (sign-in codes are still emailed);
 * launch to families in waves of fewer than 100 a day.
+
+**Sign-in codes to new emails are limited.** Anyone can ask for a code, and Apps Script can't tell
+who is asking, so the app caps codes to emails the sheet doesn't know yet (not on any household, not
+an admin, never signed in): at most **30 an hour** across everyone, and none once the day's email
+quota is down to its last **40**, which are kept for families already on the sheet. Someone typing
+made-up addresses therefore can't use up the day's emails and lock families out. When a cap is hit,
+new sign-ups see *"new sign-ups are paused for a while"* and the Log tab gets one `auth` row per hour.
+A family on the sheet can still ask for 5 codes an hour for its own email.
 
 The 15-minute sync takes a few seconds per run, far below the scheduled-time limit.

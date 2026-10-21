@@ -33,6 +33,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const emailRef = useRef<HTMLInputElement>(null);
   const codeRef = useRef<HTMLInputElement>(null);
   const demo = api.mode === 'demo';
   const exitable = canExitDemo(api.mode);
@@ -41,10 +42,16 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
     if (step.kind === 'code') codeRef.current?.focus();
   }, [step]);
 
+  /** After a failed try, back to the field (the busy button lost focus); its error is announced as an alert. */
+  function showError(message: string): void {
+    setError(message);
+    (codeRef.current ?? emailRef.current)?.focus();
+  }
+
   async function requestCode(address: string): Promise<{ email: string; devCode?: string } | null> {
     const normalized = address.trim().toLowerCase();
     if (!EMAIL_RE.test(normalized)) {
-      setError('Please enter a valid email address, like name@example.com.');
+      showError('Please enter a valid email address, like name@example.com.');
       return null;
     }
     setBusy(true);
@@ -53,7 +60,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
       const res = await api.call('auth.requestCode', { email: normalized });
       return { email: normalized, devCode: res.devCode };
     } catch (err) {
-      setError(errorMessage(err));
+      showError(errorMessage(err));
       return null;
     } finally {
       setBusy(false);
@@ -63,7 +70,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
   async function verify(address: string, value: string): Promise<boolean> {
     const digits = value.replace(/\D/g, '');
     if (digits.length !== 6) {
-      setError('Enter the 6-digit code from the email.');
+      showError('Enter the 6-digit code from the email.');
       return false;
     }
     setBusy(true);
@@ -73,7 +80,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
       onSignedIn(address, res.token);
       return true;
     } catch (err) {
-      setError(errorMessage(err));
+      showError(errorMessage(err));
       return false;
     } finally {
       setBusy(false);
@@ -175,6 +182,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
               </h1>
               <p className="muted">We'll email you a 6-digit code. No password to remember.</p>
               <TextField
+                ref={emailRef}
                 label="Email address"
                 type="email"
                 name="email"

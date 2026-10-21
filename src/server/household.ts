@@ -110,6 +110,10 @@ const TAKEN_MESSAGE = 'That email is already on a TMA household. Sign in with it
 
 export function saveHousehold(ctx: Ctx, email: string, params: v.Params): Bootstrap {
   rateLimit(ctx, `hh-rl:${email}`, 30, 3600, 'Too many changes in a short time. Please try again later.');
+  if (v.bool(params.leave, 'Leave', false)) {
+    leaveHousehold(ctx, email);
+    return buildBootstrap(ctx, email);
+  }
   const settings = ctx.m.settings();
   const input = parseInput(params, settings);
   if (!input.guardians.some((g) => g.email === email)) {
@@ -122,10 +126,25 @@ export function saveHousehold(ctx: Ctx, email: string, params: v.Params): Bootst
   return buildBootstrap(ctx, email);
 }
 
+/**
+ * A second guardian takes their own email off the household: the first guardian may have typed it
+ * there without asking. Only the caller's slot is cleared; the household and its students stay.
+ */
+function leaveHousehold(ctx: Ctx, email: string): void {
+  const family = ctx.m.familyForEmail(email);
+  if (!family) return; // already not on a household
+  const [first, second] = family.slots;
+  if (second.email !== email || first.email === email) {
+    badRequest("The first guardian can't leave a household in the app. Please contact TMA.");
+  }
+  ctx.db.update('Families', family.row, { 'Parent 2 Name': '', 'Parent 2 Email': '', 'Parent 2 Phone': '' });
+  ctx.log('household', `${family.id}: second guardian ${email} left the household`);
+}
+
 function createHousehold(ctx: Ctx, email: string, input: { guardians: GuardianInput[]; students: StudentInput[] }): void {
   for (const g of input.guardians) if (emailTaken(ctx, g.email)) conflict(TAKEN_MESSAGE);
 
-  const familyId = nextSequentialId('F', ctx.m.families().map((f) => f.id));
+  const familyId = nextSequentialId('F', referencedFamilyIds(ctx));
   // The person signing up is the first guardian, who may later change the second one.
   const [g1, g2] = input.guardians.slice().sort((a, b) => Number(b.email === email) - Number(a.email === email));
   ctx.db.append('Families', [
@@ -154,8 +173,34 @@ function createHousehold(ctx: Ctx, email: string, input: { guardians: GuardianIn
   notifyAdmins(ctx, newSignupNotice(names, input.students.length, familyId));
 }
 
+/**
+ * Every FamilyID the sheet still refers to. A new household must never reuse one: rows deleted from
+ * Families (BOARD-FAQ's "delete their information") leave Students and Redemptions pointing at it.
+ */
+function referencedFamilyIds(ctx: Ctx): string[] {
+  const ids = ctx.m.families().map((f) => f.id);
+  for (const s of ctx.m.students()) if (s.familyId) ids.push(s.familyId);
+  for (const r of ctx.m.redemptions()) if (r.familyId) ids.push(r.familyId);
+  return ids;
+}
+
+/**
+ * Every StudentID any tab still refers to. A new student must never inherit another child's funds,
+ * enrollments, payments or requests through a reused ID (e.g. after the Students row was deleted).
+ */
+function referencedStudentIds(ctx: Ctx): string[] {
+  const m = ctx.m;
+  const ids = m.students().map((s) => s.id);
+  for (const l of m.ledger()) ids.push(l.studentId);
+  for (const e of m.enrollments()) ids.push(e.studentId);
+  for (const p of m.payments()) ids.push(p.studentId);
+  for (const r of m.redemptions()) if (r.studentId) ids.push(r.studentId);
+  m.snapshot().forEach((snap) => ids.push(snap.studentId));
+  return ids;
+}
+
 function newStudentIds(ctx: Ctx, count: number): string[] {
-  const existing = ctx.m.students().map((s) => s.id);
+  const existing = referencedStudentIds(ctx);
   const ids: string[] = [];
   for (let i = 0; i < count; i++) {
     const id = nextSequentialId('S', existing.concat(ids));
@@ -226,11 +271,15 @@ function updateHousehold(ctx: Ctx, email: string, family: FamilyRec, input: { gu
   }
 
   // --- existing students ---
+  const knownGroups = ctx.m.settings().pub.ensembles;
   for (const { rec, input: s } of updates) {
+    // Groups the treasurer typed that aren't on Settings ENSEMBLES have no checkbox in the app, so
+    // the form can't send them; keep them rather than erase the treasurer's entry.
+    const sheetOnly = rec.ensembles.filter((e) => !isKnown(e, knownGroups));
     const studentPatch: RowData = {
       Grade: s.grade,
       School: s.school,
-      Ensembles: joinList(s.ensembles),
+      Ensembles: joinList(uniqueBy([...s.ensembles, ...sheetOnly], (e) => e.toLowerCase())),
     };
     if (s.instrumentGiven) studentPatch.Instrument = s.instrument ?? '';
     const sameName =

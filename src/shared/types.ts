@@ -114,7 +114,9 @@ export interface ActivityAccount {
   paidDirectCents: Cents; // sum(completed payments for this activity)
   paidCents: Cents; // paidFromFunds + paidDirect
   pendingRedemptionCents: Cents; // pending fund requests for this activity
-  remainingCents: Cents; // max(0, cost - paid)
+  /** Payments still clearing (Status Pending, e.g. an eCheck): not paid yet, but not owed again either. */
+  pendingPaymentCents?: Cents;
+  remainingCents: Cents; // max(0, cost - paid - pendingPayment): what is left to pay
   dueDate?: IsoDate;
   depositCents?: Cents;
   depositDueDate?: IsoDate;
@@ -283,6 +285,12 @@ export interface HouseholdStudentInput {
 export interface HouseholdInput {
   guardians: Guardian[]; // 1..2; must include the signed-in email
   students: HouseholdStudentInput[]; // 0..8
+  /**
+   * Second guardian only: "this isn't my household". Takes the caller's email off the household
+   * (someone else may have typed it there) and saves nothing else; guardians/students are ignored.
+   * The caller can then sign up with their own household.
+   */
+  leave?: boolean;
 }
 
 export interface StudentMatchCandidate {
@@ -298,6 +306,12 @@ export interface StudentMatchCandidate {
 export interface PendingHousehold {
   family: Family;
   students: Array<{ student: Student; candidates: StudentMatchCandidate[] }>;
+  /**
+   * Things to check in the sheet before approving, e.g. a pending student whose ID already has Ledger
+   * or Enrollments rows, or a student already linked to this household that is not up for review
+   * (approving would hand over that student's funds and history). Absent when there is nothing to check.
+   */
+  warnings?: string[];
 }
 
 export interface PendingRedemptionView extends RedemptionRequest {
@@ -349,6 +363,11 @@ export interface TickReport {
   remindersSent: number;
   notifications: DeliveryCounts;
   errors: string[];
+  /**
+   * Rows typed in the sheet (fund decisions, announcements) that changed within the last few
+   * minutes: they are acted on at a later sync, once they stop changing. Absent when none.
+   */
+  waiting?: number;
 }
 
 export interface SetupReport {

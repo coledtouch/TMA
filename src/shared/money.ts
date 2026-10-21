@@ -62,9 +62,16 @@ export function grossUpCents(
   return { grossCents: gross, feeCents: gross - amountCents };
 }
 
-/** Parse what a parent typed in an amount box ("125", "125.5", "$125.50") -> cents or null when invalid. */
+/**
+ * Parse what a parent typed in an amount box ("125", "125.5", "$125.50", "$1,125.50") -> cents, or null
+ * when invalid. A comma is a thousands separator only between groups of three digits; a single comma
+ * followed by one or two digits (and no point) is a decimal comma, as phone keypads in many regions
+ * offer ("12,50" is $12.50, never $1,250). Anything else with a comma is rejected rather than guessed.
+ */
 export function parseAmountInput(input: string): Cents | null {
-  const s = input.trim().replace(/[$,\s]/g, '');
+  let s = input.trim().replace(/[$\s]/g, '');
+  if (/^\d{1,3}(,\d{3})+(\.\d{0,2})?$/.test(s)) s = s.replace(/,/g, '');
+  else if (/^\d+,\d{1,2}$/.test(s)) s = s.replace(',', '.');
   if (!/^\d+(\.\d{0,2})?$/.test(s)) return null;
   const cents = Math.round(parseFloat(s) * 100);
   return Number.isFinite(cents) ? cents : null;

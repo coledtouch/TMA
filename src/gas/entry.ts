@@ -354,6 +354,7 @@ export function summarizeTick(report: TickReport): string {
     `reminders: ${report.remindersSent}`,
     `sent push ${n.push}, email ${n.email}, sms ${n.sms}`,
   ];
+  if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
   if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
   return `${parts.join(' · ')}.`;
 }

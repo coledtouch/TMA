@@ -8,6 +8,7 @@ import {
   createLiveClient,
   getDemoControls,
   NETWORK_ERROR_MESSAGE,
+  SLOW_ACTION_TIMEOUT_MS,
   TIMEOUT_MESSAGE,
   withAuthGuard,
   type ApiClient,
@@ -173,6 +174,29 @@ describe('createLiveClient', () => {
       const err = await pending;
       expect(signal?.aborted).toBe(true);
       expect(err).toMatchObject({ code: 'INTERNAL', message: TIMEOUT_MESSAGE });
+    });
+
+    it('waits up to 6 minutes for an announcement or a sync, which may still be sending', async () => {
+      vi.useFakeTimers();
+      const signals: AbortSignal[] = [];
+      const fetchMock = vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            if (init.signal) signals.push(init.signal);
+            init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+          }),
+      );
+      const api = createLiveClient(URL, { fetch: fetchMock as unknown as typeof fetch });
+      const announce = api
+        .call('admin.announce', { title: 'T', body: 'B', audience: { schools: [], ensembles: [] }, channels: { push: false, email: true, sms: false } })
+        .catch((e: unknown) => e);
+      const sync = api.call('admin.runSync', {}).catch((e: unknown) => e);
+
+      await vi.advanceTimersByTimeAsync(SLOW_ACTION_TIMEOUT_MS - 1);
+      expect(signals.map((s) => s.aborted)).toEqual([false, false]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await announce).toMatchObject({ code: 'INTERNAL', message: TIMEOUT_MESSAGE });
+      expect(await sync).toMatchObject({ code: 'INTERNAL', message: TIMEOUT_MESSAGE });
     });
   });
 });

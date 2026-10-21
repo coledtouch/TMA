@@ -112,9 +112,10 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
 
   const signOut = useCallback(async () => {
     // Stop this device getting the household's notifications, without blocking sign-out on the network.
+    // The browser subscription goes even when TMA can't be reached: once signed out, nobody can retry.
     try {
       await Promise.race([
-        disablePush(api),
+        disablePush(api, { signingOut: true }),
         new Promise((resolve) => setTimeout(resolve, SIGN_OUT_PUSH_TIMEOUT_MS)),
       ]);
     } catch {

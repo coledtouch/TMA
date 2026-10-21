@@ -6,7 +6,11 @@
  *   available(student) = max(0, balance − pending)
  *   per enrollment:  paidFromFunds = −Σ ledger amounts for that activity
  *                    paidDirect    = Σ Completed payments for that activity
- *                    remaining     = max(0, cost − paidFromFunds − paidDirect)
+ *                    pendingPayment = Σ Pending payments for that activity (still clearing)
+ *                    remaining     = max(0, cost − paidFromFunds − paidDirect − pendingPayment)
+ *
+ * A payment still clearing isn't "paid", but it isn't owed again either: counting it in remaining
+ * keeps reminders, "left to pay" and the online-payment limit from asking the family to pay twice.
  *
  * IDs are compared case-insensitively (treasurers type them by hand).
  */
@@ -43,6 +47,7 @@ export class Books {
   private readonly pendingByPair = new Map<string, Cents>();
   private readonly fundsByPair = new Map<string, Cents>();
   private readonly directByPair = new Map<string, Cents>();
+  private readonly clearingByPair = new Map<string, Cents>();
   /** Last enrollment row wins for a (student, activity) pair; order of first appearance is kept. */
   private readonly enrollmentsByStudent = new Map<string, Map<string, Enrollment>>();
   private readonly activities = new Map<string, Activity>();
@@ -55,8 +60,9 @@ export class Books {
       if (row.activityId) add(this.fundsByPair, pairKey(row.studentId, row.activityId), -row.amountCents);
     }
     for (const p of input.payments) {
-      if (p.status !== 'Completed' || !p.studentId || !p.activityId) continue;
-      add(this.directByPair, pairKey(p.studentId, p.activityId), p.amountCents);
+      if (!p.studentId || !p.activityId) continue;
+      if (p.status === 'Completed') add(this.directByPair, pairKey(p.studentId, p.activityId), p.amountCents);
+      else if (p.status === 'Pending') add(this.clearingByPair, pairKey(p.studentId, p.activityId), p.amountCents);
     }
     for (const r of input.redemptions) {
       if (r.status !== 'Pending' || !r.studentId) continue;
@@ -128,6 +134,7 @@ export class Books {
     const paidFromFunds = this.fundsByPair.get(pair) ?? 0;
     const paidDirect = this.directByPair.get(pair) ?? 0;
     const paid = paidFromFunds + paidDirect;
+    const clearing = Math.max(0, this.clearingByPair.get(pair) ?? 0);
     const account: ActivityAccount = {
       studentId: enrollment.studentId,
       activityId: activity.id,
@@ -139,7 +146,8 @@ export class Books {
       paidDirectCents: paidDirect,
       paidCents: paid,
       pendingRedemptionCents: this.pendingByPair.get(pair) ?? 0,
-      remainingCents: Math.max(0, enrollment.costCents - paid),
+      pendingPaymentCents: clearing,
+      remainingCents: Math.max(0, enrollment.costCents - paid - clearing),
       allowFunds: activity.allowFunds,
       allowOnlinePayment: activity.allowOnlinePayment,
       activityOpen: activity.status === 'Open',

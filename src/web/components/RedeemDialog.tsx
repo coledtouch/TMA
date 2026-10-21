@@ -1,5 +1,5 @@
 /** "Use activity funds for this trip": ask the treasurer to apply funds to an activity. */
-import { useId, useState, type FormEvent } from 'react';
+import { useId, useRef, useState, type FormEvent } from 'react';
 import { parseAmountInput } from '../../shared/money';
 import type { ActivityAccount, Cents, StudentSummary } from '../../shared/types';
 import { errorMessage } from '../api/client';
@@ -47,6 +47,7 @@ export function RedeemDialog({
   const [amountError, setAmountError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const amountRef = useRef<HTMLInputElement>(null);
   const first = summary.student.firstName;
   const leftToCover = Math.max(0, account.remainingCents - account.pendingRedemptionCents);
 
@@ -56,7 +57,10 @@ export function RedeemDialog({
     const problem = redemptionAmountError(cents, summary, account);
     setAmountError(problem);
     setFormError(null);
-    if (problem || cents === null) return;
+    if (problem || cents === null) {
+      amountRef.current?.focus(); // its error is read out with it
+      return;
+    }
     setBusy(true);
     try {
       const trimmed = note.trim();
@@ -112,6 +116,7 @@ export function RedeemDialog({
           </div>
         </dl>
         <TextField
+          ref={amountRef}
           label="Amount to apply"
           prefix="$"
           inputMode="decimal"

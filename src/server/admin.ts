@@ -34,6 +34,8 @@ const MAX_CANDIDATES = 3;
 const MAX_PENDING_HOUSEHOLDS = 100;
 const MAX_PENDING_REDEMPTIONS = 200;
 const RECENT_LOG = 50;
+/** admin.announce refuses the same title and message again within this window. */
+const DUPLICATE_WINDOW_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Match candidates (§5.3)
@@ -80,6 +82,59 @@ export function matchCandidates(ctx: Ctx, family: FamilyRec, pending: StudentRec
 // admin.overview
 // ---------------------------------------------------------------------------
 
+/** idKey(StudentID) -> the money tabs that have rows for it. */
+export function studentRecordTabs(ctx: Ctx): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  const add = (studentId: string, tab: string) => {
+    if (!studentId) return;
+    const list = index.get(idKey(studentId)) ?? [];
+    if (!list.includes(tab)) list.push(tab);
+    index.set(idKey(studentId), list);
+  };
+  for (const l of ctx.m.ledger()) add(l.studentId, 'Ledger');
+  for (const e of ctx.m.enrollments()) add(e.studentId, 'Enrollments');
+  for (const p of ctx.m.payments()) add(p.studentId, 'Payments');
+  for (const r of ctx.m.redemptions()) add(r.studentId, 'Redemptions');
+  return index;
+}
+
+/**
+ * What a reviewer should check before approving a household: records that already point at its
+ * IDs (e.g. left behind when a family's Families/Students rows were deleted) would otherwise be
+ * handed to whoever signed up with them, without any sign of it in the review.
+ */
+export function reviewWarnings(
+  ctx: Ctx,
+  family: FamilyRec,
+  pending: readonly StudentRec[],
+  records: Map<string, string[]> = studentRecordTabs(ctx),
+): string[] {
+  const m = ctx.m;
+  const warnings: string[] = [];
+  for (const s of pending) {
+    const tabs = records.get(idKey(s.id)) ?? [];
+    if (tabs.length > 0) {
+      warnings.push(
+        `${s.id} (${studentName(s)}) already has rows in ${tabs.join(', ')} from an earlier student with this ID. Fix the IDs in the sheet before approving.`,
+      );
+    }
+  }
+  if (family.status === 'Pending') {
+    for (const s of m.studentsOfFamily(family.id)) {
+      if (s.status === 'Pending') continue;
+      warnings.push(
+        `${s.id} (${studentName(s)}, ${s.status}) is already linked to ${family.id} in the Students tab. Approving shows this household that student's funds and history.`,
+      );
+    }
+    const pendingKeys = new Set(pending.map((s) => idKey(s.id)));
+    const requests = m.redemptions().filter((r) => idKey(r.familyId) === idKey(family.id) && !pendingKeys.has(idKey(r.studentId)));
+    if (requests.length > 0) {
+      warnings.push(`${family.id} already has ${requests.length} row(s) in Redemptions from before it signed up. Check the FamilyID before approving.`);
+    }
+  }
+  return warnings;
+}
+
 export function adminOverview(ctx: Ctx): AdminOverview {
   const m = ctx.m;
   const books = m.books();
@@ -119,14 +174,18 @@ export function adminOverview(ctx: Ctx): AdminOverview {
     });
 
   const pendingHouseholds: PendingHousehold[] = [];
+  const records = studentRecordTabs(ctx);
   for (const f of families) {
     if (f.status === 'Inactive') continue;
     const pendingStudents = m.studentsOfFamily(f.id).filter((s) => s.status === 'Pending');
     if (f.status !== 'Pending' && pendingStudents.length === 0) continue;
-    pendingHouseholds.push({
+    const entry: PendingHousehold = {
       family: toFamily(f),
       students: pendingStudents.map((s) => ({ student: toStudent(s), candidates: matchCandidates(ctx, f, s) })),
-    });
+    };
+    const warnings = reviewWarnings(ctx, f, pendingStudents, records);
+    if (warnings.length > 0) entry.warnings = warnings;
+    pendingHouseholds.push(entry);
     if (pendingHouseholds.length >= MAX_PENDING_HOUSEHOLDS) break;
   }
 
@@ -272,6 +331,17 @@ export function announce(ctx: Ctx, adminEmail: string, params: v.Params): { anno
   for (const c of CHANNELS) channels[c] = v.bool(channelsIn[c], `Channel ${c}`, false);
   if (!CHANNELS.some((c) => channels[c])) badRequest('Choose at least one way to send it.');
   const link = v.optUrl(params.link, 'Link');
+
+  // Sending to everyone can outlast the app's request timeout; a retry must not send it twice.
+  const nowMs = ctx.now.getTime();
+  const recent = ctx.m.announcements().find((a) => {
+    const sentMs = a.sentAt ? Date.parse(a.sentAt) : NaN;
+    return a.title === title && a.body.trim() === body.trim() && nowMs - sentMs >= 0 && nowMs - sentMs < DUPLICATE_WINDOW_MS;
+  });
+  if (recent) {
+    const minutes = Math.max(1, Math.round((nowMs - Date.parse(recent.sentAt ?? '')) / 60000));
+    conflict(`This announcement was already sent ${minutes} minute${minutes === 1 ? '' : 's'} ago. Check News before sending it again.`);
+  }
 
   const id = newAnnouncementId(ctx);
   ctx.db.append('Announcements', [

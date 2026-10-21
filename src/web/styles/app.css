@@ -1262,7 +1262,7 @@ a.list-row:hover {
   width: 100%;
   min-height: 48px;
   padding: 10px 12px;
-  border: 1.5px solid var(--line-strong);
+  border: 1.5px solid var(--control-line);
   border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--ink);
@@ -1436,7 +1436,7 @@ a.list-row:hover {
   width: 50px;
   height: 30px;
   border-radius: var(--radius-pill);
-  background: var(--line-strong);
+  background: var(--control-line);
   position: relative;
   transition: background var(--dur) var(--ease);
   margin: 0;
@@ -1577,6 +1577,14 @@ a.list-row:hover {
 ul.callout {
   flex-direction: column;
   padding-left: 30px;
+  gap: 4px;
+}
+
+.review-warnings {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
   gap: 4px;
 }
 

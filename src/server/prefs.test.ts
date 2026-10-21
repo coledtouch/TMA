@@ -61,6 +61,12 @@ describe('prefs.save', () => {
     const token = h.signIn(NGUYEN);
     expect(h.ok('prefs.save', { prefs: { channels: { sms: true } } }, token).prefs.channels.sms).toBe(false);
     expect(h.ok('prefs.save', { prefs: { channels: { sms: true }, smsPhone: '603-555-0187' } }, token).prefs.channels.sms).toBe(true);
+    // Only US numbers: no international or premium-rate ranges at TMA's cost.
+    for (const phone of ['+882 1234 5678 901', '+44 20 7946 0958', '603-055-0187', '1234567890', '+1 603 555 01870']) {
+      const saved = h.ok('prefs.save', { prefs: { channels: { sms: true }, smsPhone: phone } }, token).prefs;
+      expect(saved.smsPhone, phone).toBeUndefined();
+      expect(saved.channels.sms, phone).toBe(false);
+    }
     expect(h.ok('me.bootstrap', {}, token).settings.smsEnabled).toBe(true);
   });
 

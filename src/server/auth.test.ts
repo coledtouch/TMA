@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { KNOWN_EMAIL_CODE_RESERVE, NEW_EMAIL_CODES_PER_HOUR } from './auth';
 import { base64UrlDecode, base64UrlEncode } from './util';
 import { harness, NGUYEN, PARENT, TEST_NOW, TEST_SECRET } from './test-helpers';
 import { hmacSha256Hex } from './sha256';
@@ -58,6 +59,42 @@ describe('auth.requestCode', () => {
   it('refuses politely when the daily email quota is used up', () => {
     const h = harness({ mailQuota: 0 });
     expect(h.err('auth.requestCode', { email: PARENT }).code).toBe('RATE_LIMITED');
+  });
+
+  it('keeps sign-in working for families on the sheet when made-up addresses flood it', () => {
+    const h = harness({ mailQuota: 100 });
+    // Anyone can ask for codes for throwaway addresses; only NEW_EMAIL_CODES_PER_HOUR an hour go out.
+    for (let i = 0; i < NEW_EMAIL_CODES_PER_HOUR; i++) h.ok('auth.requestCode', { email: `x${i}@throwaway.example` });
+    expect(h.err('auth.requestCode', { email: 'one.more@throwaway.example' })).toMatchObject({
+      code: 'RATE_LIMITED',
+      message: expect.stringMatching(/new sign-ups are paused/),
+    });
+    expect(h.rows('Log').filter((r) => r.Kind === 'auth').map((r) => r.Detail)).toEqual([expect.stringMatching(/more than 30 in an hour/)]);
+    // Known emails (guardians on the sheet, admins) are not affected.
+    h.ok('auth.requestCode', { email: PARENT });
+    h.ok('auth.requestCode', { email: 'treasurer@example.com' });
+
+    // Hours later the flood resumes, but stops while KNOWN_EMAIL_CODE_RESERVE emails remain.
+    let sent = 0;
+    for (let hour = 1; hour <= 4; hour++) {
+      h.services.setNow(new Date(TEST_NOW.getTime() + hour * 3601 * 1000));
+      for (let i = 0; i < NEW_EMAIL_CODES_PER_HOUR; i++) {
+        if (h.call('auth.requestCode', { email: `y${hour}-${i}@throwaway.example` }).ok) sent++;
+      }
+    }
+    expect(h.services.mailer.remainingQuota()).toBe(KNOWN_EMAIL_CODE_RESERVE);
+    expect(sent).toBe(100 - NEW_EMAIL_CODES_PER_HOUR - 2 - KNOWN_EMAIL_CODE_RESERVE);
+    // Families on the sheet can still sign in with the reserve.
+    h.signIn(NGUYEN);
+  });
+
+  it('does not replace a code already emailed when it refuses to send a new one', () => {
+    const h = harness();
+    h.ok('auth.requestCode', { email: PARENT });
+    const code = lastCode(h, PARENT);
+    h.services.mailer.remainingQuota = () => 0;
+    expect(h.err('auth.requestCode', { email: PARENT }).code).toBe('RATE_LIMITED');
+    expect(h.ok('auth.verifyCode', { email: PARENT, code }).token).toMatch(/\./);
   });
 });
 

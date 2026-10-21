@@ -13,6 +13,7 @@ import {
   setupTma,
   setupTmaWithSampleData,
   showTmaStatus,
+  summarizeTick,
   syncTick,
 } from './entry';
 import { storedToken, testSubscription } from '../server/test-helpers';
@@ -150,6 +151,13 @@ describe('sheet menu and schedules', () => {
     syncTick({ triggerUid: '1' } as unknown as GoogleAppsScript.Events.TimeDriven);
     expect(gas.spreadsheet.toasts).toHaveLength(1);
     expect(core.syncTick).toHaveBeenCalledTimes(2);
+  });
+
+  it('summarizes a run, including sheet rows that are still being edited', () => {
+    expect(summarizeTick({ ...REPORT, waiting: 2, errors: ['x'] })).toMatch(
+      /2 row\(s\) still being edited in the sheet go out at a later sync · 1 error\(s\), see Log\.$/,
+    );
+    expect(summarizeTick(REPORT)).not.toMatch(/still being edited/);
   });
 
   it('dailyTick logs errors reported by the core', () => {

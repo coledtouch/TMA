@@ -200,7 +200,8 @@ describe('App', () => {
     const { api, user } = renderApp({ 'me.bootstrap': () => makeBootstrap() });
     await user.click(await screen.findByRole('button', { name: /Sign out/ }));
 
-    expect(disablePush).toHaveBeenCalled();
+    // Signing out turns push off here even when TMA can't be reached (lib/push.ts).
+    expect(disablePush).toHaveBeenCalledWith(api, { signingOut: true });
     expect(await screen.findByLabelText('Email address')).toBeInTheDocument();
     expect(api.setToken).toHaveBeenLastCalledWith(null);
     expect(localStorage.getItem(CACHE_KEY)).toBeNull();

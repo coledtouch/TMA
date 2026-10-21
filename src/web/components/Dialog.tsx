@@ -24,6 +24,8 @@ export interface DialogProps {
   footer?: ReactNode;
   /** Short line under the title. */
   description?: ReactNode;
+  /** Id of an element in the body that also describes the dialog (a confirmation's message). */
+  describedById?: string;
   /** 'alert' for confirmations. */
   role?: 'dialog' | 'alertdialog';
 }
@@ -33,7 +35,7 @@ export function Dialog(props: DialogProps) {
   return createPortal(<DialogPanel {...props} />, document.body);
 }
 
-function DialogPanel({ title, onClose, children, footer, description, role = 'dialog' }: DialogProps) {
+function DialogPanel({ title, onClose, children, footer, description, describedById, role = 'dialog' }: DialogProps) {
   const titleId = useId();
   const descId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -93,6 +95,8 @@ function DialogPanel({ title, onClose, children, footer, description, role = 'di
     };
   }, []);
 
+  const describedBy = [description ? descId : undefined, describedById].filter(Boolean).join(' ') || undefined;
+
   return (
     <div
       className="dialog-backdrop"
@@ -106,7 +110,7 @@ function DialogPanel({ title, onClose, children, footer, description, role = 'di
         role={role}
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-describedby={description ? descId : undefined}
+        aria-describedby={describedBy}
         tabIndex={-1}
       >
         <div className="dialog-header">
@@ -152,12 +156,15 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  // Screen readers read the message with the title when focus lands on a button (APG alertdialog).
+  const messageId = useId();
   return (
     <Dialog
       open={open}
       title={title}
       onClose={onCancel}
       role="alertdialog"
+      describedById={messageId}
       footer={
         <>
           <button
@@ -181,7 +188,9 @@ export function ConfirmDialog({
         </>
       }
     >
-      <div className="confirm-message">{message}</div>
+      <div className="confirm-message" id={messageId}>
+        {message}
+      </div>
     </Dialog>
   );
 }

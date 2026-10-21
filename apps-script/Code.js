@@ -768,6 +768,7 @@ var TMA = (() => {
       __publicField(this, "pendingByPair", /* @__PURE__ */ new Map());
       __publicField(this, "fundsByPair", /* @__PURE__ */ new Map());
       __publicField(this, "directByPair", /* @__PURE__ */ new Map());
+      __publicField(this, "clearingByPair", /* @__PURE__ */ new Map());
       /** Last enrollment row wins for a (student, activity) pair; order of first appearance is kept. */
       __publicField(this, "enrollmentsByStudent", /* @__PURE__ */ new Map());
       __publicField(this, "activities", /* @__PURE__ */ new Map());
@@ -778,8 +779,9 @@ var TMA = (() => {
         if (row.activityId) add(this.fundsByPair, pairKey(row.studentId, row.activityId), -row.amountCents);
       }
       for (const p of input.payments) {
-        if (p.status !== "Completed" || !p.studentId || !p.activityId) continue;
-        add(this.directByPair, pairKey(p.studentId, p.activityId), p.amountCents);
+        if (!p.studentId || !p.activityId) continue;
+        if (p.status === "Completed") add(this.directByPair, pairKey(p.studentId, p.activityId), p.amountCents);
+        else if (p.status === "Pending") add(this.clearingByPair, pairKey(p.studentId, p.activityId), p.amountCents);
       }
       for (const r of input.redemptions) {
         if (r.status !== "Pending" || !r.studentId) continue;
@@ -840,13 +842,14 @@ var TMA = (() => {
       return open.concat(closed);
     }
     toAccount(enrollment) {
-      var _a, _b, _c;
+      var _a, _b, _c, _d;
       const activity = this.activities.get(idKey(enrollment.activityId));
       if (!activity) return null;
       const pair = pairKey(enrollment.studentId, activity.id);
       const paidFromFunds = (_a = this.fundsByPair.get(pair)) != null ? _a : 0;
       const paidDirect = (_b = this.directByPair.get(pair)) != null ? _b : 0;
       const paid = paidFromFunds + paidDirect;
+      const clearing = Math.max(0, (_c = this.clearingByPair.get(pair)) != null ? _c : 0);
       const account = {
         studentId: enrollment.studentId,
         activityId: activity.id,
@@ -857,8 +860,9 @@ var TMA = (() => {
         paidFromFundsCents: paidFromFunds,
         paidDirectCents: paidDirect,
         paidCents: paid,
-        pendingRedemptionCents: (_c = this.pendingByPair.get(pair)) != null ? _c : 0,
-        remainingCents: Math.max(0, enrollment.costCents - paid),
+        pendingRedemptionCents: (_d = this.pendingByPair.get(pair)) != null ? _d : 0,
+        pendingPaymentCents: clearing,
+        remainingCents: Math.max(0, enrollment.costCents - paid - clearing),
         allowFunds: activity.allowFunds,
         allowOnlinePayment: activity.allowOnlinePayment,
         activityOpen: activity.status === "Open"
@@ -1011,7 +1015,7 @@ var TMA = (() => {
   var SETTING_NOTES = {
     ORG_NAME: "Shown in the app, in emails and on PayPal checkout.",
     SUPPORT_EMAIL: "Where families can reach TMA with questions.",
-    APP_URL: "Web address of the TMA app (used for the button in emails). Example: https://example.github.io/tma/",
+    APP_URL: "Web address of the TMA app (used for the button in emails): https://mytma.org/",
     ADMIN_EMAILS: "Comma-separated emails of board members who can approve requests and send announcements in the app.",
     SCHOOLS: "Comma-separated school levels families can pick.",
     ENSEMBLES: "Comma-separated groups families can pick.",
@@ -1035,6 +1039,9 @@ var TMA = (() => {
   };
   function settingKey(value) {
     return str(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+  function parsePaypalEnv(value) {
+    return /^(live|production|prod)$/i.test(String(value != null ? value : "").trim()) ? "live" : "sandbox";
   }
   function clampNumber(value, min, max, fallback) {
     return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
@@ -1093,7 +1100,7 @@ var TMA = (() => {
       feeCoverDefault: bool2("FEE_COVER_DEFAULT"),
       onlinePaymentsEnabled: onlinePaymentsSetting && paypalClientId !== "" && safely3(() => services.payments.enabled()),
       paypalClientId,
-      paypalEnv: /^(live|production|prod)$/i.test(get("PAYPAL_ENV")) ? "live" : "sandbox",
+      paypalEnv: parsePaypalEnv(get("PAYPAL_ENV")),
       minPaymentCents: minPayment > 0 ? Math.min(minPayment, 1e5) : 500,
       otherPaymentInstructions: get("OTHER_PAYMENT_INSTRUCTIONS"),
       donateUrl: (_b = safeUrl(get("DONATE_URL"))) != null ? _b : "",
@@ -1563,10 +1570,15 @@ var TMA = (() => {
       });
       return ((_a = byEmail.get(normEmail(email2))) != null ? _a : []).slice();
     }
-    /** The caller's household (Inactive only when it is the sole match). */
+    /**
+     * The caller's household (Inactive only when it is the sole match). An Inactive household counts
+     * only for its first guardian: anyone can type an email into the second-guardian slot, so a
+     * rejected household must not lock that email's owner out of signing up with their own.
+     */
     familyForEmail(email2) {
       var _a;
-      return (_a = this.familiesWithEmail(email2)[0]) != null ? _a : null;
+      const key = normEmail(email2);
+      return (_a = this.familiesWithEmail(key).find((f) => f.status !== "Inactive" || f.slots[0].email === key)) != null ? _a : null;
     }
     // Students ---------------------------------------------------------------
     students() {
@@ -1923,6 +1935,15 @@ var TMA = (() => {
       tag: `payreview-${reference}`
     };
   }
+  function paymentUnconfirmedNotice(firstName, activityName, grossCents, orderId) {
+    return {
+      topic: "admin",
+      title: "Payment needs review",
+      body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app did not record it. Look up PayPal order ${orderId}: if it was captured, add it to the Payments tab so the family isn't asked to pay again.`,
+      url: "#/admin",
+      tag: `payreview-${orderId}`
+    };
+  }
   function testNotice() {
     return {
       topic: "test",
@@ -1931,6 +1952,151 @@ var TMA = (() => {
       url: "#/",
       tag: "test"
     };
+  }
+
+  // src/server/db.ts
+  function isBlankRow(data) {
+    for (const key of Object.keys(data)) if (!isBlank(data[key])) return false;
+    return true;
+  }
+  var Db = class {
+    constructor(store) {
+      this.store = store;
+      __publicField(this, "cache", /* @__PURE__ */ new Map());
+      __publicField(this, "versions", /* @__PURE__ */ new Map());
+      __publicField(this, "epoch", 0);
+    }
+    rows(table) {
+      let rows = this.cache.get(table);
+      if (!rows) {
+        rows = this.store.read(table).slice();
+        this.cache.set(table, rows);
+      }
+      return rows;
+    }
+    /** Changes whenever the table (or the whole view) may have changed. */
+    version(table) {
+      var _a;
+      return `${this.epoch}.${(_a = this.versions.get(table)) != null ? _a : 0}`;
+    }
+    append(table, rows) {
+      if (rows.length === 0) return;
+      this.store.append(table, rows);
+      this.cache.delete(table);
+      this.bump(table);
+    }
+    update(table, rowNumber, patch) {
+      this.store.update(table, rowNumber, patch);
+      const rows = this.cache.get(table);
+      if (rows) {
+        const index = rows.findIndex((r) => r.rowNumber === rowNumber);
+        if (index < 0) {
+          this.cache.delete(table);
+        } else {
+          const data = { ...rows[index].data, ...patch };
+          if (isBlankRow(data)) rows.splice(index, 1);
+          else rows[index] = { rowNumber, data };
+        }
+      }
+      this.bump(table);
+    }
+    /** Blank out a row (the sheet equivalent of deleting it without shifting row numbers). */
+    clear(table, rowNumber, columns) {
+      const patch = {};
+      for (const c of columns) patch[c] = "";
+      this.update(table, rowNumber, patch);
+    }
+    overwrite(table, rows) {
+      this.store.overwrite(table, rows);
+      this.cache.delete(table);
+      this.bump(table);
+    }
+    /**
+     * Read the tab again from the sheet, dropping what this request (and the store) memoized: the
+     * treasurer can insert, delete or sort rows at any time, and the script lock doesn't stop that.
+     */
+    refresh(table) {
+      var _a, _b;
+      (_b = (_a = this.store).invalidate) == null ? void 0 : _b.call(_a, table);
+      this.cache.delete(table);
+      this.bump(table);
+    }
+    /** Canonical headers the tab has; null = the tab is missing; undefined = the store can't tell. */
+    columns(table) {
+      return this.store.columns ? this.store.columns(table) : void 0;
+    }
+    ensureTable(table) {
+      const result = this.store.ensureTable(table);
+      this.cache.delete(table);
+      this.bump(table);
+      return result;
+    }
+    /** Forget everything read so far (call after taking the write lock). */
+    reset() {
+      this.cache.clear();
+      this.epoch++;
+    }
+    bump(table) {
+      var _a;
+      this.versions.set(table, ((_a = this.versions.get(table)) != null ? _a : 0) + 1);
+    }
+  };
+
+  // src/server/context.ts
+  var MAX_LOG_DETAIL = 500;
+  function createCtx(services) {
+    const db = new Db(services.store);
+    const now = services.clock.now();
+    const pending = [];
+    return {
+      s: services,
+      db,
+      m: new Model(services, db),
+      now,
+      today: nyDate(now),
+      deliveries: null,
+      log(kind, detail) {
+        pending.push({ At: now, Kind: kind, Detail: truncate(detail, MAX_LOG_DETAIL) });
+      },
+      flushLog() {
+        if (pending.length === 0) return;
+        const rows = pending.splice(0, pending.length);
+        try {
+          db.append("Log", rows);
+        } catch (err) {
+          services.logger.error("Could not write Log rows", err);
+        }
+      }
+    };
+  }
+  function inWriteLock(ctx, fn) {
+    return ctx.s.withLock(() => {
+      ctx.db.reset();
+      try {
+        return fn();
+      } finally {
+        ctx.flushLog();
+      }
+    });
+  }
+  function rateLimit(ctx, key, limit, windowSeconds, message) {
+    const nowMs = ctx.now.getTime();
+    let count = 0;
+    let resetAt = nowMs + windowSeconds * 1e3;
+    const raw = ctx.s.cache.get(key);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.n === "number" && typeof parsed.r === "number" && parsed.r > nowMs) {
+          count = parsed.n;
+          resetAt = parsed.r;
+        }
+      } catch {
+      }
+    }
+    if (count >= limit) throw new ApiError("RATE_LIMITED", message);
+    const ttl = Math.max(1, Math.ceil((resetAt - nowMs) / 1e3));
+    ctx.s.cache.put(key, JSON.stringify({ n: count + 1, r: resetAt }), ttl);
   }
 
   // src/server/email.ts
@@ -2011,6 +2177,7 @@ var TMA = (() => {
     if (!Array.isArray(value)) return null;
     return value.filter((v) => typeof v === "string").slice(0, 50);
   }
+  var SMS_PHONE_RE = /^1?[2-9]\d{2}[2-9]\d{6}$/;
   function sanitizePrefs(input, settings, fallback) {
     const src = isRecord(input) ? input : {};
     const channelsIn = isRecord(src.channels) ? src.channels : {};
@@ -2030,7 +2197,7 @@ var TMA = (() => {
     };
     const phoneIn = src.smsPhone === void 0 ? fallback.smsPhone : src.smsPhone;
     const digits = typeof phoneIn === "string" || typeof phoneIn === "number" ? String(phoneIn).replace(/\D/g, "") : "";
-    if (digits.length >= 10 && digits.length <= 15) prefs.smsPhone = digits;
+    if (SMS_PHONE_RE.test(digits)) prefs.smsPhone = digits;
     if (!settings.smsSetting || !prefs.smsPhone) prefs.channels.sms = false;
     return prefs;
   }
@@ -2087,11 +2254,13 @@ var TMA = (() => {
   }
   var DEVICE_COLUMNS = TABLES.Devices.headers;
   var SIGN_IN_EMAIL_RESERVE = 20;
-  function deliver(ctx, recipients, notice, opts = {}) {
+  function mayText(ctx, email2) {
     var _a;
-    const counts = zeroCounts();
+    return ctx.m.settings().adminEmails.includes(email2) || ((_a = ctx.m.familyForEmail(email2)) == null ? void 0 : _a.status) === "Active";
+  }
+  function planDelivery(ctx, recipients, notice, opts) {
     const emails = unique(recipients.map(normEmail).filter(isEmail));
-    if (emails.length === 0) return counts;
+    if (emails.length === 0) return null;
     const settings = ctx.m.settings();
     const allowed = { push: true, email: true, sms: true, ...opts.channels };
     const pushOn = allowed.push && safely(ctx, "push.enabled", () => ctx.s.push.enabled(), false);
@@ -2110,11 +2279,49 @@ var TMA = (() => {
         for (const d of ctx.m.devicesFor(email2)) tokens.push(d.token);
       }
       if (emailOn && (opts.ignorePrefs || prefs.channels.email)) mailTo.push(email2);
-      if (smsOn && prefs.smsPhone && (opts.ignorePrefs || prefs.channels.sms)) smsTo.push(prefs.smsPhone);
+      if (smsOn && prefs.smsPhone && (opts.ignorePrefs || prefs.channels.sms) && mayText(ctx, email2)) smsTo.push(prefs.smsPhone);
     }
-    if (tokens.length > 0) counts.push = sendPush(ctx, unique(tokens), notice);
+    return { notice, tokens: unique(tokens), mailTo, smsTo: unique(smsTo), counts: zeroCounts() };
+  }
+  function deliver(ctx, recipients, notice, opts = {}) {
+    const job = planDelivery(ctx, recipients, notice, opts);
+    if (!job) return zeroCounts();
+    if (ctx.deliveries) {
+      ctx.deliveries.push(job);
+      return job.counts;
+    }
+    removeDevices(ctx, sendJob(ctx, job));
+    return job.counts;
+  }
+  function flushDeliveries(ctx) {
+    var _a;
+    const jobs = (_a = ctx.deliveries) != null ? _a : [];
+    ctx.deliveries = null;
+    const total = zeroCounts();
+    if (jobs.length === 0) return total;
+    const invalid = /* @__PURE__ */ new Set();
+    for (const job of jobs) {
+      try {
+        for (const token of sendJob(ctx, job)) invalid.add(token);
+      } catch (err) {
+        ctx.s.logger.error(`Could not send "${job.notice.title}"`, errorMessage(err));
+      }
+      addCounts(total, job.counts);
+    }
+    try {
+      inWriteLock(ctx, () => removeDevices(ctx, invalid));
+    } catch (err) {
+      ctx.s.logger.error("Could not record notification results", errorMessage(err));
+    }
+    return total;
+  }
+  function sendJob(ctx, job) {
+    var _a;
+    const { notice, counts } = job;
+    const settings = ctx.m.settings();
+    const invalid = job.tokens.length > 0 ? sendPush(ctx, job.tokens, notice, counts) : [];
     let quotaSkipped = 0;
-    if (mailTo.length > 0) {
+    if (job.mailTo.length > 0) {
       let quota = safely(ctx, "mailer.remainingQuota", () => ctx.s.mailer.remainingQuota(), 0) - SIGN_IN_EMAIL_RESERVE;
       const { html, text: text2 } = renderEmail({
         orgName: settings.pub.orgName,
@@ -2126,18 +2333,18 @@ var TMA = (() => {
       });
       const subject = oneLine(notice.title, 150);
       let next = 0;
-      while (next < mailTo.length && quota > 0) {
-        const batch = mailTo.slice(next, next + quota);
+      while (next < job.mailTo.length && quota > 0) {
+        const batch = job.mailTo.slice(next, next + quota);
         next += batch.length;
         const sent = sendEmails(ctx, batch, { subject, html, text: text2 });
         counts.email += sent;
         quota -= sent;
       }
-      quotaSkipped = mailTo.length - next;
+      quotaSkipped = job.mailTo.length - next;
     }
-    if (smsTo.length > 0) {
+    if (job.smsTo.length > 0) {
       const message = oneLine(`TMA: ${notice.title} – ${(_a = notice.pushBody) != null ? _a : notice.body}`, 320);
-      for (const phone of unique(smsTo)) {
+      for (const phone of job.smsTo) {
         const sent = safely(
           ctx,
           "sms.send",
@@ -2152,7 +2359,7 @@ var TMA = (() => {
     }
     const skipped = quotaSkipped > 0 ? ` (${quotaSkipped} email skipped: daily quota used up; the last ${SIGN_IN_EMAIL_RESERVE} are kept for sign-in codes)` : "";
     ctx.log("notify", `${notice.topic}: ${notice.title} → push ${counts.push}, email ${counts.email}, sms ${counts.sms}${skipped}`);
-    return counts;
+    return invalid;
   }
   function sendEmails(ctx, recipients, content) {
     const mailer = ctx.s.mailer;
@@ -2183,7 +2390,7 @@ var TMA = (() => {
     });
     return sent;
   }
-  function sendPush(ctx, tokens, notice) {
+  function sendPush(ctx, tokens, notice, counts) {
     var _a;
     const message = {
       title: oneLine(notice.title, 120),
@@ -2193,20 +2400,21 @@ var TMA = (() => {
     };
     if (notice.tag) message.tag = notice.tag;
     const results = safely(ctx, "push.send", () => ctx.s.push.send(tokens, message), []);
-    let ok = 0;
-    const invalid = /* @__PURE__ */ new Set();
+    const invalid = [];
     results.forEach((result, i) => {
-      if (result === "ok") ok++;
-      else if (result === "invalid" && i < tokens.length) invalid.add(tokens[i]);
+      if (result === "ok") counts.push++;
+      else if (result === "invalid" && i < tokens.length) invalid.push(tokens[i]);
     });
-    if (invalid.size > 0) {
-      for (const device of ctx.m.devices()) {
-        if (!invalid.has(device.token)) continue;
-        safely(ctx, "remove invalid device", () => ctx.db.clear("Devices", device.row, DEVICE_COLUMNS), void 0);
-      }
-      ctx.log("push", `Removed ${invalid.size} expired device token(s)`);
+    return invalid;
+  }
+  function removeDevices(ctx, invalid) {
+    const dead = new Set(invalid);
+    if (dead.size === 0) return;
+    for (const device of ctx.m.devices()) {
+      if (!dead.has(device.token)) continue;
+      safely(ctx, "remove invalid device", () => ctx.db.clear("Devices", device.row, DEVICE_COLUMNS), void 0);
     }
-    return ok;
+    ctx.log("push", `Removed ${dead.size} expired device token(s)`);
   }
   function familyRecipients(family) {
     return family ? unique(family.guardians.map((g) => g.email).filter(isEmail)) : [];
@@ -2315,6 +2523,7 @@ var TMA = (() => {
   var MAX_PENDING_HOUSEHOLDS = 100;
   var MAX_PENDING_REDEMPTIONS = 200;
   var RECENT_LOG = 50;
+  var DUPLICATE_WINDOW_MS = 15 * 60 * 1e3;
   function matchCandidates(ctx, family, pending) {
     const last = lettersOnly(pending.lastName);
     if (!last) return [];
@@ -2342,6 +2551,48 @@ var TMA = (() => {
       });
     }
     return out.filter((c) => c.score >= 0.6).sort((a, b) => b.score - a.score || b.balanceCents - a.balanceCents).slice(0, MAX_CANDIDATES);
+  }
+  function studentRecordTabs(ctx) {
+    const index = /* @__PURE__ */ new Map();
+    const add2 = (studentId, tab) => {
+      var _a;
+      if (!studentId) return;
+      const list2 = (_a = index.get(idKey(studentId))) != null ? _a : [];
+      if (!list2.includes(tab)) list2.push(tab);
+      index.set(idKey(studentId), list2);
+    };
+    for (const l of ctx.m.ledger()) add2(l.studentId, "Ledger");
+    for (const e of ctx.m.enrollments()) add2(e.studentId, "Enrollments");
+    for (const p of ctx.m.payments()) add2(p.studentId, "Payments");
+    for (const r of ctx.m.redemptions()) add2(r.studentId, "Redemptions");
+    return index;
+  }
+  function reviewWarnings(ctx, family, pending, records = studentRecordTabs(ctx)) {
+    var _a;
+    const m = ctx.m;
+    const warnings = [];
+    for (const s of pending) {
+      const tabs = (_a = records.get(idKey(s.id))) != null ? _a : [];
+      if (tabs.length > 0) {
+        warnings.push(
+          `${s.id} (${studentName(s)}) already has rows in ${tabs.join(", ")} from an earlier student with this ID. Fix the IDs in the sheet before approving.`
+        );
+      }
+    }
+    if (family.status === "Pending") {
+      for (const s of m.studentsOfFamily(family.id)) {
+        if (s.status === "Pending") continue;
+        warnings.push(
+          `${s.id} (${studentName(s)}, ${s.status}) is already linked to ${family.id} in the Students tab. Approving shows this household that student's funds and history.`
+        );
+      }
+      const pendingKeys = new Set(pending.map((s) => idKey(s.id)));
+      const requests = m.redemptions().filter((r) => idKey(r.familyId) === idKey(family.id) && !pendingKeys.has(idKey(r.studentId)));
+      if (requests.length > 0) {
+        warnings.push(`${family.id} already has ${requests.length} row(s) in Redemptions from before it signed up. Check the FamilyID before approving.`);
+      }
+    }
+    return warnings;
   }
   function adminOverview(ctx) {
     var _a, _b, _c;
@@ -2374,14 +2625,18 @@ var TMA = (() => {
       };
     });
     const pendingHouseholds = [];
+    const records = studentRecordTabs(ctx);
     for (const f of families) {
       if (f.status === "Inactive") continue;
       const pendingStudents = m.studentsOfFamily(f.id).filter((s) => s.status === "Pending");
       if (f.status !== "Pending" && pendingStudents.length === 0) continue;
-      pendingHouseholds.push({
+      const entry = {
         family: toFamily(f),
         students: pendingStudents.map((s) => ({ student: toStudent(s), candidates: matchCandidates(ctx, f, s) }))
-      });
+      };
+      const warnings = reviewWarnings(ctx, f, pendingStudents, records);
+      if (warnings.length > 0) entry.warnings = warnings;
+      pendingHouseholds.push(entry);
       if (pendingHouseholds.length >= MAX_PENDING_HOUSEHOLDS) break;
     }
     const log = m.logEntries();
@@ -2483,7 +2738,7 @@ var TMA = (() => {
     throw new Error("Could not generate a unique announcement ID");
   }
   function announce(ctx, adminEmail, params) {
-    var _a;
+    var _a, _b;
     const settings = ctx.m.settings().pub;
     const title = text(params.title, "Title", LIMITS.title);
     const body = text(params.body, "Message", LIMITS.body, { multiline: true });
@@ -2497,6 +2752,15 @@ var TMA = (() => {
     for (const c of CHANNELS) channels[c] = bool(channelsIn[c], `Channel ${c}`, false);
     if (!CHANNELS.some((c) => channels[c])) badRequest("Choose at least one way to send it.");
     const link = optUrl(params.link, "Link");
+    const nowMs = ctx.now.getTime();
+    const recent = ctx.m.announcements().find((a) => {
+      const sentMs = a.sentAt ? Date.parse(a.sentAt) : NaN;
+      return a.title === title && a.body.trim() === body.trim() && nowMs - sentMs >= 0 && nowMs - sentMs < DUPLICATE_WINDOW_MS;
+    });
+    if (recent) {
+      const minutes = Math.max(1, Math.round((nowMs - Date.parse((_b = recent.sentAt) != null ? _b : "")) / 6e4));
+      conflict(`This announcement was already sent ${minutes} minute${minutes === 1 ? "" : "s"} ago. Check News before sending it again.`);
+    }
     const id2 = newAnnouncementId(ctx);
     ctx.db.append("Announcements", [
       {
@@ -2517,141 +2781,13 @@ var TMA = (() => {
     return { announcement: toAnnouncement(saved), delivered };
   }
 
-  // src/server/db.ts
-  function isBlankRow(data) {
-    for (const key of Object.keys(data)) if (!isBlank(data[key])) return false;
-    return true;
-  }
-  var Db = class {
-    constructor(store) {
-      this.store = store;
-      __publicField(this, "cache", /* @__PURE__ */ new Map());
-      __publicField(this, "versions", /* @__PURE__ */ new Map());
-      __publicField(this, "epoch", 0);
-    }
-    rows(table) {
-      let rows = this.cache.get(table);
-      if (!rows) {
-        rows = this.store.read(table).slice();
-        this.cache.set(table, rows);
-      }
-      return rows;
-    }
-    /** Changes whenever the table (or the whole view) may have changed. */
-    version(table) {
-      var _a;
-      return `${this.epoch}.${(_a = this.versions.get(table)) != null ? _a : 0}`;
-    }
-    append(table, rows) {
-      if (rows.length === 0) return;
-      this.store.append(table, rows);
-      this.cache.delete(table);
-      this.bump(table);
-    }
-    update(table, rowNumber, patch) {
-      this.store.update(table, rowNumber, patch);
-      const rows = this.cache.get(table);
-      if (rows) {
-        const index = rows.findIndex((r) => r.rowNumber === rowNumber);
-        if (index < 0) {
-          this.cache.delete(table);
-        } else {
-          const data = { ...rows[index].data, ...patch };
-          if (isBlankRow(data)) rows.splice(index, 1);
-          else rows[index] = { rowNumber, data };
-        }
-      }
-      this.bump(table);
-    }
-    /** Blank out a row (the sheet equivalent of deleting it without shifting row numbers). */
-    clear(table, rowNumber, columns) {
-      const patch = {};
-      for (const c of columns) patch[c] = "";
-      this.update(table, rowNumber, patch);
-    }
-    overwrite(table, rows) {
-      this.store.overwrite(table, rows);
-      this.cache.delete(table);
-      this.bump(table);
-    }
-    ensureTable(table) {
-      const result = this.store.ensureTable(table);
-      this.cache.delete(table);
-      this.bump(table);
-      return result;
-    }
-    /** Forget everything read so far (call after taking the write lock). */
-    reset() {
-      this.cache.clear();
-      this.epoch++;
-    }
-    bump(table) {
-      var _a;
-      this.versions.set(table, ((_a = this.versions.get(table)) != null ? _a : 0) + 1);
-    }
-  };
-
-  // src/server/context.ts
-  var MAX_LOG_DETAIL = 500;
-  function createCtx(services) {
-    const db = new Db(services.store);
-    const now = services.clock.now();
-    const pending = [];
-    return {
-      s: services,
-      db,
-      m: new Model(services, db),
-      now,
-      today: nyDate(now),
-      log(kind, detail) {
-        pending.push({ At: now, Kind: kind, Detail: truncate(detail, MAX_LOG_DETAIL) });
-      },
-      flushLog() {
-        if (pending.length === 0) return;
-        const rows = pending.splice(0, pending.length);
-        try {
-          db.append("Log", rows);
-        } catch (err) {
-          services.logger.error("Could not write Log rows", err);
-        }
-      }
-    };
-  }
-  function inWriteLock(ctx, fn) {
-    return ctx.s.withLock(() => {
-      ctx.db.reset();
-      try {
-        return fn();
-      } finally {
-        ctx.flushLog();
-      }
-    });
-  }
-  function rateLimit(ctx, key, limit, windowSeconds, message) {
-    const nowMs = ctx.now.getTime();
-    let count = 0;
-    let resetAt = nowMs + windowSeconds * 1e3;
-    const raw = ctx.s.cache.get(key);
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (typeof parsed.n === "number" && typeof parsed.r === "number" && parsed.r > nowMs) {
-          count = parsed.n;
-          resetAt = parsed.r;
-        }
-      } catch {
-      }
-    }
-    if (count >= limit) throw new ApiError("RATE_LIMITED", message);
-    const ttl = Math.max(1, Math.ceil((resetAt - nowMs) / 1e3));
-    ctx.s.cache.put(key, JSON.stringify({ n: count + 1, r: resetAt }), ttl);
-  }
-
   // src/server/auth.ts
   var CODE_TTL_SECONDS = 600;
   var MAX_CODE_ATTEMPTS = 5;
   var CODES_PER_HOUR = 5;
   var MAX_TOKEN_LENGTH = 2048;
+  var NEW_EMAIL_CODES_PER_HOUR = 30;
+  var KNOWN_EMAIL_CODE_RESERVE = 40;
   function requireSecret(ctx) {
     const secret = ctx.s.secrets.get("TOKEN_SECRET");
     if (!secret || secret.length < 32) {
@@ -2673,17 +2809,27 @@ var TMA = (() => {
       return null;
     }
   }
+  function isKnownEmail(ctx, email2) {
+    return ctx.m.settings().adminEmails.includes(email2) || ctx.m.familiesWithEmail(email2).length > 0 || ctx.m.preferences().has(email2) || ctx.m.devicesFor(email2).length > 0;
+  }
+  function newEmailLimitHit(ctx, detail) {
+    ctx.s.logger.error(detail);
+    const flag = "otp-new-email-limit-logged";
+    if (ctx.s.cache.get(flag)) return;
+    ctx.s.cache.put(flag, "1", 3600);
+    try {
+      inWriteLock(ctx, () => ctx.log("auth", detail));
+    } catch (err) {
+      ctx.s.logger.error("Could not write the Log row", errorMessage(err));
+    }
+  }
+  var NEW_EMAILS_PAUSED = "Lots of people are signing up right now, so new sign-ups are paused for a while. Please try again later or contact TMA.";
   function requestCode(ctx, params) {
     const email2 = email(params.email);
     const secret = requireSecret(ctx);
     const perHour = ctx.s.mode === "demo" ? 100 : CODES_PER_HOUR;
     rateLimit(ctx, `otp-rl:${email2}`, perHour, 3600, "Too many codes requested for this email. Please wait an hour and try again.");
-    const code = ctx.s.crypto.randomDigits(6);
-    if (!/^\d{6}$/.test(code)) throw new Error("randomDigits returned an invalid code");
-    const entry = { h: otpHash(ctx, secret, email2, code), a: 0, x: ctx.now.getTime() + CODE_TTL_SECONDS * 1e3 };
-    ctx.s.cache.put(`otp:${email2}`, JSON.stringify(entry), CODE_TTL_SECONDS);
-    if (ctx.s.mode === "demo") return { sent: true, devCode: code };
-    const settings = ctx.m.settings();
+    if (ctx.s.mode === "demo") return { sent: true, devCode: issueCode(ctx, secret, email2) };
     let quota = 0;
     try {
       quota = ctx.s.mailer.remainingQuota();
@@ -2693,6 +2839,20 @@ var TMA = (() => {
     if (quota <= 0) {
       fail("RATE_LIMITED", "TMA has reached today's email limit. Please try again tomorrow or contact TMA.");
     }
+    if (!isKnownEmail(ctx, email2)) {
+      if (quota <= KNOWN_EMAIL_CODE_RESERVE) {
+        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: only ${quota} emails left today (the last ${KNOWN_EMAIL_CODE_RESERVE} are kept for families on the sheet)`);
+        fail("RATE_LIMITED", NEW_EMAILS_PAUSED);
+      }
+      try {
+        rateLimit(ctx, "otp-rl:new-emails", NEW_EMAIL_CODES_PER_HOUR, 3600, NEW_EMAILS_PAUSED);
+      } catch (err) {
+        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: more than ${NEW_EMAIL_CODES_PER_HOUR} in an hour`);
+        throw err;
+      }
+    }
+    const code = issueCode(ctx, secret, email2);
+    const settings = ctx.m.settings();
     const { html, text: text2 } = renderEmail({
       orgName: settings.pub.orgName,
       title: "Your sign-in code",
@@ -2708,6 +2868,13 @@ var TMA = (() => {
       fail("INTERNAL", "We couldn't send the email right now. Please try again in a few minutes.");
     }
     return { sent: true };
+  }
+  function issueCode(ctx, secret, email2) {
+    const code = ctx.s.crypto.randomDigits(6);
+    if (!/^\d{6}$/.test(code)) throw new Error("randomDigits returned an invalid code");
+    const entry = { h: otpHash(ctx, secret, email2, code), a: 0, x: ctx.now.getTime() + CODE_TTL_SECONDS * 1e3 };
+    ctx.s.cache.put(`otp:${email2}`, JSON.stringify(entry), CODE_TTL_SECONDS);
+    return code;
   }
   function verifyCode(ctx, params) {
     const email2 = email(params.email);
@@ -2930,6 +3097,10 @@ var TMA = (() => {
   var TAKEN_MESSAGE = "That email is already on a TMA household. Sign in with it or contact TMA.";
   function saveHousehold(ctx, email2, params) {
     rateLimit(ctx, `hh-rl:${email2}`, 30, 3600, "Too many changes in a short time. Please try again later.");
+    if (bool(params.leave, "Leave", false)) {
+      leaveHousehold(ctx, email2);
+      return buildBootstrap(ctx, email2);
+    }
     const settings = ctx.m.settings();
     const input = parseInput(params, settings);
     if (!input.guardians.some((g) => g.email === email2)) {
@@ -2941,10 +3112,20 @@ var TMA = (() => {
     else updateHousehold(ctx, email2, family, input);
     return buildBootstrap(ctx, email2);
   }
+  function leaveHousehold(ctx, email2) {
+    const family = ctx.m.familyForEmail(email2);
+    if (!family) return;
+    const [first, second] = family.slots;
+    if (second.email !== email2 || first.email === email2) {
+      badRequest("The first guardian can't leave a household in the app. Please contact TMA.");
+    }
+    ctx.db.update("Families", family.row, { "Parent 2 Name": "", "Parent 2 Email": "", "Parent 2 Phone": "" });
+    ctx.log("household", `${family.id}: second guardian ${email2} left the household`);
+  }
   function createHousehold(ctx, email2, input) {
     var _a, _b, _c, _d;
     for (const g of input.guardians) if (emailTaken(ctx, g.email)) conflict(TAKEN_MESSAGE);
-    const familyId = nextSequentialId("F", ctx.m.families().map((f) => f.id));
+    const familyId = nextSequentialId("F", referencedFamilyIds(ctx));
     const [g1, g2] = input.guardians.slice().sort((a, b) => Number(b.email === email2) - Number(a.email === email2));
     ctx.db.append("Families", [
       {
@@ -2969,8 +3150,24 @@ var TMA = (() => {
     ctx.log("signup", `${familyId}: ${names} signed up with ${input.students.length} student(s)`);
     notifyAdmins(ctx, newSignupNotice(names, input.students.length, familyId));
   }
+  function referencedFamilyIds(ctx) {
+    const ids = ctx.m.families().map((f) => f.id);
+    for (const s of ctx.m.students()) if (s.familyId) ids.push(s.familyId);
+    for (const r of ctx.m.redemptions()) if (r.familyId) ids.push(r.familyId);
+    return ids;
+  }
+  function referencedStudentIds(ctx) {
+    const m = ctx.m;
+    const ids = m.students().map((s) => s.id);
+    for (const l of m.ledger()) ids.push(l.studentId);
+    for (const e of m.enrollments()) ids.push(e.studentId);
+    for (const p of m.payments()) ids.push(p.studentId);
+    for (const r of m.redemptions()) if (r.studentId) ids.push(r.studentId);
+    m.snapshot().forEach((snap) => ids.push(snap.studentId));
+    return ids;
+  }
   function newStudentIds(ctx, count) {
-    const existing = ctx.m.students().map((s) => s.id);
+    const existing = referencedStudentIds(ctx);
     const ids = [];
     for (let i = 0; i < count; i++) {
       const id2 = nextSequentialId("S", existing.concat(ids));
@@ -3034,11 +3231,13 @@ var TMA = (() => {
     } else if (!slot2 && family.slots[1].email) {
       ctx.log("household", `${family.id}: second guardian ${family.slots[1].email} removed by ${email2}`);
     }
+    const knownGroups = ctx.m.settings().pub.ensembles;
     for (const { rec, input: s } of updates) {
+      const sheetOnly = rec.ensembles.filter((e) => !isKnown(e, knownGroups));
       const studentPatch = {
         Grade: s.grade,
         School: s.school,
-        Ensembles: joinList(s.ensembles)
+        Ensembles: joinList(uniqueBy([...s.ensembles, ...sheetOnly], (e) => e.toLowerCase()))
       };
       if (s.instrumentGiven) studentPatch.Instrument = (_a = s.instrument) != null ? _a : "";
       const sameName = rec.firstName.toLowerCase() === s.firstName.toLowerCase() && rec.lastName.toLowerCase() === s.lastName.toLowerCase();
@@ -3211,7 +3410,11 @@ var TMA = (() => {
       badRequest(`${student2.firstName} isn't signed up as going on ${activity.name}.`);
     }
     const remaining = account.remainingCents;
-    if (remaining <= 0) conflict(`${activity.name} is already paid in full.`);
+    if (remaining <= 0) {
+      conflict(
+        account.pendingPaymentCents ? `A payment toward ${activity.name} is still being processed, so nothing is left to pay right now.` : `${activity.name} is already paid in full.`
+      );
+    }
     const minimum = Math.min(settings.minPaymentCents, remaining);
     if (amount < minimum) badRequest(`The smallest online payment is ${formatCents(minimum)}.`);
     if (amount > remaining) badRequest(`That's more than what's left to pay (${formatCents(remaining)}).`);
@@ -3255,7 +3458,7 @@ var TMA = (() => {
     return (_a = ctx.m.payments().find((p) => p.reference !== "" && keys.has(idKey(p.reference)))) != null ? _a : null;
   }
   function captureOrder(ctx, email2, params) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f, _g;
     const orderId = id(params.orderId, "Order");
     if (!ORDER_ID_RE.test(orderId)) badRequest("Order is invalid.");
     const order = readOrder(ctx.s.cache.get(orderKey(orderId)));
@@ -3263,12 +3466,37 @@ var TMA = (() => {
     if (order.email !== email2) forbidden("This payment was started by a different account.");
     const existing = findPayment(ctx, [order.captureId, orderId]);
     if (existing) return { payment: toPayment(existing) };
+    const student2 = ctx.m.studentById(order.studentId);
+    const activity = ctx.m.activityById(order.activityId);
+    const firstName = (_a = student2 == null ? void 0 : student2.firstName) != null ? _a : order.studentId;
+    const activityName = (_b = activity == null ? void 0 : activity.name) != null ? _b : order.activityId;
+    if (!order.captureId && !order.unconfirmed) {
+      const left = (_d = (_c = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _c.remainingCents) != null ? _d : 0;
+      if (order.amountCents > left) {
+        ctx.log("payment", `${orderId}: not captured; ${formatCents(order.amountCents)} is more than the ${formatCents(left)} left for ${order.studentId} / ${order.activityId}`);
+        fail(
+          "PAYMENT_FAILED",
+          left > 0 ? `Part of this was paid in the meantime and only ${formatCents(left)} is left, so this payment was stopped and you were not charged. Please start again with the new amount.` : `${activityName} was paid in the meantime, so this payment was stopped and you were not charged.`
+        );
+      }
+    }
     let result;
     try {
       result = ctx.s.payments.captureOrder(orderId, `cap-${orderId}`);
     } catch (err) {
       ctx.s.logger.error("PayPal captureOrder failed", errorMessage(err));
-      return fail("PAYMENT_FAILED", "We couldn't confirm the payment with PayPal. Please try again in a minute.");
+      result = { status: "UNKNOWN", message: errorMessage(err) };
+    }
+    if (result.status === "UNKNOWN") {
+      ctx.s.cache.put(orderKey(orderId), JSON.stringify({ ...order, unconfirmed: true }), ORDER_TTL_SECONDS);
+      const detail = `${orderId}: PayPal did not confirm the capture of ${formatCents(order.grossCents)} (${(_e = result.message) != null ? _e : "no answer"}); check PayPal (${email2}, ${order.studentId}, ${order.activityId})`;
+      ctx.log("payment-error", detail);
+      ctx.s.logger.error("Capture outcome unknown", detail);
+      if (!order.unconfirmed) notifyAdmins(ctx, paymentUnconfirmedNotice(firstName, activityName, order.grossCents, orderId));
+      fail(
+        "INTERNAL",
+        "We couldn't confirm the payment with PayPal. If PayPal emailed you a receipt, it went through and TMA will record it. Please don't pay again until it shows in the app."
+      );
     }
     const captureId = typeof result.captureId === "string" && result.captureId.trim() !== "" ? result.captureId.trim() : void 0;
     if (captureId) {
@@ -3276,10 +3504,6 @@ var TMA = (() => {
       const already = findPayment(ctx, [captureId]);
       if (already) return { payment: toPayment(already) };
     }
-    const student2 = ctx.m.studentById(order.studentId);
-    const activity = ctx.m.activityById(order.activityId);
-    const firstName = (_a = student2 == null ? void 0 : student2.firstName) != null ? _a : order.studentId;
-    const activityName = (_b = activity == null ? void 0 : activity.name) != null ? _b : order.activityId;
     if (result.status === "COMPLETED") {
       if (result.grossCents !== order.grossCents) {
         const detail = `${orderId}/${captureId != null ? captureId : "?"}: PayPal captured ${result.grossCents === void 0 ? "an unknown amount" : formatCents(result.grossCents)}, expected ${formatCents(order.grossCents)} (${email2}, ${order.studentId}, ${order.activityId})`;
@@ -3312,7 +3536,7 @@ var TMA = (() => {
     const recorded = findPayment(ctx, [reference]);
     if (!recorded) throw new Error(`Payment ${reference} was not saved`);
     if (status === "Completed") {
-      const remaining = (_d = (_c = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _c.remainingCents) != null ? _d : 0;
+      const remaining = (_g = (_f = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _f.remainingCents) != null ? _g : 0;
       notifyFamily(
         ctx,
         ctx.m.familyById(order.familyId),
@@ -3397,8 +3621,13 @@ var TMA = (() => {
     ctx.log("redemption", `${rec.id}: cancelled by ${email2}`);
     return { redemption: toRedemption((_a = ctx.m.redemptionById(rec.id)) != null ? _a : rec) };
   }
+  function ledgerHasReference(ctx, requestId) {
+    const key = idKey(requestId);
+    return ctx.m.ledger().some((l) => l.reference !== void 0 && idKey(l.reference) === key);
+  }
   function postRedemptionLedger(ctx, rec, enteredBy) {
     var _a, _b;
+    if (ledgerHasReference(ctx, rec.id)) return false;
     const activity = ctx.m.activityById(rec.activityId);
     ctx.db.append("Ledger", [
       {
@@ -3413,6 +3642,7 @@ var TMA = (() => {
       }
     ]);
     adjustSnapshot(ctx, rec.studentId, -rec.amountCents);
+    return true;
   }
   function adjustSnapshot(ctx, studentId, deltaCents) {
     const snapshot = ctx.m.snapshot();
@@ -3448,7 +3678,9 @@ var TMA = (() => {
     const rec = ctx.m.redemptionById(id2);
     if (!rec) return notFound("Request not found.");
     if (rec.status !== "Pending") conflict(`This request was already ${rec.status.toLowerCase()}.`);
-    if (decision === "Approved") {
+    if (decision === "Approved" && ledgerHasReference(ctx, rec.id)) {
+      ctx.log("redemption", `${rec.id}: Ledger row already in the sheet; not posting another`);
+    } else if (decision === "Approved") {
       const books = ctx.m.books();
       const student2 = ctx.m.studentById(rec.studentId);
       const name = (_a = student2 == null ? void 0 : student2.firstName) != null ? _a : rec.studentId;
@@ -3850,6 +4082,9 @@ var TMA = (() => {
   }
 
   // src/server/sync.ts
+  var SETTLE_MS = 5 * 60 * 1e3;
+  var ANNOUNCE_FROM_HOUR = 8;
+  var SETTLE_TTL_SECONDS = 21600;
   function emptyReport(now) {
     return {
       ranAt: now.toISOString(),
@@ -3887,16 +4122,62 @@ var TMA = (() => {
     step(ctx, report, "event reminders", () => sendEventReminders(ctx, report));
     return report;
   }
+  function requireColumns(ctx, table, columns, tabRequired = false) {
+    const present = ctx.db.columns(table);
+    if (present === void 0) return;
+    if (present === null) {
+      if (tabRequired) throw new Error(`The ${table} tab is missing (was it renamed?), so this step was skipped. Rename it back to ${table}.`);
+      return;
+    }
+    const missing = columns.filter((c) => !present.includes(c));
+    if (missing.length > 0) {
+      const names = missing.map((c) => `"${c}"`).join(", ");
+      throw new Error(
+        `The ${table} tab has no ${names} column, so this step was skipped rather than reading every row as blank. If a header was renamed (or the header row sorted), change it back.`
+      );
+    }
+  }
+  function settled(ctx, kind, content) {
+    const key = `settle:${kind}:${ctx.s.crypto.hmacSha256Hex("tma-settle", JSON.stringify(content))}`;
+    const firstSeen = Number(ctx.s.cache.get(key));
+    if (Number.isFinite(firstSeen) && firstSeen > 0) return ctx.now.getTime() - firstSeen >= SETTLE_MS;
+    ctx.s.cache.put(key, String(ctx.now.getTime()), SETTLE_TTL_SECONDS);
+    return false;
+  }
+  function countWaiting(report) {
+    var _a;
+    report.waiting = ((_a = report.waiting) != null ? _a : 0) + 1;
+  }
+  function reread(ctx, table, list2, before, same) {
+    var _a, _b;
+    ctx.db.refresh(table);
+    const matches = list2().filter(same);
+    return (_b = (_a = matches.find((r) => r.row === before.row)) != null ? _a : matches[0]) != null ? _b : null;
+  }
+  function decisionContent(r) {
+    var _a, _b;
+    return [idKey(r.id), r.status, (_a = r.adminNote) != null ? _a : "", r.amountCents, idKey(r.studentId), idKey(r.activityId), (_b = r.decidedBy) != null ? _b : ""];
+  }
+  function announcementContent(a) {
+    var _a;
+    return [a.storedId, a.date, a.title, a.body, a.audience.schools, a.audience.ensembles, (_a = a.link) != null ? _a : ""];
+  }
   function postSheetDecisions(ctx, report) {
-    const posted = new Set(ctx.m.ledger().filter((l) => l.reference).map((l) => idKey(l.reference)));
-    for (const rec of ctx.m.redemptions()) {
-      if (rec.status !== "Approved" && rec.status !== "Denied" || rec.notifiedAt) continue;
+    requireColumns(ctx, "Redemptions", ["RequestID", "StudentID", "ActivityID", "Amount", "Status", "Notified"]);
+    const decided = ctx.m.redemptions().filter((r) => (r.status === "Approved" || r.status === "Denied") && !r.notifiedAt);
+    if (decided.some((r) => r.status === "Approved")) requireColumns(ctx, "Ledger", ["StudentID", "Amount", "Reference"], true);
+    for (const candidate of decided) {
       try {
-        if (rec.status === "Approved" && !posted.has(idKey(rec.id))) {
+        if (!settled(ctx, "decision", decisionContent(candidate))) {
+          countWaiting(report);
+          continue;
+        }
+        const content = JSON.stringify(decisionContent(candidate));
+        const rec = reread(ctx, "Redemptions", () => ctx.m.redemptions(), candidate, (r) => !r.notifiedAt && JSON.stringify(decisionContent(r)) === content);
+        if (!rec) continue;
+        if (rec.status === "Approved" && !ledgerHasReference(ctx, rec.id)) {
           if (rec.amountCents <= 0 || !rec.studentId) throw new Error(`${rec.id} has no student or amount`);
-          postRedemptionLedger(ctx, rec, rec.decidedBy || "TMA sheet");
-          posted.add(idKey(rec.id));
-          report.redemptionsPosted++;
+          if (postRedemptionLedger(ctx, rec, rec.decidedBy || "TMA sheet")) report.redemptionsPosted++;
         }
         const patch = { Notified: ctx.now };
         if (!rec.decidedAt) patch.Decided = ctx.now;
@@ -3904,11 +4185,12 @@ var TMA = (() => {
         ctx.log("redemption", `${rec.id}: ${rec.status.toLowerCase()} in the sheet${rec.status === "Approved" ? ", ledger posted" : ""}`);
         addCounts(report.notifications, notifyDecision(ctx, rec));
       } catch (err) {
-        recordError(ctx, report, `redemption ${rec.id}`, err);
+        recordError(ctx, report, `redemption ${candidate.id}`, err);
       }
     }
   }
   function detectBalanceChanges(ctx, report) {
+    requireColumns(ctx, "Ledger", ["StudentID", "Amount"], true);
     const books = ctx.m.books();
     const current = /* @__PURE__ */ new Map();
     for (const s of ctx.m.students()) current.set(idKey(s.id), { studentId: s.id, cents: books.balance(s.id) });
@@ -3927,6 +4209,11 @@ var TMA = (() => {
         ctx.log("sync", `First run: saved ${current.size} balances (no notifications)`);
       }
       return;
+    }
+    if (books.ledgerStudentKeys().length === 0 && Array.from(snapshot.values()).some((s) => s.balanceCents !== 0)) {
+      throw new Error(
+        "The Ledger tab has no rows with a StudentID and an Amount, but earlier runs saw balances, so no family was told about a change. If the Ledger really was emptied, clear the _Snapshot tab."
+      );
     }
     let changed = false;
     const alerts = [];
@@ -3954,23 +4241,36 @@ var TMA = (() => {
     }
   }
   function sendQueuedAnnouncements(ctx, report) {
-    const queued = ctx.m.announcements().filter((a) => !a.sent && (!a.date || a.date <= ctx.today));
-    if (queued.length === 0) return;
-    const recipients = allRecipients(ctx);
-    for (const a of queued) {
+    requireColumns(ctx, "Announcements", ["Date", "Title", "Body", "Schools", "Ensembles", "Sent"]);
+    const morning = nyParts(ctx.now).hour >= ANNOUNCE_FROM_HOUR;
+    const isDue = (a) => !a.date || a.date < ctx.today || a.date === ctx.today && morning;
+    let recipients = null;
+    for (const candidate of ctx.m.announcements().filter((a) => !a.sent)) {
       try {
+        const stable = settled(ctx, "announcement", announcementContent(candidate));
+        if (!isDue(candidate)) continue;
+        if (!stable) {
+          countWaiting(report);
+          continue;
+        }
+        const content = JSON.stringify(announcementContent(candidate));
+        const a = reread(ctx, "Announcements", () => ctx.m.announcements(), candidate, (x) => !x.sent && JSON.stringify(announcementContent(x)) === content);
+        if (!a) continue;
         ctx.db.update("Announcements", a.row, { Sent: ctx.now });
-        const counts = deliver(ctx, recipients, announcementNotice(a));
-        addCounts(report.notifications, counts);
+        recipients != null ? recipients : recipients = allRecipients(ctx);
+        addCounts(report.notifications, deliver(ctx, recipients, announcementNotice(a)));
         report.announcementsSent++;
       } catch (err) {
-        recordError(ctx, report, `announcement ${a.id}`, err);
+        recordError(ctx, report, `announcement ${candidate.id}`, err);
       }
     }
   }
   function sendPaymentReminders(ctx, report) {
     const days = ctx.m.settings().reminderDays;
     if (days.length === 0) return;
+    requireColumns(ctx, "Ledger", ["StudentID", "Amount", "ActivityID"], true);
+    requireColumns(ctx, "Payments", ["StudentID", "ActivityID", "Amount", "Status"]);
+    requireColumns(ctx, "Enrollments", ["StudentID", "ActivityID", "Status"]);
     const books = ctx.m.books();
     const sent = new Set(ctx.m.sentKeys());
     const newKeys = [];
@@ -4006,6 +4306,7 @@ var TMA = (() => {
     }
   }
   function sendEventReminders(ctx, report) {
+    requireColumns(ctx, "Events", ["Date", "Title", "Schools", "Ensembles"]);
     const tomorrow = addDays(ctx.today, 1);
     const events = ctx.m.events().filter((e) => e.date === tomorrow);
     if (events.length === 0) return;
@@ -4046,7 +4347,7 @@ var TMA = (() => {
     "admin.decideRedemption": { admin: true, write: true, run: decideRedemption },
     "admin.reviewHousehold": { admin: true, write: true, run: reviewHousehold },
     "admin.announce": { admin: true, write: true, run: announce },
-    "admin.runSync": { admin: true, write: true, run: (ctx) => runSync(ctx) }
+    "admin.runSync": { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) }
   };
   var GENERIC_ERROR = "Something went wrong. Please try again.";
   function dispatch(services, request) {
@@ -4064,7 +4365,16 @@ var TMA = (() => {
     const ctx = createCtx(services);
     const email2 = authenticate(ctx, req.token);
     if (route.admin && !isAdmin(ctx, email2)) forbidden("Only TMA board members can do that.");
-    return route.write ? inWriteLock(ctx, () => route.run(ctx, email2, p)) : route.run(ctx, email2, p);
+    if (!route.write) return route.run(ctx, email2, p);
+    ctx.deliveries = [];
+    let result;
+    try {
+      result = inWriteLock(ctx, () => route.run(ctx, email2, p));
+    } finally {
+      const sent = flushDeliveries(ctx);
+      if (route.tick && result) addCounts(result.notifications, sent);
+    }
+    return result;
   }
   function createApp(services) {
     return {
@@ -4098,7 +4408,15 @@ var TMA = (() => {
     try {
       ctx = createCtx(services);
       const c = ctx;
-      return inWriteLock(c, () => run(c));
+      c.deliveries = [];
+      let report;
+      try {
+        report = inWriteLock(c, () => run(c));
+      } finally {
+        const sent = flushDeliveries(c);
+        if (report) addCounts(report.notifications, sent);
+      }
+      return report;
     } catch (err) {
       services.logger.error("Scheduled run failed", errorMessage(err));
       const report = emptyReport(ctx ? ctx.now : /* @__PURE__ */ new Date());
@@ -4891,7 +5209,7 @@ var TMA = (() => {
   var ORDER_ID = /^[A-Za-z0-9-]{1,64}$/;
   var MAX_ORDER_CENTS = 1e7;
   function paypalEnv(value) {
-    return /^(live|production)$/i.test(value.trim()) ? "live" : "sandbox";
+    return parsePaypalEnv(value);
   }
   function formatAmount(cents2) {
     return `${Math.floor(cents2 / 100)}.${String(cents2 % 100).padStart(2, "0")}`;
@@ -4956,6 +5274,15 @@ var TMA = (() => {
   function firstIssue(body) {
     var _a, _b;
     return (_b = (_a = pickString(body, "details", 0, "issue")) != null ? _a : pickString(body, "name")) != null ? _b : pickString(body, "error");
+  }
+  function hasCapture(body) {
+    return isRecord2(pick(body, "purchase_units", 0, "payments", "captures", 0));
+  }
+  function definiteFailure(code) {
+    return code >= 400 && code < 500 && code !== 408 && code !== 409 && code !== 425 && code !== 429;
+  }
+  function errorText3(error) {
+    return error instanceof Error ? error.message : String(error);
   }
   function validateOrder(input) {
     const { amountCents, feeCents, grossCents } = input;
@@ -5037,33 +5364,56 @@ var TMA = (() => {
         logger.error("PayPal create order failed", { status: code, issue: firstIssue(body), debugId: pickString(body, "debug_id") });
         throw new Error(`PayPal could not create the order (${(_a = firstIssue(body)) != null ? _a : `HTTP ${code}`}).`);
       },
+      /**
+       * Capture once; when the outcome is ambiguous (the capture may have happened), ask again with the
+       * same PayPal-Request-Id, which PayPal answers with the original result instead of charging twice.
+       * Still no definite answer -> UNKNOWN, never FAILED: "not charged" must only be said when true.
+       */
       captureOrder(orderId, requestId) {
+        var _a;
         if (typeof orderId !== "string" || !ORDER_ID.test(orderId)) {
           return { status: "FAILED", message: "Invalid PayPal order id." };
         }
         const r = resolve();
         if (!r) return { status: "FAILED", message: "PayPal is not configured." };
         try {
-          const path = `/v2/checkout/orders/${orderId}`;
-          const { code, body } = call(r, "post", `${path}/capture`, {}, {
-            "PayPal-Request-Id": clip(requestId, 108),
-            Prefer: "return=representation"
-          });
-          if (code === 200 || code === 201) return parseCapture(body);
-          const issue = firstIssue(body);
-          if (code === 422 && issue === "ORDER_ALREADY_CAPTURED") {
+          accessToken(r);
+        } catch (error) {
+          logger.error("PayPal capture not attempted", { message: errorText3(error) });
+          return { status: "FAILED", message: "Could not reach PayPal. Please try again." };
+        }
+        const path = `/v2/checkout/orders/${orderId}`;
+        const readOrder2 = () => {
+          try {
             const order = call(r, "get", path);
-            if (order.code === 200) return parseCapture(order.body);
+            if (order.code === 200 && hasCapture(order.body)) return parseCapture(order.body);
+            logger.error("PayPal order lookup failed", { status: order.code, issue: firstIssue(order.body) });
+          } catch (error) {
+            logger.error("PayPal order lookup error", { message: errorText3(error) });
           }
+          return null;
+        };
+        const capture = () => {
+          let res;
+          try {
+            res = call(r, "post", `${path}/capture`, {}, { "PayPal-Request-Id": clip(requestId, 108), Prefer: "return=representation" });
+          } catch (error) {
+            logger.error("PayPal capture error", { message: errorText3(error) });
+            return null;
+          }
+          const { code, body } = res;
+          if ((code === 200 || code === 201) && hasCapture(body)) return parseCapture(body);
+          const issue = firstIssue(body);
+          if (code === 422 && issue === "ORDER_ALREADY_CAPTURED") return readOrder2();
           logger.error("PayPal capture failed", { status: code, issue, debugId: pickString(body, "debug_id") });
+          if (!definiteFailure(code)) return null;
           if (issue === "INSTRUMENT_DECLINED") {
             return { status: "DECLINED", message: "The payment method was declined. Please try another card or account." };
           }
           return { status: "FAILED", message: `PayPal could not complete the payment (${issue != null ? issue : `HTTP ${code}`}).` };
-        } catch (error) {
-          logger.error("PayPal capture error", { message: error instanceof Error ? error.message : String(error) });
-          return { status: "FAILED", message: "Could not reach PayPal. Please try again." };
-        }
+        };
+        const result = (_a = capture()) != null ? _a : capture();
+        return result != null ? result : { status: "UNKNOWN", message: "PayPal did not confirm whether the payment went through." };
       }
     };
   }
@@ -5344,6 +5694,10 @@ Email from the TMA app is working.
       const missing = layout ? def.headers.filter((h) => !layout.columns.has(h)) : [];
       if (layout && missing.length > 0) this.addColumns(layout, missing);
       return { created: false, addedColumns: missing };
+    }
+    columns(table) {
+      const layout = this.layout(table);
+      return layout ? [...layout.columns.keys()] : null;
     }
     read(table) {
       let rows = this.rowCache.get(table);
@@ -5951,6 +6305,7 @@ ${next}`);
       `reminders: ${report.remindersSent}`,
       `sent push ${n.push}, email ${n.email}, sms ${n.sms}`
     ];
+    if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
     if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
     return `${parts.join(" · ")}.`;
   }

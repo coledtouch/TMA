@@ -85,7 +85,10 @@ describe('SignIn', () => {
 
     await user.type(code, '56');
     await user.click(screen.getByRole('button', { name: 'Sign in' }));
-    expect(await screen.findByText(/That code is not right/)).toBeInTheDocument();
+    // Announced (screen readers), and focus is back on the field rather than lost with the busy button.
+    expect(await screen.findByRole('alert')).toHaveTextContent(/That code is not right/);
+    expect(code).toHaveFocus();
+    expect(code).toHaveAccessibleDescription(/That code is not right/);
     expect(onSignedIn).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Use a different email' }));
@@ -97,8 +100,9 @@ describe('SignIn', () => {
     const { user } = renderSignIn(api);
     await user.type(screen.getByLabelText('Email address'), 'not-an-email');
     await user.click(screen.getByRole('button', { name: 'Email me a code' }));
-    expect(screen.getByText(/valid email address/)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(/valid email address/);
     expect(screen.getByLabelText('Email address')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Email address')).toHaveFocus();
     expect(api.call).not.toHaveBeenCalled();
   });
 

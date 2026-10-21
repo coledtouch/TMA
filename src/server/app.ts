@@ -10,6 +10,7 @@ import { buildBootstrap } from './bootstrap';
 import { createCtx, inWriteLock, type Ctx } from './context';
 import { ApiError, badRequest, forbidden } from './errors';
 import { saveHousehold } from './household';
+import { addCounts, flushDeliveries } from './notify';
 import { registerDevice, savePrefs, testPush, unregisterDevice } from './me';
 import { captureOrder, createOrder } from './payments';
 import { cancelRedemption, decideRedemption, requestRedemption } from './redemptions';
@@ -27,6 +28,8 @@ interface Route {
   admin?: boolean;
   /** Writes to the sheet: runs under the script lock on fresh data. */
   write?: boolean;
+  /** Returns a TickReport: add what was delivered after the lock to its counts. */
+  tick?: boolean;
   run(ctx: Ctx, email: string, params: Params): unknown;
 }
 
@@ -50,7 +53,7 @@ const ROUTES: Record<PrivateAction, Route> = {
   'admin.decideRedemption': { admin: true, write: true, run: decideRedemption },
   'admin.reviewHousehold': { admin: true, write: true, run: reviewHousehold },
   'admin.announce': { admin: true, write: true, run: announce },
-  'admin.runSync': { admin: true, write: true, run: (ctx) => runSync(ctx) },
+  'admin.runSync': { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';
@@ -72,7 +75,18 @@ function dispatch(services: Services, request: unknown): unknown {
   const ctx = createCtx(services);
   const email = authenticate(ctx, req.token);
   if (route.admin && !isAdmin(ctx, email)) forbidden('Only TMA board members can do that.');
-  return route.write ? inWriteLock(ctx, () => route.run(ctx, email, p)) : route.run(ctx, email, p);
+  if (!route.write) return route.run(ctx, email, p);
+  // Sheet writes hold the script lock; notifications go out after it is released (also when the
+  // action failed after queuing some, e.g. an admin alert about a payment).
+  ctx.deliveries = [];
+  let result: unknown;
+  try {
+    result = inWriteLock(ctx, () => route.run(ctx, email, p));
+  } finally {
+    const sent = flushDeliveries(ctx);
+    if (route.tick && result) addCounts((result as TickReport).notifications, sent);
+  }
+  return result;
 }
 
 export function createApp(services: Services): App {
@@ -107,12 +121,25 @@ export function createApp(services: Services): App {
   };
 }
 
+/**
+ * A scheduled run: read and write the sheet under the script lock (a few seconds), then send the
+ * notifications it queued with the lock released, so families' writes (a PayPal capture, saving
+ * settings) never wait behind hundreds of emails and pushes.
+ */
 function tick(services: Services, run: (ctx: Ctx) => TickReport): TickReport {
   let ctx: Ctx | null = null;
   try {
     ctx = createCtx(services);
     const c = ctx;
-    return inWriteLock(c, () => run(c));
+    c.deliveries = [];
+    let report: TickReport | undefined;
+    try {
+      report = inWriteLock(c, () => run(c));
+    } finally {
+      const sent = flushDeliveries(c);
+      if (report) addCounts(report.notifications, sent);
+    }
+    return report;
   } catch (err) {
     services.logger.error('Scheduled run failed', errorMessage(err));
     const report = emptyReport(ctx ? ctx.now : new Date());

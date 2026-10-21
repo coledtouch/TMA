@@ -7,10 +7,10 @@ A free phone app for the families of the
 the volunteer-run 501(c)(3) booster club for the music programs at Timberlane Regional Middle and
 High Schools in Plaistow, NH.
 
-It is a **Progressive Web App (PWA)**: families open a link, tap **Add to Home Screen**, and it
-works like an app on iPhone and Android. Nobody has to download anything from an app store. The
-treasurer keeps working in **the same Google Sheet** as today. The app reads that sheet, keeps
-balances straight and notifies families when something changes.
+It is a **Progressive Web App (PWA)**: families open **https://mytma.org**, tap **Add to Home
+Screen**, and it works like an app on iPhone and Android. Nobody has to download anything from an app
+store. The treasurer keeps working in **the same Google Sheet** as today. The app reads that sheet,
+keeps balances straight and notifies families when something changes.
 
 ## What it does
 
@@ -45,12 +45,13 @@ balances straight and notifies families when something changes.
 The demo runs entirely in your browser with made-up families. No emails, payments or real
 notifications are sent, and nothing leaves your computer.
 
-**Online, nothing to install:** add `?demo` to the app's address, for example
-**https://coledtouch.github.io/TMA/?demo**. This works even after the site is connected to TMA's
-real spreadsheet: that browser shows the demo, with a strip at the top saying so, until you tap
-**Exit demo**. The demo's sign-ins and data are kept apart from the real app's. The real app's
-sign-in screen also has a *See a demo with sample data* link. Until the site is connected (see
-[Hosting](docs/SETUP.md#7-host-the-app-on-github-pages)), the whole site is the demo.
+**Online, nothing to install:** add `?demo` to the app's address: **https://mytma.org/?demo**.
+This works even after the site is connected to TMA's real spreadsheet: that browser shows the demo,
+with a strip at the top saying so, until you tap **Exit demo**. The demo's sign-ins and data are kept
+apart from the real app's. The real app's sign-in screen also has a *See a demo with sample data*
+link. Right now the site works on TMA's test spreadsheet, with made-up families; going live means
+pointing it at the real one (see [Hosting](docs/SETUP.md#7-put-the-app-online-at-mytmaorg)). There is also a demo-only copy at **https://coledtouch.github.io/TMA/**,
+which never connects to a real spreadsheet.
 
 **On your own computer** you need [Node.js](https://nodejs.org/) 20 or newer:
 
@@ -92,17 +93,19 @@ The screenshots are taken from the demo at iPhone 13 size by `npm run screenshot
 
 ## What it costs
 
-Everything runs on free services (TMA's own Google account, GitHub Pages and Cloudflare Workers)
-except one choice: sending the app's email from **noreply@mytma.org**, which needs Cloudflare's
-Workers Paid plan ($5 a month). Without it, the app emails from TMA's Gmail for free.
+Everything runs on free services (TMA's own Google account, Cloudflare Workers and GitHub) except
+two things: TMA's web address **mytma.org** (about $10–12 a year), and one choice: sending the app's
+email from **noreply@mytma.org**, which needs Cloudflare's Workers Paid plan ($5 a month). Without
+that plan, the app emails from TMA's Gmail for free.
 
 | Piece | Cost | Notes |
 | --- | --- | --- |
 | Google Sheet and Apps Script (the app's server) | **$0** | |
+| The web address mytma.org (Cloudflare Registrar) | **About $10–12 a year** | Registered October 2026; renews every October. Cloudflare charges the registry's price with no markup. Keep auto-renew on with a payment method TMA controls: if it lapsed, the app would stop opening and someone else could take the address. See [docs/SETUP.md](docs/SETUP.md#7-put-the-app-online-at-mytmaorg). |
 | Email from noreply@mytma.org (Cloudflare Email Sending, through the push Worker) | **$5 a month** | Cloudflare's Workers Paid plan: 3,000 emails a month included (sign-in codes, notifications, announcements), then $0.35 per 1,000. Replies go to `SUPPORT_EMAIL`. See [docs/SETUP.md](docs/SETUP.md#email-from-noreplymytmaorg). |
 | Email from TMA's Gmail instead (Settings `EMAIL_VIA` = `gmail`), and the automatic fallback | **$0** | A free Gmail account can email about 100 recipients a day, including sign-in codes. Free [Google Workspace for Nonprofits](https://www.google.com/nonprofits/) raises that to about 1,500. |
 | Push notifications (TMA's push Worker on Cloudflare) | **$0** | Works on Cloudflare's free Workers plan (100,000 requests a day; one request carries up to 5 notifications), and costs nothing extra on Workers Paid. No charge per message. |
-| Hosting the app (GitHub Pages) | **$0** | Free for public repositories. |
+| Hosting the app at mytma.org (TMA's app Worker on Cloudflare) | **$0** | Fits Cloudflare's free Workers plan (100,000 requests a day). The demo-only copy on GitHub Pages is free too. |
 | Using activity funds for a trip | **$0** | An internal ledger entry. No payment processor is involved. |
 | Checks and cash | **$0** | |
 | Online payments (PayPal, Venmo, cards) | **Per payment** | 1.99% + $0.49 at PayPal's Confirmed Charity rate (3.49% + $0.49 standard). Families can choose to cover the fee so TMA receives the full amount. See [docs/PAYMENTS.md](docs/PAYMENTS.md). |
@@ -123,8 +126,10 @@ Workers Paid plan ($5 a month). Without it, the app emails from TMA's Gmail for 
                             email as noreply@mytma.org)
 ```
 
-The app talks to a script inside TMA's Google account, which reads and writes the treasurer's
-Google Sheet. Phone notifications go through a tiny **push Worker** on Cloudflare's free plan
+Families open the app at **https://mytma.org**, TMA's own web address, served by a small Cloudflare
+Worker ([workers/app](workers/app)) that only hands out the app's files. The app talks to a script
+inside TMA's Google account, which reads and writes the treasurer's Google Sheet. Phone
+notifications go through a tiny **push Worker** on Cloudflare's free plan
 ([workers/push](workers/push/README.md)). It only encrypts each notification and hands it to Apple,
 Google, Mozilla or Microsoft for delivery. It stores no family information: the phones' notification
 addresses stay in TMA's sheet. The same Worker sends the app's emails as **noreply@mytma.org**
@@ -138,7 +143,7 @@ The full design, including every API action, notification message and scheduled 
 
 | Document | For | What's in it |
 | --- | --- | --- |
-| [docs/SETUP.md](docs/SETUP.md) | Whoever sets it up | Step-by-step production setup (about an hour, all free), updating, troubleshooting. |
+| [docs/SETUP.md](docs/SETUP.md) | Whoever sets it up | Step-by-step production setup (about an hour), updating, troubleshooting. |
 | [docs/SHEET.md](docs/SHEET.md) | Treasurer | Every tab and column, the daily workflow, importing the existing spreadsheet, all settings. |
 | [docs/PAYMENTS.md](docs/PAYMENTS.md) | Board | Can card payments be fee-free? Fees compared, how the app gets TMA to $0 net cost, IRS caution. |
 | [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md) | Board | Privacy, security, liability, costs, and what happens if the volunteer developer leaves. |
@@ -177,13 +182,18 @@ More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
 | `npm run icons` | Regenerate the app icons (and the notification badge) from `public/brand/timberlane-shield-source.webp`. |
 
 The app connects to a real backend through one build-time variable, `VITE_API_URL` (the Apps Script
-`/exec` URL). Without it, the build is only the demo; with it, `?demo` still opens the demo. Push
-needs no build setting: the app gets the push Worker's public key from Apps Script.
+`/exec` URL). Without it, a local build is only the demo; with it, `?demo` still opens the demo. The
+mytma.org workflow falls back to TMA's test spreadsheet while the repository variable is unset. Push
+needs no build setting: the app gets the push Worker's public key from Apps Script. Only the
+mytma.org deployment uses the variable. The GitHub Pages build is always the demo, because every
+Pages site of one owner shares the `<owner>.github.io` origin, and with it the browser storage that
+holds sign-ins and cached family data.
 
 | Worker command (from the repo root) | What it does |
 | --- | --- |
 | `npm run test:worker` | Only the push Worker's tests (`npm test` runs them too). |
 | `npx tsc -p workers/push/tsconfig.json --noEmit` | Only the push Worker's typecheck (`npm run typecheck` runs it too). |
+| `npx vitest run --config workers/app/vitest.config.ts` | Only the app Worker's tests, including checks that the hosting setup (workflows, `wrangler.toml`, docs) keeps the real app on mytma.org alone (`npm test` runs them too). |
 
 ### Project layout
 
@@ -195,11 +205,12 @@ src/demo/      the in-browser demo backend with sample data
 src/web/       the React app, service worker, push and PayPal UI
 apps-script/   Code.js (generated, committed) and appsscript.json, to paste into Apps Script
 workers/push/  the Cloudflare Worker that delivers push notifications (deployed by GitHub Actions)
+workers/app/   the Cloudflare Worker that serves the app at https://mytma.org (deployed by GitHub Actions)
 scripts/       build-gas.mjs, make-icons.mjs
 public/        logos and app icons
 docs/          setup, sheet, payments, board FAQ, architecture
 e2e/           Playwright tests of the demo, and the README screenshots
-.github/       CI, the GitHub Pages deployment and the push Worker deployment
+.github/       CI, the mytma.org deployment, the GitHub Pages demo and the push Worker deployment
 ```
 
 Money is always handled as whole cents in code. The sheet stores dollars.

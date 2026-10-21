@@ -100,11 +100,20 @@ export function cancelRedemption(ctx: Ctx, email: string, params: v.Params): { r
   return { redemption: toRedemption(ctx.m.redemptionById(rec.id) ?? rec) };
 }
 
+/** A Ledger row already carries this request's ID as its Reference (posted by the app or typed by the treasurer). */
+export function ledgerHasReference(ctx: Ctx, requestId: string): boolean {
+  const key = idKey(requestId);
+  return ctx.m.ledger().some((l) => l.reference !== undefined && idKey(l.reference) === key);
+}
+
 /**
  * Post the Ledger row for an approved request and move the student's
  * _Snapshot by the same amount so the sync doesn't also send a "funds changed" alert.
+ * Does nothing (returns false) when a Ledger row with Reference == the request ID
+ * already exists: SHEET.md lets the treasurer type that row by hand.
  */
-export function postRedemptionLedger(ctx: Ctx, rec: RedemptionRec, enteredBy: string): void {
+export function postRedemptionLedger(ctx: Ctx, rec: RedemptionRec, enteredBy: string): boolean {
+  if (ledgerHasReference(ctx, rec.id)) return false;
   const activity = ctx.m.activityById(rec.activityId);
   ctx.db.append('Ledger', [
     {
@@ -119,6 +128,7 @@ export function postRedemptionLedger(ctx: Ctx, rec: RedemptionRec, enteredBy: st
     },
   ]);
   adjustSnapshot(ctx, rec.studentId, -rec.amountCents);
+  return true;
 }
 
 /** Shift one student's snapshot balance (no-op before the first sync wrote a snapshot). */
@@ -160,7 +170,11 @@ export function decideRedemption(ctx: Ctx, adminEmail: string, params: v.Params)
   if (!rec) return notFound('Request not found.');
   if (rec.status !== 'Pending') conflict(`This request was already ${rec.status.toLowerCase()}.`);
 
-  if (decision === 'Approved') {
+  // The treasurer may already have typed this request's Ledger row (Reference = request ID):
+  // the funds have moved, so don't re-check them or post a second row.
+  if (decision === 'Approved' && ledgerHasReference(ctx, rec.id)) {
+    ctx.log('redemption', `${rec.id}: Ledger row already in the sheet; not posting another`);
+  } else if (decision === 'Approved') {
     const books = ctx.m.books();
     const student = ctx.m.studentById(rec.studentId);
     const name = student?.firstName ?? rec.studentId;

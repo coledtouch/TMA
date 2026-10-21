@@ -3,6 +3,7 @@ import { grossUpCents } from '../shared/money';
 import { createFakePaymentGateway } from './memory';
 import type { CaptureResult, PaymentGateway } from './services';
 import { harness, NGUYEN, PARENT, PARENT2, TREASURER } from './test-helpers';
+import { addDays } from './util';
 
 describe('payment.createOrder', () => {
   it('creates an order for the exact amount, with the optional fee gross-up', () => {
@@ -154,7 +155,7 @@ describe('payment.captureOrder', () => {
     expect(h.rows('Payments')).toHaveLength(1);
   });
 
-  it('records PENDING captures as Pending (not counted as paid)', () => {
+  it('records PENDING captures as Pending: not paid yet, but not asked for again', () => {
     const fake = createFakePaymentGateway();
     const pending: PaymentGateway = {
       enabled: () => true,
@@ -163,8 +164,108 @@ describe('payment.captureOrder', () => {
     };
     const h = harness({ payments: pending });
     const token = h.signIn(PARENT);
-    const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 25000, coverFee: false }, token);
+    const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 150000, coverFee: false }, token);
     expect(h.ok('payment.captureOrder', { orderId }, token).payment.status).toBe('Pending');
-    expect(h.ok('me.bootstrap', {}, token).students[0].activities[0].remainingCents).toBe(150000);
+    const fl = h.ok('me.bootstrap', {}, token).students[0].activities[0];
+    expect(fl).toMatchObject({ paidDirectCents: 35000, pendingPaymentCents: 150000, remainingCents: 0 });
+    // While the eCheck clears, nobody can pay the same balance again, and no reminder asks for it.
+    expect(h.err('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 150000, coverFee: false }, token).message).toMatch(
+      /still being processed/,
+    );
+    // A week before the due date, the family that paid gets no reminder (a family that didn't, does).
+    const weekBefore = new Date(`${addDays(fl.dueDate ?? '', -7)}T14:00:00.000Z`);
+    const control = harness();
+    control.services.setNow(weekBefore);
+    control.app.dailyTick();
+    expect(control.services.outbox.mail.filter((m) => m.subject === 'Florida 2027 – Disney & Universal payment due in 7 days').map((m) => m.to)).toContain(PARENT);
+    h.services.setNow(weekBefore);
+    h.clearOutbox();
+    h.app.dailyTick();
+    expect(h.services.outbox.mail.filter((m) => m.subject.includes('payment due')).map((m) => m.to)).not.toContain(PARENT);
+  });
+
+  it('does not capture an order that would overpay because someone paid in the meantime', () => {
+    const gateway = createFakePaymentGateway();
+    const h = harness({ payments: gateway });
+    const jordan = h.signIn(PARENT);
+    const casey = h.signIn(PARENT2);
+    // Both guardians open "Pay online" for the full $1,500 left on Florida 2027.
+    const first = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 150000, coverFee: false }, jordan);
+    const second = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 150000, coverFee: false }, casey);
+    h.ok('payment.captureOrder', { orderId: first.orderId }, jordan);
+    let captures = 0;
+    const counting = gateway.captureOrder;
+    gateway.captureOrder = (id, req) => {
+      captures += 1;
+      return counting(id, req);
+    };
+    expect(h.err('payment.captureOrder', { orderId: second.orderId }, casey)).toEqual({
+      code: 'PAYMENT_FAILED',
+      message: expect.stringMatching(/was paid in the meantime, so this payment was stopped and you were not charged/),
+    });
+    expect(captures).toBe(0); // PayPal never took the second payment
+    expect(h.ok('me.bootstrap', {}, jordan).students[0].activities[0]).toMatchObject({ paidDirectCents: 185000, remainingCents: 0 });
+  });
+
+  it('after an unconfirmed capture, a retry asks PayPal again and finds the payment the treasurer recorded', () => {
+    const fake = createFakePaymentGateway();
+    let lost = true;
+    const flaky: PaymentGateway = {
+      enabled: () => true,
+      createOrder: (input) => fake.createOrder(input),
+      captureOrder: (id, req): CaptureResult => {
+        const result = fake.captureOrder(id, req); // PayPal takes the money...
+        return lost ? { status: 'UNKNOWN' } : result; // ...but the first answer is lost
+      },
+    };
+    const h = harness({ payments: flaky });
+    const token = h.signIn(PARENT);
+    const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 150000, coverFee: false }, token);
+    expect(h.err('payment.captureOrder', { orderId }, token).code).toBe('INTERNAL');
+    // From the admin alert, the treasurer finds the capture in PayPal and records it by hand.
+    const captureId = fake.captureOrder(orderId, `cap-${orderId}`).captureId;
+    h.services.db.tables.Payments?.push({ Date: '2026-10-21', StudentID: 'S0001', ActivityID: 'FL27', Amount: 1500, Method: 'PayPal', Reference: captureId, Status: 'Completed' });
+    lost = false;
+    expect(h.ok('payment.captureOrder', { orderId }, token).payment).toMatchObject({ id: captureId, amountCents: 150000 });
+    expect(h.rows('Payments').filter((r) => r.Reference === captureId)).toHaveLength(1);
+  });
+
+  it('never tells the payer "not charged" when PayPal did not confirm either way', () => {
+    const fake = createFakePaymentGateway();
+    let outcome: 'unknown' | 'throw' | 'ok' = 'unknown';
+    const flaky: PaymentGateway = {
+      enabled: () => true,
+      createOrder: (input) => fake.createOrder(input),
+      captureOrder: (id, req): CaptureResult => {
+        if (outcome === 'throw') throw new Error('Timeout: https://api-m.paypal.com/v2/checkout/orders/x/capture');
+        if (outcome === 'unknown') return { status: 'UNKNOWN', message: 'PayPal did not confirm whether the payment went through.' };
+        return fake.captureOrder(id, req);
+      },
+    };
+    const h = harness({ payments: flaky });
+    const token = h.signIn(PARENT);
+    const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 25000, coverFee: false }, token);
+    h.clearOutbox();
+    for (const next of ['unknown', 'throw'] as const) {
+      outcome = next;
+      const error = h.err('payment.captureOrder', { orderId }, token);
+      expect(error.code).not.toBe('PAYMENT_FAILED'); // the app maps anything else to "we couldn't confirm your payment"
+      expect(error.message).not.toMatch(/not charged/);
+      expect(error.message).toMatch(/couldn't confirm the payment/);
+    }
+    expect(h.rows('Payments')).toHaveLength(1);
+    expect(h.rows('Log').filter((r) => r.Kind === 'payment-error').map((r) => r.Detail)).toEqual([
+      expect.stringContaining(`${orderId}: PayPal did not confirm the capture of $250.00`),
+      expect.stringContaining(`${orderId}: PayPal did not confirm the capture of $250.00`),
+    ]);
+    const alerts = h.services.outbox.mail.filter((m) => m.to === TREASURER);
+    expect(alerts).toHaveLength(1); // one alert per order, however often the app asks again
+    const alert = alerts[0];
+    expect(alert?.subject).toBe('Payment needs review');
+    expect(alert?.text).toContain(`Look up PayPal order ${orderId}`);
+
+    // The cached order is kept, so capturing again (same PayPal-Request-Id) records it once PayPal answers.
+    outcome = 'ok';
+    expect(h.ok('payment.captureOrder', { orderId }, token).payment).toMatchObject({ amountCents: 25000, status: 'Completed' });
   });
 });

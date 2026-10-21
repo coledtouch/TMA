@@ -4,7 +4,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ApiAction, ApiParams, Payment, PublicSettings } from '../../shared/types';
 import { ApiError, type ApiClient } from '../api/client';
-import { CHECKOUT_NOTE, PayPalCheckout, type PayPalOrder } from './PayPalCheckout';
+import { CAPTURE_RETRY_DELAY_MS, CHECKOUT_NOTE, PayPalCheckout, type PayPalOrder } from './PayPalCheckout';
 
 const sdk = vi.hoisted(() => ({ loadScript: vi.fn() }));
 vi.mock('@paypal/paypal-js', () => ({ loadScript: sdk.loadScript }));
@@ -164,8 +164,33 @@ describe('PayPalCheckout (demo)', () => {
     });
     const second = setup(offline.api);
     await user.click(screen.getByRole('button', { name: 'PayPal (Demo)' }));
-    await waitFor(() => expect(second.onError).toHaveBeenCalledWith(expect.stringMatching(/couldn't confirm your payment/)));
+    await waitFor(() => expect(second.onError).toHaveBeenCalledWith(expect.stringMatching(/couldn't confirm your payment/)), {
+      timeout: CAPTURE_RETRY_DELAY_MS + 3000,
+    });
     expect(second.onPaid).not.toHaveBeenCalled();
+    // A definite decline is passed on at once; an unclear answer is asked about once more first.
+    expect(declined.calls.filter((c) => c.action === 'payment.captureOrder')).toHaveLength(1);
+    expect(offline.calls.filter((c) => c.action === 'payment.captureOrder')).toHaveLength(2);
+  });
+
+  it('asks once more when the capture answer was unclear, and shows the receipt it then gets', async () => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    const { api, calls } = fakeApi('demo', {
+      'payment.captureOrder': async () => {
+        attempts++;
+        if (attempts === 1) throw new ApiError('INTERNAL', 'The TMA server took too long to answer. Please try again.');
+        return { payment: PAYMENT };
+      },
+    });
+    const { onPaid, onError } = setup(api);
+    await user.click(screen.getByRole('button', { name: 'PayPal (Demo)' }));
+    await waitFor(() => expect(onPaid).toHaveBeenCalledWith(PAYMENT), { timeout: CAPTURE_RETRY_DELAY_MS + 3000 });
+    expect(onError).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.action === 'payment.captureOrder').map((c) => c.params)).toEqual([
+      { orderId: 'ORDER-1' },
+      { orderId: 'ORDER-1' },
+    ]);
   });
 
   it('checks the amount before calling the server', async () => {

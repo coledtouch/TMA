@@ -156,6 +156,8 @@ describe('push', () => {
       tag: 'bal-S0001',
       data: { url: '#/funds' },
       lang: 'en',
+      // Replaces Monday's "+$50.00 for Avery" if it's still in the tray, and alerts again.
+      renotify: true,
     });
     expect(win.postMessage).toHaveBeenCalledWith({ type: 'push', message: data });
     expect(otherSite.postMessage).not.toHaveBeenCalled();
@@ -170,6 +172,7 @@ describe('push', () => {
     >;
     expect(calls[0][0]).toBe('Test notification ✅');
     expect(calls[0][1]).toMatchObject({ body: 'Working.', tag: undefined, data: { url: '#/' } });
+    expect(calls[0][1]).not.toHaveProperty('renotify'); // renotify without a tag is a TypeError
     expect(calls[1][0]).toHaveLength(120);
     expect(calls[1][1].body).toHaveLength(1000);
     expect(calls[1][1].tag).toHaveLength(64);
