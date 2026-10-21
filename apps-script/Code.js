@@ -253,7 +253,8 @@ var TMA = (() => {
     SMS_ENABLED: "FALSE",
     PUSH_RELAY_URL: "https://tma-push.coleciprari.workers.dev",
     TOKEN_VERSION: "1",
-    SESSION_DAYS: "120"
+    SESSION_DAYS: "120",
+    NEW_SIGNUPS_PER_HOUR: "30"
   };
   function normalizeHeader(h) {
     return String(h).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1035,7 +1036,8 @@ var TMA = (() => {
     SMS_ENABLED: "TRUE sends text messages to families who chose texts (needs Twilio; about 1 cent per text).",
     PUSH_RELAY_URL: "Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.",
     TOKEN_VERSION: "Change this number to sign everyone out of the app.",
-    SESSION_DAYS: "How many days a sign-in lasts."
+    SESSION_DAYS: "How many days a sign-in lasts.",
+    NEW_SIGNUPS_PER_HOUR: "Sign-in codes per hour, across everyone, to emails TMA has not verified yet (new families). Raise it for a launch day."
   };
   function settingKey(value) {
     return str(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -1112,6 +1114,7 @@ var TMA = (() => {
       splitList(get("REMINDER_DAYS"), /[,;\s]+/).map((s) => Number(s)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 365).map(String)
     ).map(Number).sort((a, b) => b - a);
     const sessionDays = Math.round(Number(get("SESSION_DAYS")));
+    const newSignups = Math.round(Number(get("NEW_SIGNUPS_PER_HOUR")));
     return {
       pub,
       adminEmails: unique(splitList(get("ADMIN_EMAILS"), /[,;\s]+/).map(normEmail).filter(isEmail)),
@@ -1120,7 +1123,8 @@ var TMA = (() => {
       smsSetting,
       onlinePaymentsSetting,
       tokenVersion: get("TOKEN_VERSION").trim().replace(/\.0+$/, "") || "1",
-      sessionDays: Number.isFinite(sessionDays) && sessionDays >= 1 && sessionDays <= 400 ? sessionDays : 120
+      sessionDays: Number.isFinite(sessionDays) && sessionDays >= 1 && sessionDays <= 400 ? sessionDays : 120,
+      newSignupsPerHour: Number.isFinite(newSignups) && newSignups >= 1 && newSignups <= 500 ? newSignups : Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR)
     };
   }
 
@@ -1939,7 +1943,16 @@ var TMA = (() => {
     return {
       topic: "admin",
       title: "Payment needs review",
-      body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app did not record it. Look up PayPal order ${orderId}: if it was captured, add it to the Payments tab so the family isn't asked to pay again.`,
+      body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app has not recorded it yet. The app asks PayPal again, and if it then records the payment you'll get a "Payment recorded" message. Otherwise look up PayPal order ${orderId}: if it was captured and the Payments tab has no row with its transaction ID, add one so the family isn't asked to pay again.`,
+      url: "#/admin",
+      tag: `payreview-${orderId}`
+    };
+  }
+  function paymentRecordedAfterReviewNotice(firstName, activityName, grossCents, orderId, reference, pending) {
+    return {
+      topic: "admin",
+      title: "Payment recorded",
+      body: `The ${formatCents(grossCents)} PayPal payment for ${firstName} (${activityName}) that needed review (order ${orderId}) went through after all: the app recorded it in the Payments tab as ${reference}${pending ? " (Pending while PayPal finishes processing it)" : ""}. Don't add it by hand.`,
       url: "#/admin",
       tag: `payreview-${orderId}`
     };
@@ -2336,11 +2349,13 @@ var TMA = (() => {
       while (next < job.mailTo.length && quota > 0) {
         const batch = job.mailTo.slice(next, next + quota);
         next += batch.length;
-        const sent = sendEmails(ctx, batch, { subject, html, text: text2 });
+        const { sent, kept } = sendEmails(ctx, batch, { subject, html, text: text2 });
         counts.email += sent;
         quota -= sent;
+        quotaSkipped += kept;
+        if (kept === batch.length) break;
       }
-      quotaSkipped = job.mailTo.length - next;
+      quotaSkipped += job.mailTo.length - next;
     }
     if (job.smsTo.length > 0) {
       const message = oneLine(`TMA: ${notice.title} – ${(_a = notice.pushBody) != null ? _a : notice.body}`, 320);
@@ -2363,8 +2378,9 @@ var TMA = (() => {
   }
   function sendEmails(ctx, recipients, content) {
     const mailer = ctx.s.mailer;
+    let sent = 0;
+    let kept = 0;
     if (!mailer.sendMany) {
-      let sent2 = 0;
       for (const to of recipients) {
         const ok = safely(
           ctx,
@@ -2375,20 +2391,22 @@ var TMA = (() => {
           },
           false
         );
-        if (ok) sent2++;
+        if (ok) sent++;
       }
-      return sent2;
+      return { sent, kept };
     }
     const messages = recipients.map((to) => ({ to, ...content }));
     const results = safely(ctx, "mailer.sendMany", () => mailer.sendMany(messages), null);
-    if (!results) return 0;
-    let sent = 0;
+    if (!results) return { sent, kept };
     recipients.forEach((to, i) => {
       const result = results[i];
       if (result == null ? void 0 : result.ok) sent++;
-      else ctx.s.logger.error(`email to ${to} failed`, result ? result.error : "no result");
+      else {
+        if (result == null ? void 0 : result.quota) kept++;
+        ctx.s.logger.error(`email to ${to} failed`, result ? result.error : "no result");
+      }
     });
-    return sent;
+    return { sent, kept };
   }
   function sendPush(ctx, tokens, notice, counts) {
     var _a;
@@ -2781,12 +2799,23 @@ var TMA = (() => {
     return { announcement: toAnnouncement(saved), delivered };
   }
 
+  // src/server/services.ts
+  var MailReserveError = class extends Error {
+    constructor(remaining, reserve) {
+      super(`Not sent: ${remaining} emails left today, and the last ${reserve} are kept`);
+      /** Emails the sender had left today. */
+      __publicField(this, "remaining");
+      this.name = "MailReserveError";
+      this.remaining = remaining;
+    }
+  };
+
   // src/server/auth.ts
   var CODE_TTL_SECONDS = 600;
   var MAX_CODE_ATTEMPTS = 5;
   var CODES_PER_HOUR = 5;
   var MAX_TOKEN_LENGTH = 2048;
-  var NEW_EMAIL_CODES_PER_HOUR = 30;
+  var NEW_EMAIL_CODES_PER_HOUR = Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR);
   var KNOWN_EMAIL_CODE_RESERVE = 40;
   function requireSecret(ctx) {
     const secret = ctx.s.secrets.get("TOKEN_SECRET");
@@ -2810,7 +2839,7 @@ var TMA = (() => {
     }
   }
   function isKnownEmail(ctx, email2) {
-    return ctx.m.settings().adminEmails.includes(email2) || ctx.m.familiesWithEmail(email2).length > 0 || ctx.m.preferences().has(email2) || ctx.m.devicesFor(email2).length > 0;
+    return ctx.m.settings().adminEmails.includes(email2) || ctx.m.familiesWithEmail(email2).some((f) => f.status === "Active");
   }
   function newEmailLimitHit(ctx, detail) {
     ctx.s.logger.error(detail);
@@ -2829,7 +2858,11 @@ var TMA = (() => {
     const secret = requireSecret(ctx);
     const perHour = ctx.s.mode === "demo" ? 100 : CODES_PER_HOUR;
     rateLimit(ctx, `otp-rl:${email2}`, perHour, 3600, "Too many codes requested for this email. Please wait an hour and try again.");
-    if (ctx.s.mode === "demo") return { sent: true, devCode: issueCode(ctx, secret, email2) };
+    if (ctx.s.mode === "demo") {
+      const devCode = newCode(ctx);
+      storeCode(ctx, secret, email2, devCode);
+      return { sent: true, devCode };
+    }
     let quota = 0;
     try {
       quota = ctx.s.mailer.remainingQuota();
@@ -2839,19 +2872,21 @@ var TMA = (() => {
     if (quota <= 0) {
       fail("RATE_LIMITED", "TMA has reached today's email limit. Please try again tomorrow or contact TMA.");
     }
-    if (!isKnownEmail(ctx, email2)) {
+    const known = isKnownEmail(ctx, email2);
+    if (!known) {
       if (quota <= KNOWN_EMAIL_CODE_RESERVE) {
-        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: only ${quota} emails left today (the last ${KNOWN_EMAIL_CODE_RESERVE} are kept for families on the sheet)`);
+        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: only ${quota} emails left today (the last ${KNOWN_EMAIL_CODE_RESERVE} are kept for families TMA has verified)`);
         fail("RATE_LIMITED", NEW_EMAILS_PAUSED);
       }
+      const perHourNew = ctx.m.settings().newSignupsPerHour;
       try {
-        rateLimit(ctx, "otp-rl:new-emails", NEW_EMAIL_CODES_PER_HOUR, 3600, NEW_EMAILS_PAUSED);
+        rateLimit(ctx, "otp-rl:new-emails", perHourNew, 3600, NEW_EMAILS_PAUSED);
       } catch (err) {
-        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: more than ${NEW_EMAIL_CODES_PER_HOUR} in an hour`);
+        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: more than ${perHourNew} in an hour (Settings NEW_SIGNUPS_PER_HOUR)`);
         throw err;
       }
     }
-    const code = issueCode(ctx, secret, email2);
+    const code = newCode(ctx);
     const settings = ctx.m.settings();
     const { html, text: text2 } = renderEmail({
       orgName: settings.pub.orgName,
@@ -2862,19 +2897,26 @@ var TMA = (() => {
       footer: "Someone asked to sign in to the TMA app with this email address. If it wasn't you, you can ignore this email."
     });
     try {
-      ctx.s.mailer.send({ to: email2, subject: `Your TMA sign-in code: ${code}`, html, text: text2 });
+      ctx.s.mailer.send({ to: email2, subject: `Your TMA sign-in code: ${code}`, html, text: text2 }, known ? void 0 : { reserve: KNOWN_EMAIL_CODE_RESERVE });
     } catch (err) {
+      if (err instanceof MailReserveError) {
+        newEmailLimitHit(ctx, `Sign-in codes to new emails paused: only ${err.remaining} backup emails left today (the last ${KNOWN_EMAIL_CODE_RESERVE} are kept for families TMA has verified)`);
+        fail("RATE_LIMITED", NEW_EMAILS_PAUSED);
+      }
       ctx.s.logger.error("Could not send sign-in code", errorMessage(err));
       fail("INTERNAL", "We couldn't send the email right now. Please try again in a few minutes.");
     }
+    storeCode(ctx, secret, email2, code);
     return { sent: true };
   }
-  function issueCode(ctx, secret, email2) {
+  function newCode(ctx) {
     const code = ctx.s.crypto.randomDigits(6);
     if (!/^\d{6}$/.test(code)) throw new Error("randomDigits returned an invalid code");
+    return code;
+  }
+  function storeCode(ctx, secret, email2, code) {
     const entry = { h: otpHash(ctx, secret, email2, code), a: 0, x: ctx.now.getTime() + CODE_TTL_SECONDS * 1e3 };
     ctx.s.cache.put(`otp:${email2}`, JSON.stringify(entry), CODE_TTL_SECONDS);
-    return code;
   }
   function verifyCode(ctx, params) {
     const email2 = email(params.email);
@@ -3487,6 +3529,9 @@ var TMA = (() => {
       ctx.s.logger.error("PayPal captureOrder failed", errorMessage(err));
       result = { status: "UNKNOWN", message: errorMessage(err) };
     }
+    if (order.unconfirmed && (result.status === "FAILED" || result.status === "DECLINED")) {
+      result = { status: "UNKNOWN", message: `retry: ${result.status}${result.message ? ` (${result.message})` : ""}` };
+    }
     if (result.status === "UNKNOWN") {
       ctx.s.cache.put(orderKey(orderId), JSON.stringify({ ...order, unconfirmed: true }), ORDER_TTL_SECONDS);
       const detail = `${orderId}: PayPal did not confirm the capture of ${formatCents(order.grossCents)} (${(_e = result.message) != null ? _e : "no answer"}); check PayPal (${email2}, ${order.studentId}, ${order.activityId})`;
@@ -3535,6 +3580,7 @@ var TMA = (() => {
     ctx.log("payment", `${reference}: ${formatCents(order.grossCents)} via PayPal from ${email2} for ${order.studentId} / ${order.activityId} (${status})`);
     const recorded = findPayment(ctx, [reference]);
     if (!recorded) throw new Error(`Payment ${reference} was not saved`);
+    if (order.unconfirmed) notifyAdmins(ctx, paymentRecordedAfterReviewNotice(firstName, activityName, order.grossCents, orderId, reference, status === "Pending"));
     if (status === "Completed") {
       const remaining = (_g = (_f = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _f.remainingCents) != null ? _g : 0;
       notifyFamily(
@@ -5063,7 +5109,11 @@ var TMA = (() => {
         replyTo: email2.replyTo
       });
     }
-    function sendWithGmail(email2) {
+    function sendWithGmail(email2, reserve) {
+      if (reserve !== void 0) {
+        const left = MailApp.getRemainingDailyQuota();
+        if (left <= reserve) throw new MailReserveError(left, reserve);
+      }
       if (promisedWorkerAllowance) {
         if (gmailSendsSincePromise > 0 && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) {
           throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
@@ -5072,14 +5122,14 @@ var TMA = (() => {
       }
       mailApp(email2);
     }
-    function send(msg) {
+    function send(msg, opts = {}) {
       var _a;
       last = null;
       const email2 = prepare(msg);
       if (!email2) throw new Error("Invalid email recipient");
       const current = route();
       if (current.via === "gmail") {
-        sendWithGmail(email2);
+        sendWithGmail(email2, opts.reserve);
         last = current.reason === "setting" ? { via: "gmail" } : { via: "gmail", workerReason: (_a = current.detail) != null ? _a : current.reason };
         return;
       }
@@ -5090,7 +5140,7 @@ var TMA = (() => {
         return;
       }
       workerFailed(outcome);
-      sendWithGmail(email2);
+      sendWithGmail(email2, opts.reserve);
       last = outcome.code ? { via: "gmail", workerReason: outcome.reason, workerCode: outcome.code } : { via: "gmail", workerReason: outcome.reason };
     }
     function chunk(items) {
@@ -5120,15 +5170,19 @@ var TMA = (() => {
         if (email2) pending.push({ index, email: email2 });
         else results[index] = { ok: false, error: "Invalid email recipient" };
       });
-      let gmailLeft = null;
+      let atReserve = false;
       const viaGmail = (item) => {
         try {
-          if (gmailLeft === null) gmailLeft = MailApp.getRemainingDailyQuota();
-          if (gmailLeft <= SIGN_IN_EMAIL_RESERVE) {
-            throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
+          if (!atReserve && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) atReserve = true;
+          if (atReserve) {
+            results[item.index] = {
+              ok: false,
+              error: `Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`,
+              quota: true
+            };
+            return;
           }
           mailApp(item.email);
-          gmailLeft -= 1;
           results[item.index] = { ok: true };
         } catch (error) {
           results[item.index] = { ok: false, error: errorText2(error) };

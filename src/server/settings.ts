@@ -21,6 +21,8 @@ export interface AppSettings {
   onlinePaymentsSetting: boolean;
   tokenVersion: string;
   sessionDays: number;
+  /** Sign-in codes per hour, script-wide, to emails TMA hasn't verified (auth.requestCode). */
+  newSignupsPerHour: number;
 }
 
 /** Shown in the Notes column when setup() writes a missing key. */
@@ -49,6 +51,8 @@ export const SETTING_NOTES: Readonly<Record<SettingKey, string>> = {
   PUSH_RELAY_URL: 'Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.',
   TOKEN_VERSION: 'Change this number to sign everyone out of the app.',
   SESSION_DAYS: 'How many days a sign-in lasts.',
+  NEW_SIGNUPS_PER_HOUR:
+    'Sign-in codes per hour, across everyone, to emails TMA has not verified yet (new families). Raise it for a launch day.',
 };
 
 /** "Admin Emails" / "admin_emails" -> "ADMIN_EMAILS". */
@@ -148,6 +152,7 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
     .sort((a, b) => b - a);
 
   const sessionDays = Math.round(Number(get('SESSION_DAYS')));
+  const newSignups = Math.round(Number(get('NEW_SIGNUPS_PER_HOUR')));
 
   return {
     pub,
@@ -158,5 +163,9 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
     onlinePaymentsSetting,
     tokenVersion: get('TOKEN_VERSION').trim().replace(/\.0+$/, '') || '1',
     sessionDays: Number.isFinite(sessionDays) && sessionDays >= 1 && sessionDays <= 400 ? sessionDays : 120,
+    newSignupsPerHour:
+      Number.isFinite(newSignups) && newSignups >= 1 && newSignups <= 500
+        ? newSignups
+        : Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR),
   };
 }

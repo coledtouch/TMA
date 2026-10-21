@@ -672,8 +672,12 @@ using the previously deployed version until step 3. If Google asks for permissio
 * **No "Pay online" button.** It needs `ONLINE_PAYMENTS` = `TRUE`, `PAYPAL_CLIENT_ID`, the
   `PAYPAL_SECRET` script property, and *Allow Online Payment* not set to FALSE on that activity.
   Ad blockers can also hide PayPal's buttons.
-* **A board member got "Payment needs review".** PayPal reported a different amount than expected,
-  so the app didn't record it. Check the payment in PayPal and add it to Payments by hand.
+* **A board member got "Payment needs review".** Either PayPal reported a different amount than
+  expected, so the app didn't record it: check the payment in PayPal and add it to Payments by hand.
+  Or PayPal didn't confirm whether a payment went through. The app asks PayPal again by itself, and
+  if it then records the payment the board gets a *"Payment recorded"* message: don't add that one.
+  Otherwise look the order up in PayPal, and if it was captured, check that Payments has no row with
+  its transaction ID before adding one.
 * **A payment shows as Pending.** PayPal hasn't released it yet (e.g. an eCheck). When PayPal shows it
   completed, change the Payments row Status to `Completed`.
 
@@ -783,11 +787,14 @@ sign-ins. So, until TMA has Google Workspace:
 * launch to families in waves of fewer than 100 a day.
 
 **Sign-in codes to new emails are limited.** Anyone can ask for a code, and Apps Script can't tell
-who is asking, so the app caps codes to emails the sheet doesn't know yet (not on any household, not
-an admin, never signed in): at most **30 an hour** across everyone, and none once the day's email
-quota is down to its last **40**, which are kept for families already on the sheet. Someone typing
-made-up addresses therefore can't use up the day's emails and lock families out. When a cap is hit,
-new sign-ups see *"new sign-ups are paused for a while"* and the Log tab gets one `auth` row per hour.
-A family on the sheet can still ask for 5 codes an hour for its own email.
+who is asking, so the app caps codes to emails TMA hasn't verified (not an admin, not a guardian of
+an **Active** household; that includes households still waiting for review and people who only
+signed in): at most **30 an hour** across everyone (Settings `NEW_SIGNUPS_PER_HOUR`; raise it on
+the day you invite families, then set it back), and none once the day's email quota is down to
+its last **40**, which are kept for verified families. The same 40 are kept when the Worker can't
+send and sign-in codes fall back to Gmail. Someone typing made-up addresses therefore can't use up
+the day's emails and lock families out. When a cap is hit, those sign-ins see *"new sign-ups are
+paused for a while"* and the Log tab gets one `auth` row per hour. A verified family can still ask
+for 5 codes an hour for its own email.
 
 The 15-minute sync takes a few seconds per run, far below the scheduled-time limit.

@@ -173,15 +173,19 @@ function sendJob(ctx: Ctx, job: DeliveryJob): string[] {
     });
     const subject = oneLine(notice.title, 150);
     // Up to `quota` recipients at a time; a failed email doesn't use up quota, so the next round may take more.
+    // The mailer may keep some back for the sign-in reserve itself (e.g. its Gmail fallback while the
+    // Worker can't send): those count as skipped too, and once it keeps a whole round back, so would the rest.
     let next = 0;
     while (next < job.mailTo.length && quota > 0) {
       const batch = job.mailTo.slice(next, next + quota);
       next += batch.length;
-      const sent = sendEmails(ctx, batch, { subject, html, text });
+      const { sent, kept } = sendEmails(ctx, batch, { subject, html, text });
       counts.email += sent;
       quota -= sent;
+      quotaSkipped += kept;
+      if (kept === batch.length) break;
     }
-    quotaSkipped = job.mailTo.length - next;
+    quotaSkipped += job.mailTo.length - next;
   }
 
   if (job.smsTo.length > 0) {
@@ -212,12 +216,13 @@ function sendJob(ctx: Ctx, job: DeliveryJob): string[] {
  * Email one notice to each address: in one batch when the mailer can
  * (Apps Script: several per request to the push Worker, requests in
  * parallel), else one by one. Failures are logged per recipient. Returns how
- * many were sent.
+ * many were sent, and how many the mailer kept back for the sign-in reserve.
  */
-function sendEmails(ctx: Ctx, recipients: string[], content: Omit<MailMessage, 'to'>): number {
+function sendEmails(ctx: Ctx, recipients: string[], content: Omit<MailMessage, 'to'>): { sent: number; kept: number } {
   const mailer = ctx.s.mailer;
+  let sent = 0;
+  let kept = 0;
   if (!mailer.sendMany) {
-    let sent = 0;
     for (const to of recipients) {
       const ok = safely(
         ctx,
@@ -230,18 +235,20 @@ function sendEmails(ctx: Ctx, recipients: string[], content: Omit<MailMessage, '
       );
       if (ok) sent++;
     }
-    return sent;
+    return { sent, kept };
   }
   const messages = recipients.map((to) => ({ to, ...content }));
   const results = safely<MailResult[] | null>(ctx, 'mailer.sendMany', () => mailer.sendMany!(messages), null);
-  if (!results) return 0;
-  let sent = 0;
+  if (!results) return { sent, kept };
   recipients.forEach((to, i) => {
     const result = results[i];
     if (result?.ok) sent++;
-    else ctx.s.logger.error(`email to ${to} failed`, result ? result.error : 'no result');
+    else {
+      if (result?.quota) kept++;
+      ctx.s.logger.error(`email to ${to} failed`, result ? result.error : 'no result');
+    }
   });
-  return sent;
+  return { sent, kept };
 }
 
 /** Send one push batch; count deliveries into `counts`. Returns the tokens the push service reported invalid. */

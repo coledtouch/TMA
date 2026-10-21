@@ -295,8 +295,8 @@ export function createDemoClient(options: DemoClientOptions = {}): DemoClient {
     const mailer = created.mailer;
     created.mailer = {
       remainingQuota: () => mailer.remainingQuota(),
-      send(msg) {
-        mailer.send(msg);
+      send(msg, opts) {
+        mailer.send(msg, opts);
         record({ channel: 'email', to: msg.to, title: msg.subject, body: msg.text });
       },
     };

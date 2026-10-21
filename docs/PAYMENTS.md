@@ -154,7 +154,9 @@ Trip payments are payments for a service, not donations. Don't describe them as 
   matches exactly: Method `PayPal`, Reference = PayPal transaction ID, Amount, Fee Covered, Gross,
   Payer Email, Status `Completed`. Then it notifies the family (*"Payment received – thank you!"*).
   If the amount doesn't match, nothing is recorded and the board gets a *"Payment needs review"*
-  alert. If PayPal is still processing (e.g. an eCheck), the row is recorded as `Pending`.
+  alert. If PayPal is still processing (e.g. an eCheck), the row is recorded as `Pending`. If PayPal
+  doesn't confirm either way, the parent is never told "not charged", the board gets the same alert,
+  and the app asks again; when that records the payment, the board gets *"Payment recorded"*.
 * **No double charges or double records.** The capture uses an idempotency key, and the same
   PayPal transaction is never recorded twice, even if the parent's phone retries.
 * **Receipts.** PayPal emails the payer a receipt. The family also gets the app notification and

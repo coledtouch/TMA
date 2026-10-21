@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { KNOWN_EMAIL_CODE_RESERVE, NEW_EMAIL_CODES_PER_HOUR } from './auth';
+import { MailReserveError } from './services';
 import { base64UrlDecode, base64UrlEncode } from './util';
-import { harness, NGUYEN, PARENT, TEST_NOW, TEST_SECRET } from './test-helpers';
+import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, TEST_NOW, TEST_SECRET, TREASURER } from './test-helpers';
 import { hmacSha256Hex } from './sha256';
 
 function lastCode(h: ReturnType<typeof harness>, email: string): string {
@@ -61,6 +62,22 @@ describe('auth.requestCode', () => {
     expect(h.err('auth.requestCode', { email: PARENT }).code).toBe('RATE_LIMITED');
   });
 
+  it('lets the treasurer raise the hourly cap on new sign-ups for a launch day (NEW_SIGNUPS_PER_HOUR)', () => {
+    const h = harness({ mailQuota: 500, settings: { NEW_SIGNUPS_PER_HOUR: '100' } });
+    for (let i = 0; i < 100; i++) h.ok('auth.requestCode', { email: `family${i}@example.org` });
+    expect(h.err('auth.requestCode', { email: 'family100@example.org' })).toMatchObject({
+      code: 'RATE_LIMITED',
+      message: expect.stringMatching(/new sign-ups are paused/),
+    });
+
+    // A value that isn't a whole number from 1 to 500 falls back to the default.
+    for (const bad of ['0', 'lots', '100000']) {
+      const g = harness({ mailQuota: 500, settings: { NEW_SIGNUPS_PER_HOUR: bad } });
+      for (let i = 0; i < NEW_EMAIL_CODES_PER_HOUR; i++) g.ok('auth.requestCode', { email: `x${i}@throwaway.example` });
+      expect(g.err('auth.requestCode', { email: 'one.more@throwaway.example' }).code).toBe('RATE_LIMITED');
+    }
+  });
+
   it('keeps sign-in working for families on the sheet when made-up addresses flood it', () => {
     const h = harness({ mailQuota: 100 });
     // Anyone can ask for codes for throwaway addresses; only NEW_EMAIL_CODES_PER_HOUR an hour go out.
@@ -95,6 +112,56 @@ describe('auth.requestCode', () => {
     h.services.mailer.remainingQuota = () => 0;
     expect(h.err('auth.requestCode', { email: PARENT }).code).toBe('RATE_LIMITED');
     expect(h.ok('auth.verifyCode', { email: PARENT, code }).token).toMatch(/\./);
+  });
+
+  it('does not replace a code already emailed when sending the new one fails', () => {
+    const h = harness();
+    h.ok('auth.requestCode', { email: PARENT });
+    const code = lastCode(h, PARENT);
+    // e.g. the Worker can't send and Gmail's quota is used up, which remainingQuota() can't show beforehand.
+    h.services.mailer.send = () => {
+      throw new Error('Service invoked too many times for one day: email.');
+    };
+    expect(h.err('auth.requestCode', { email: PARENT }).code).toBe('INTERNAL');
+    expect(h.ok('auth.verifyCode', { email: PARENT, code }).token).toMatch(/\./);
+  });
+
+  it("keeps the reserve on a backup sender that remainingQuota() doesn't show (a relay in front of it)", () => {
+    const h = harness();
+    // Like Apps Script while the Worker refuses every email: remainingQuota() is the Worker's
+    // allowance, and every code goes out with Gmail, which has 45 left today.
+    let backup = KNOWN_EMAIL_CODE_RESERVE + 5;
+    h.services.mailer.remainingQuota = () => 1000;
+    h.services.mailer.send = (msg, opts) => {
+      if (opts?.reserve !== undefined && backup <= opts.reserve) throw new MailReserveError(backup, opts.reserve);
+      backup -= 1;
+      h.services.outbox.mail.push({ ...msg });
+    };
+    const first = 'x0@throwaway.example';
+    h.ok('auth.requestCode', { email: first });
+    const code = lastCode(h, first);
+    for (let i = 1; i < 10; i++) h.call('auth.requestCode', { email: `x${i}@throwaway.example` });
+    expect(backup).toBe(KNOWN_EMAIL_CODE_RESERVE);
+    expect(h.err('auth.requestCode', { email: first })).toEqual({ code: 'RATE_LIMITED', message: expect.stringMatching(/new sign-ups are paused/) });
+    expect(h.rows('Log').filter((r) => r.Kind === 'auth').map((r) => r.Detail)).toEqual([expect.stringMatching(/only 40 backup emails left today/)]);
+    // The refused request kept the code already emailed, and verified families still get codes from the reserve.
+    h.ok('auth.verifyCode', { email: first, code });
+    h.signIn(NGUYEN);
+    expect(backup).toBe(KNOWN_EMAIL_CODE_RESERVE - 1);
+  });
+
+  it("counts only admins and guardians of Active households as known, not a Pending household's guardians or settings-only emails", () => {
+    const h = harness({ mailQuota: 1000 });
+    // Anyone can sign in once, start a Pending household, type any address as its second guardian,
+    // or just save notification settings.
+    const mallory = h.signIn('mallory@throwaway.example');
+    h.ok('household.save', { guardians: [{ name: 'Mallory', email: 'mallory@throwaway.example' }, { name: 'X', email: 'typed.in@throwaway.example' }], students: [] }, mallory);
+    h.ok('prefs.save', { prefs: {} }, h.signIn('settings.only@throwaway.example'));
+    for (let i = 2; i < NEW_EMAIL_CODES_PER_HOUR; i++) h.ok('auth.requestCode', { email: `x${i}@throwaway.example` });
+    for (const email of ['typed.in@throwaway.example', 'mallory@throwaway.example', 'settings.only@throwaway.example', ORTIZ]) {
+      expect(h.err('auth.requestCode', { email }).message).toMatch(/new sign-ups are paused/);
+    }
+    for (const email of [TREASURER, PARENT, PARENT2, NGUYEN]) h.ok('auth.requestCode', { email });
   });
 });
 

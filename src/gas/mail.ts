@@ -27,13 +27,18 @@
  *    2 minutes after it.
  *
  * The Gmail fallback for notifications keeps the day's last
- * SIGN_IN_EMAIL_RESERVE Gmail emails for sign-in codes, as the core does.
+ * SIGN_IN_EMAIL_RESERVE Gmail emails for sign-in codes, as the core does,
+ * reading Gmail's quota before each email (another execution may be sending
+ * too). A sign-in code to an email the sheet doesn't know passes
+ * send(msg, {reserve}), so its Gmail fallback leaves the last emails for
+ * families TMA knows.
  *
  * Logs carry the Worker's reason codes and HTTP codes only: never addresses,
  * subjects or bodies.
  */
 import { SIGN_IN_EMAIL_RESERVE } from '../server/notify';
-import type { Cache, Logger, MailMessage, MailResult, Mailer } from '../server/services';
+import type { Cache, Logger, MailMessage, MailResult, MailSendOptions, Mailer } from '../server/services';
+import { MailReserveError } from '../server/services';
 import { SETTING_DEFAULTS } from '../shared/schema';
 import { utf8Length, type PushRelaySender, type RelayAnswer } from './push-relay';
 import { clip, isRecord, parseJson, pick } from './util';
@@ -362,8 +367,12 @@ export function createGasMailer(deps: GasMailerDeps): GasMailer {
     });
   }
 
-  /** The Gmail fallback for send() (sign-in codes, the test email). */
-  function sendWithGmail(email: WorkerEmail): void {
+  /** The Gmail fallback for send() (sign-in codes, the test email). `reserve`: see MailSendOptions. */
+  function sendWithGmail(email: WorkerEmail, reserve: number | undefined): void {
+    if (reserve !== undefined) {
+      const left = MailApp.getRemainingDailyQuota();
+      if (left <= reserve) throw new MailReserveError(left, reserve);
+    }
     if (promisedWorkerAllowance) {
       // The core counted on the Worker's allowance, not on Gmail's quota. The first fallback always goes
       // (send() is how sign-in codes go out, and the reserve is theirs); later ones keep the day's last
@@ -376,13 +385,13 @@ export function createGasMailer(deps: GasMailerDeps): GasMailer {
     mailApp(email);
   }
 
-  function send(msg: MailMessage): void {
+  function send(msg: MailMessage, opts: MailSendOptions = {}): void {
     last = null;
     const email = prepare(msg);
     if (!email) throw new Error('Invalid email recipient');
     const current = route();
     if (current.via === 'gmail') {
-      sendWithGmail(email);
+      sendWithGmail(email, opts.reserve);
       last = current.reason === 'setting' ? { via: 'gmail' } : { via: 'gmail', workerReason: current.detail ?? current.reason };
       return;
     }
@@ -393,7 +402,7 @@ export function createGasMailer(deps: GasMailerDeps): GasMailer {
       return;
     }
     workerFailed(outcome);
-    sendWithGmail(email);
+    sendWithGmail(email, opts.reserve);
     last = outcome.code ? { via: 'gmail', workerReason: outcome.reason, workerCode: outcome.code } : { via: 'gmail', workerReason: outcome.reason };
   }
 
@@ -428,15 +437,22 @@ export function createGasMailer(deps: GasMailerDeps): GasMailer {
     });
 
     // Notifications only, so every Gmail fallback keeps the day's last emails for sign-in codes.
-    let gmailLeft: number | null = null;
+    // The quota is read before each email, not counted down: notifications go out after the write
+    // lock is released, so another execution may be sending at the same time. It only goes down
+    // during a run, so once it is at the reserve it isn't read again.
+    let atReserve = false;
     const viaGmail = (item: { index: number; email: WorkerEmail }): void => {
       try {
-        if (gmailLeft === null) gmailLeft = MailApp.getRemainingDailyQuota();
-        if (gmailLeft <= SIGN_IN_EMAIL_RESERVE) {
-          throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
+        if (!atReserve && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) atReserve = true;
+        if (atReserve) {
+          results[item.index] = {
+            ok: false,
+            error: `Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`,
+            quota: true,
+          };
+          return;
         }
         mailApp(item.email);
-        gmailLeft -= 1;
         results[item.index] = { ok: true };
       } catch (error) {
         results[item.index] = { ok: false, error: errorText(error) };

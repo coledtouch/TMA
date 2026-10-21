@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { grossUpCents } from '../shared/money';
 import { createFakePaymentGateway } from './memory';
+import { paymentRecordedAfterReviewNotice, paymentUnconfirmedNotice } from './messages';
 import type { CaptureResult, PaymentGateway } from './services';
 import { harness, NGUYEN, PARENT, PARENT2, TREASURER } from './test-helpers';
 import { addDays } from './util';
@@ -262,10 +263,73 @@ describe('payment.captureOrder', () => {
     expect(alerts).toHaveLength(1); // one alert per order, however often the app asks again
     const alert = alerts[0];
     expect(alert?.subject).toBe('Payment needs review');
-    expect(alert?.text).toContain(`Look up PayPal order ${orderId}`);
+    expect(alert?.text).toContain(`look up PayPal order ${orderId}`);
+    expect(alert?.text).toContain('the Payments tab has no row with its transaction ID');
 
     // The cached order is kept, so capturing again (same PayPal-Request-Id) records it once PayPal answers.
     outcome = 'ok';
     expect(h.ok('payment.captureOrder', { orderId }, token).payment).toMatchObject({ amountCents: 25000, status: 'Completed' });
+  });
+
+  it('when asking again records an unconfirmed capture, tells the admins (same tag) so nobody adds it by hand', () => {
+    const fake = createFakePaymentGateway();
+    let lost = true;
+    const flaky: PaymentGateway = {
+      enabled: () => true,
+      createOrder: (input) => fake.createOrder(input),
+      captureOrder: (id, req): CaptureResult => {
+        const result = fake.captureOrder(id, req); // PayPal takes the money...
+        if (!lost) return result;
+        lost = false; // ...the first answer is lost, and the app's automatic retry gets it
+        return { status: 'UNKNOWN' };
+      },
+    };
+    const h = harness({ payments: flaky });
+    const token = h.signIn(PARENT);
+    const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 50000, coverFee: false }, token);
+    h.clearOutbox();
+    expect(h.err('payment.captureOrder', { orderId }, token).code).toBe('INTERNAL');
+    const { payment } = h.ok('payment.captureOrder', { orderId }, token);
+    expect(payment).toMatchObject({ amountCents: 50000, status: 'Completed' });
+    const alerts = h.services.outbox.mail.filter((m) => m.to === TREASURER);
+    expect(alerts.map((m) => m.subject)).toEqual(['Payment needs review', 'Payment recorded']);
+    expect(alerts[1].text).toContain(`(order ${orderId}) went through after all: the app recorded it in the Payments tab as ${payment.id}`);
+    expect(alerts[1].text).toContain("Don't add it by hand");
+    // On the admins' phones it replaces the first alert.
+    expect(paymentRecordedAfterReviewNotice('A', 'B', 1, orderId, payment.id, false).tag).toBe(paymentUnconfirmedNotice('A', 'B', 1, orderId).tag);
+    expect(h.rows('Payments').filter((r) => r.Reference === payment.id)).toHaveLength(1);
+  });
+
+  it('after an unconfirmed capture, asking again never says "not charged", even when that attempt fails or is declined', () => {
+    const answers: CaptureResult[] = [
+      { status: 'FAILED', message: 'Could not reach PayPal. Please try again.' }, // e.g. no PayPal token: nothing sent this time
+      { status: 'DECLINED', message: 'The payment method was declined. Please try another card or account.' },
+    ];
+    for (const second of answers) {
+      const fake = createFakePaymentGateway();
+      let calls = 0;
+      const flaky: PaymentGateway = {
+        enabled: () => true,
+        createOrder: (input) => fake.createOrder(input),
+        captureOrder: (id, req): CaptureResult => {
+          calls += 1;
+          if (calls === 2) return second;
+          const result = fake.captureOrder(id, req); // the first attempt charged, but its answer was lost
+          return calls === 1 ? { status: 'UNKNOWN' } : result;
+        },
+      };
+      const h = harness({ payments: flaky });
+      const token = h.signIn(PARENT);
+      const { orderId } = h.ok('payment.createOrder', { studentId: 'S0001', activityId: 'FL27', amountCents: 25000, coverFee: false }, token);
+      h.clearOutbox();
+      expect(h.err('payment.captureOrder', { orderId }, token).code).toBe('INTERNAL');
+      const retry = h.err('payment.captureOrder', { orderId }, token);
+      expect(retry.code).toBe('INTERNAL');
+      expect(retry.message).not.toMatch(/not charged/);
+      expect(h.rows('Log').filter((r) => r.Kind === 'payment-error').pop()?.Detail).toContain(`retry: ${second.status}`);
+      expect(h.services.outbox.mail.filter((m) => m.to === TREASURER)).toHaveLength(1); // still one alert
+      // The order is kept, so once PayPal answers, the payment is recorded.
+      expect(h.ok('payment.captureOrder', { orderId }, token).payment).toMatchObject({ amountCents: 25000, status: 'Completed' });
+    }
   });
 });

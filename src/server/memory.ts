@@ -26,6 +26,7 @@ import type {
   Store,
   StoredRow,
 } from './services';
+import { MailReserveError } from './services';
 import { hmacSha256Hex, sha256Hex, toHex } from './sha256';
 
 export interface MemoryDb {
@@ -387,7 +388,8 @@ export function createMemoryServices(opts: MemoryServicesOptions = {}): MemorySe
     },
     mailer: {
       remainingQuota: () => mailQuota,
-      send(msg) {
+      send(msg, opts) {
+        if (opts?.reserve !== undefined && mailQuota <= opts.reserve) throw new MailReserveError(mailQuota, opts.reserve);
         if (mailQuota <= 0) throw new Error('Service invoked too many times for one day: email.');
         mailQuota -= 1;
         outbox.mail.push({ ...msg });

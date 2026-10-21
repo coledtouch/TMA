@@ -10,7 +10,7 @@ import type { Ctx } from './context';
 import { rateLimit } from './context';
 import { toPayment, type PaymentRec } from './data';
 import { badRequest, conflict, fail, forbidden, notFound } from './errors';
-import { paymentReceivedNotice, paymentReviewNotice, paymentUnconfirmedNotice } from './messages';
+import { paymentReceivedNotice, paymentRecordedAfterReviewNotice, paymentReviewNotice, paymentUnconfirmedNotice } from './messages';
 import { notifyAdmins, notifyFamily } from './notify';
 import type { CaptureResult } from './services';
 import { errorMessage, hex8, idKey, isRecord, truncate } from './util';
@@ -178,6 +178,11 @@ export function captureOrder(ctx: Ctx, email: string, params: v.Params): { payme
     ctx.s.logger.error('PayPal captureOrder failed', errorMessage(err));
     result = { status: 'UNKNOWN', message: errorMessage(err) };
   }
+  if (order.unconfirmed && (result.status === 'FAILED' || result.status === 'DECLINED')) {
+    // About this attempt only (e.g. PayPal couldn't be reached before capturing): the earlier,
+    // unconfirmed one may still have taken the money, so this is no "not charged" either.
+    result = { status: 'UNKNOWN', message: `retry: ${result.status}${result.message ? ` (${result.message})` : ''}` };
+  }
   if (result.status === 'UNKNOWN') {
     // Never "you were not charged" here. Keep the cached order: capturing it again with the same
     // PayPal-Request-Id records the payment if it went through. Admins check PayPal meanwhile.
@@ -234,6 +239,8 @@ export function captureOrder(ctx: Ctx, email: string, params: v.Params): { payme
 
   const recorded = findPayment(ctx, [reference]);
   if (!recorded) throw new Error(`Payment ${reference} was not saved`);
+  // Admins were told to check PayPal for this order: say it's recorded, so nobody adds it again by hand.
+  if (order.unconfirmed) notifyAdmins(ctx, paymentRecordedAfterReviewNotice(firstName, activityName, order.grossCents, orderId, reference, status === 'Pending'));
   if (status === 'Completed') {
     const remaining = ctx.m.books().account(order.studentId, order.activityId)?.remainingCents ?? 0;
     notifyFamily(

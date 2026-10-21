@@ -211,7 +211,25 @@ export function paymentUnconfirmedNotice(firstName: string, activityName: string
   return {
     topic: 'admin',
     title: 'Payment needs review',
-    body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app did not record it. Look up PayPal order ${orderId}: if it was captured, add it to the Payments tab so the family isn't asked to pay again.`,
+    body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app has not recorded it yet. The app asks PayPal again, and if it then records the payment you'll get a "Payment recorded" message. Otherwise look up PayPal order ${orderId}: if it was captured and the Payments tab has no row with its transaction ID, add one so the family isn't asked to pay again.`,
+    url: '#/admin',
+    tag: `payreview-${orderId}`,
+  };
+}
+
+/** The follow-up to paymentUnconfirmedNotice (same tag) once the app recorded that order after all. */
+export function paymentRecordedAfterReviewNotice(
+  firstName: string,
+  activityName: string,
+  grossCents: Cents,
+  orderId: string,
+  reference: string,
+  pending: boolean,
+): Notice {
+  return {
+    topic: 'admin',
+    title: 'Payment recorded',
+    body: `The ${formatCents(grossCents)} PayPal payment for ${firstName} (${activityName}) that needed review (order ${orderId}) went through after all: the app recorded it in the Payments tab as ${reference}${pending ? ' (Pending while PayPal finishes processing it)' : ''}. Don't add it by hand.`,
     url: '#/admin',
     tag: `payreview-${orderId}`,
   };

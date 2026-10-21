@@ -214,7 +214,10 @@ payments are added by the app automatically.** You add checks and cash.
 * A bounced check: change its Status to `Failed`.
 * **"Payment needs review"**: if PayPal ever reports a different amount than the app expected, the
   app does **not** record the payment. Instead it alerts the board members in `ADMIN_EMAILS` with the
-  PayPal transaction ID. Look the payment up in PayPal and add the row by hand.
+  PayPal transaction ID. Look the payment up in PayPal and add the row by hand. The same alert goes
+  out when PayPal doesn't confirm whether a payment went through (it names the PayPal order). The app
+  asks again by itself; if it records the payment, a *"Payment recorded"* message follows, so don't
+  add it. Before adding a row by hand, check that no row already has that PayPal transaction ID.
 
 ### Redemptions
 
@@ -318,6 +321,7 @@ app uses it on the next request. You don't need to redeploy.
 | `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
 | `TOKEN_VERSION` | 1 | Change it (e.g. to `2`) to **sign everyone out** of the app, for example after a board member leaves or a phone is lost. Everyone simply signs in again with a new code. |
 | `SESSION_DAYS` | 120 | How many days a sign-in lasts (1–400). |
+| `NEW_SIGNUPS_PER_HOUR` | 30 | Sign-in codes per hour, across everyone, to emails TMA hasn't verified yet (new families, households still waiting for review). It stops strangers from using up the day's emails. **Raise it (up to 500) on a launch day**, when many families sign up at once, and lower it again afterwards. |
 
 ---
 

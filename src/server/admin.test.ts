@@ -311,6 +311,36 @@ describe('admin.announce', () => {
     expect(h.rows('Log').some((r) => String(r.Detail).includes('email skipped: daily quota used up'))).toBe(true);
   });
 
+  it('counts emails the mailer kept back for the sign-in reserve as skipped in the Log row', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    h.clearOutbox();
+    // Like Apps Script while the Worker can't send: remainingQuota() is the Worker's allowance, and the
+    // Gmail fallback stops at the reserve, which only the mailer sees.
+    h.services.mailer.remainingQuota = () => 1000;
+    let recipients = 0;
+    h.services.mailer.sendMany = (msgs) => {
+      recipients += msgs.length;
+      return msgs.map((_, i): MailResult => (i < 2 ? { ok: true } : { ok: false, error: 'Gmail fallback skipped', quota: true }));
+    };
+    const params = { title: 'Concert', body: 'Friday', audience: { schools: [], ensembles: [] }, channels: { email: true } };
+    expect(h.ok('admin.announce', params, admin).delivered.email).toBe(2);
+    expect(recipients).toBeGreaterThan(2);
+    const notify = () => h.rows('Log').filter((r) => r.Kind === 'notify').map((r) => r.Detail);
+    expect(notify()).toContainEqual(expect.stringContaining(`email 2, sms 0 (${recipients - 2} email skipped: daily quota used up`));
+
+    // Once the mailer keeps a whole round back, the rest aren't offered to it one round at a time.
+    h.services.mailer.remainingQuota = () => SIGN_IN_EMAIL_RESERVE + 1;
+    let calls = 0;
+    h.services.mailer.sendMany = (msgs) => {
+      calls += 1;
+      return msgs.map((): MailResult => ({ ok: false, error: 'Gmail fallback skipped', quota: true }));
+    };
+    expect(h.ok('admin.announce', { ...params, title: 'Concert 2' }, admin).delivered.email).toBe(0);
+    expect(calls).toBe(1);
+    expect(notify()).toContainEqual(expect.stringContaining(`Concert 2 → push 0, email 0, sms 0 (${recipients} email skipped`));
+  });
+
   it('refuses to send the same announcement twice in a row (a retry after the app timed out)', () => {
     const h = harness();
     const admin = h.signIn(TREASURER);

@@ -85,13 +85,38 @@ export interface MailMessage {
   text: string;
 }
 
-/** One message's outcome in Mailer.sendMany. */
-export type MailResult = { ok: true } | { ok: false; error: string };
+/**
+ * One message's outcome in Mailer.sendMany. `quota`: the mailer kept it back so the day's last
+ * emails stay free for sign-in codes (the core counts it as skipped for the quota, not as failed).
+ */
+export type MailResult = { ok: true } | { ok: false; error: string; quota?: true };
+
+export interface MailSendOptions {
+  /**
+   * Leave at least this many of today's emails: when the sender this message would go out with
+   * (Apps Script: Gmail, also as the fallback while the Worker can't send) has this many left or
+   * fewer, send nothing and throw MailReserveError. remainingQuota() can't tell the core that while
+   * a relay with a bigger allowance is in front of the backup sender.
+   */
+  reserve?: number;
+}
+
+/** What Mailer.send throws when it kept a message back for MailSendOptions.reserve. */
+export class MailReserveError extends Error {
+  /** Emails the sender had left today. */
+  readonly remaining: number;
+
+  constructor(remaining: number, reserve: number) {
+    super(`Not sent: ${remaining} emails left today, and the last ${reserve} are kept`);
+    this.name = 'MailReserveError';
+    this.remaining = remaining;
+  }
+}
 
 export interface Mailer {
   /** Remaining recipients the account may email today (Apps Script quota). */
   remainingQuota(): number;
-  send(msg: MailMessage): void;
+  send(msg: MailMessage, opts?: MailSendOptions): void;
   /**
    * Optional: sends a batch of notification emails (never sign-in codes) in
    * one go, e.g. several messages per request and requests in parallel. One

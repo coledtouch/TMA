@@ -230,6 +230,7 @@ export const SETTING_DEFAULTS = {
   PUSH_RELAY_URL: 'https://tma-push.coleciprari.workers.dev',
   TOKEN_VERSION: '1',
   SESSION_DAYS: '120',
+  NEW_SIGNUPS_PER_HOUR: '30',
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

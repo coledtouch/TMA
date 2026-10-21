@@ -158,15 +158,19 @@ Passwordless email codes. No Google account is required for parents.
 
 1. `auth.requestCode {email}`: validate the format. Rate limit is 5 codes per email per hour
    (cache key `otp-rl:<email>`). Codes share the day's email quota with notifications, and Apps Script
-   can't see who is asking, so for emails the sheet doesn't know yet (not a guardian on any Families
-   row, not in Preferences or Devices, not in `ADMIN_EMAILS`) there are two more limits:
-   `NEW_EMAIL_CODES_PER_HOUR` = 30 codes per hour script-wide (`otp-rl:new-emails`), and none once
-   the quota is down to the last `KNOWN_EMAIL_CODE_RESERVE` = 40 recipients, which are kept for known
-   emails. Either answers `RATE_LIMITED` ("new sign-ups are paused for a while"), logs, and writes one
-   `auth` Log row per hour. Every check runs **before** a new code is made, so a refused request never
-   replaces a code already emailed. Then generate a 6-digit code and store
-   `hmac(TOKEN_SECRET, email+code)` in cache `otp:<email>` for 10 minutes with
-   `attempts=0`. Email it with subject "Your TMA sign-in code: 123456". **Always**
+   can't see who is asking, so for emails TMA hasn't verified (not in `ADMIN_EMAILS`, not a guardian
+   of an **Active** household) there are two more limits: Settings `NEW_SIGNUPS_PER_HOUR` (default 30,
+   1–500) codes per hour script-wide (`otp-rl:new-emails`), and none once the quota is down to the last
+   `KNOWN_EMAIL_CODE_RESERVE` = 40 recipients, which are kept for known emails. Pending households'
+   guardians and emails that only have Preferences or Devices rows count as new: anyone can sign in
+   and create those, or type any address as a Pending household's second guardian. The code to a new
+   email is sent with `mailer.send(msg, {reserve: 40})`, so a mailer whose `remainingQuota()` is a
+   relay's allowance keeps the reserve on its backup sender too (Apps Script: Gmail, while the Worker
+   can't send) and throws `MailReserveError` instead. Each answers `RATE_LIMITED` ("new sign-ups are
+   paused for a while"), logs, and writes one `auth` Log row per hour. Then generate a 6-digit code
+   and email it with subject "Your TMA sign-in code: 123456"; only once it is sent, store
+   `hmac(TOKEN_SECRET, email+code)` in cache `otp:<email>` for 10 minutes with `attempts=0`. So a
+   refused request, or a send that fails, never replaces a code already emailed. **Always**
    respond `{sent:true}` whether or not the email is known; anyone may sign up.
    In `mode==='demo'` also return `devCode` and skip email.
 2. `auth.verifyCode {email, code}`: allow at most 5 attempts per issued code. On success, delete
@@ -202,7 +206,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 | `redemption.request` | Caller's family must be Active, the student Active and in the family, the activity Open and `allowFunds`, enrollment Going. Amount is an integer ≥ 100 (=$1) and ≤ available funds and ≤ (remaining − pending requests for that activity). Append a `Redemptions` row (Pending). Notify admins (§6, admin message). |
 | `redemption.cancel` | Only the caller's family's own **Pending** request → Cancelled. |
 | `payment.createOrder` | Requires `settings.onlinePaymentsEnabled` and `payments.enabled()` (otherwise `NOT_CONFIGURED`). Same ownership checks; activity `allowOnlinePayment`. `minPayment ≤ amount ≤ remaining` (when a payment that is still clearing covers the rest, the message says it is "still being processed"). Fee: `coverFee ? grossUpCents(amount, FEE_PERCENT, FEE_FIXED) : none`. Call `payments.createOrder`. Cache `order:<orderId>` → JSON {email, familyId, studentId, activityId, amountCents, feeCents, grossCents} for 6 h. |
-| `payment.captureOrder` | Load the cached order (`NOT_FOUND` if missing/expired) and require the same email. If a Payments row with Reference == captureId or Reference == orderId already exists → return it (idempotent). Before calling PayPal, re-check `remaining` under the write lock (another guardian, a second tab or a clearing payment may have paid meanwhile): an order that would overpay is not captured → `PAYMENT_FAILED` "…paid in the meantime, so this payment was stopped and you were not charged" (skipped after an unconfirmed capture). Call `payments.captureOrder(orderId, 'cap-'+orderId)`. Status COMPLETED **and** grossCents equal to the expected gross → append Payments row {Date today, StudentID, ActivityID, Amount, Fee Covered, Gross, Method 'PayPal', Reference captureId, Payer Email, Status Completed}, log, notify the family (topic `payments`). PENDING → append with Status Pending. DECLINED/FAILED (PayPal definitely took nothing) → `PAYMENT_FAILED`. `UNKNOWN` or a thrown gateway error (network, timeout, 5xx/429, unreadable reply, even after the gateway asked once more with the same `PayPal-Request-Id`) → `INTERNAL` with a message that never says "not charged", a `payment-error` Log row, a "Payment needs review" alert to admins, and the cached order kept and marked unconfirmed so capturing it again records the payment if it went through. The app asks once more by itself before showing "We couldn't confirm your payment". |
+| `payment.captureOrder` | Load the cached order (`NOT_FOUND` if missing/expired) and require the same email. If a Payments row with Reference == captureId or Reference == orderId already exists → return it (idempotent). Before calling PayPal, re-check `remaining` under the write lock (another guardian, a second tab or a clearing payment may have paid meanwhile): an order that would overpay is not captured → `PAYMENT_FAILED` "…paid in the meantime, so this payment was stopped and you were not charged" (skipped after an unconfirmed capture). Call `payments.captureOrder(orderId, 'cap-'+orderId)`. Status COMPLETED **and** grossCents equal to the expected gross → append Payments row {Date today, StudentID, ActivityID, Amount, Fee Covered, Gross, Method 'PayPal', Reference captureId, Payer Email, Status Completed}, log, notify the family (topic `payments`). PENDING → append with Status Pending. DECLINED/FAILED (PayPal definitely took nothing) → `PAYMENT_FAILED`. `UNKNOWN` or a thrown gateway error (network, timeout, 5xx/429, unreadable reply, even after the gateway asked once more with the same `PayPal-Request-Id`) → `INTERNAL` with a message that never says "not charged", a `payment-error` Log row, a "Payment needs review" alert to admins, and the cached order kept and marked unconfirmed so capturing it again records the payment if it went through. The app asks once more by itself before showing "We couldn't confirm your payment". For an order marked unconfirmed, DECLINED/FAILED are treated like UNKNOWN (they are about that attempt only, e.g. PayPal couldn't be reached before capturing), and when it is recorded after all, admins get a "Payment recorded" follow-up (same tag) so nobody adds it again by hand. |
 | `admin.overview` | Stats, pending redemptions (with names, available, remaining), pending households with up to 3 match candidates per student (§5.3), last 50 Log rows. Each pending household may carry `warnings`, shown above *Approve*: a pending student whose ID already has Ledger/Enrollments/Payments/Redemptions rows, a non-pending student already linked to a pending household, or Redemptions rows that already carry the household's FamilyID. |
 | `admin.decideRedemption` | Pending only (`CONFLICT` otherwise). Approved: if the treasurer already typed a Ledger row with Reference = request id, post nothing more and skip the checks below (one shared check with the sync, so a request is never debited twice). Otherwise re-validate available funds (excluding this request) and remaining; if short → `CONFLICT` with a clear message. Append a Ledger row {Date today, StudentID, Type 'Redemption', Description 'Applied to <activity name>', Amount −x, ActivityID, Reference = request id, Entered By = admin email}. Update the redemption row (Status, Decided, Decided By, Admin Note, Notified=now). Update `_Snapshot` for that student so the sync doesn't double-notify. Notify the family (topic `payments`). Denied: update the row and notify. |
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
@@ -273,7 +277,9 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
   kept back for sign-in codes (`SIGN_IN_EMAIL_RESERVE`; codes and notifications share one quota); skip
   with a log otherwise. Sent with `mailer.sendMany` when the mailer has it (one call for the batch,
   one result per recipient), else `send` one by one; a failed email doesn't use up quota, so the
-  next recipients may take its place. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone
+  next recipients may take its place. Results the mailer marks `quota` (it kept them back for the
+  reserve itself, e.g. its Gmail fallback) count as skipped too; once it keeps a whole round back,
+  the rest are skipped without asking it again. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone
   (US/Canada only, §5), and only to guardians of **Active** (TMA-verified) households and to
   `ADMIN_EMAILS`: texts cost TMA money and anyone can sign in and save a number.
   Admin-chosen channels further restrict announcements.
@@ -318,10 +324,14 @@ dashboard); the core doesn't know the route. In Apps Script it is `src/gas/mail.
      minutes after it (same cache key), so later executions report Gmail's quota.
 4. `remainingQuota()` = 1000 while the Worker route is active (Cloudflare has no per-script daily
    quota), else `MailApp.getRemainingDailyQuota()`. The Gmail fallback of `sendMany()` never goes
-   below `SIGN_IN_EMAIL_RESERVE` (those emails come back as failed results), so a Worker outage
-   can't spend the reserve on notifications. `send()`'s first fallback in an execution always goes:
-   that is how sign-in codes go out, and the reserve is theirs. `sendMany()` starts nothing new after
-   4 minutes (the rest come back as failed), so a big batch ends inside the 6-minute limit.
+   below `SIGN_IN_EMAIL_RESERVE` (those emails come back as failed results marked `quota`), so a
+   Worker outage can't spend the reserve on notifications. It reads Gmail's quota before each email
+   rather than counting down, because notifications go out after the write lock is released and
+   another execution may be sending too. `send()`'s first fallback in an execution always goes:
+   that is how sign-in codes go out, and the reserve is theirs. With `{reserve: n}` (a code to a new
+   email, §4) any Gmail send first checks that more than `n` are left, else throws
+   `MailReserveError`. `sendMany()` starts nothing new after 4 minutes (the rest come back as
+   failed), so a big batch ends inside the 6-minute limit.
 5. `relayStatus()` → `{from: 'noreply@mytma.org', backupRemaining: <MailApp quota>}` while the
    Worker route is active, so the dashboard shows the Gmail backup's quota rather than 1000.
 6. `EMAIL_VIA` = `gmail` → MailApp only; the Worker is never asked.

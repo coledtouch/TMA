@@ -1,6 +1,8 @@
 import * as nodeCrypto from 'node:crypto';
 import { SIGN_IN_EMAIL_RESERVE } from '../server/notify';
-import type { MailMessage } from '../server/services';
+import { createApp } from '../server/app';
+import { KNOWN_EMAIL_CODE_RESERVE } from '../server/auth';
+import { MailReserveError, type MailMessage } from '../server/services';
 import {
   createGasMailer,
   describeWorkerReason,
@@ -310,6 +312,30 @@ describe('falling back to Gmail', () => {
     expect(gas.mail.sent.map((x) => x.to)).toEqual(['a@example.com']);
   });
 
+  it('a sign-in code sent with a reserve: its Gmail fallback keeps that many, refusing with MailReserveError', () => {
+    settings();
+    emailReply = failWith('recipient_not_allowed', 'E_RECIPIENT_NOT_ALLOWED'); // before mytma.org is onboarded
+    gas.mail.quota = 41;
+    expect(mailer().remainingQuota()).toBe(WORKER_DAILY_ALLOWANCE); // all the core can see
+    mailer().send({ ...CODE_EMAIL, to: 'new1@example.net' }, { reserve: 40 });
+    expect(gas.mail.quota).toBe(40);
+    let refused: unknown;
+    try {
+      mailer().send({ ...CODE_EMAIL, to: 'new2@example.net' }, { reserve: 40 });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toBeInstanceOf(MailReserveError);
+    expect((refused as MailReserveError).remaining).toBe(40);
+    expect(gas.mail.quota).toBe(40);
+    // On the Gmail route too; and a code without a reserve (a known family) still goes.
+    gas.cache.put(WORKER_PAUSE_CACHE_KEY, 'sender_not_verified', 600);
+    expect(mailer().route().via).toBe('gmail');
+    expect(() => mailer().send({ ...CODE_EMAIL, to: 'new3@example.net' }, { reserve: 40 })).toThrow(MailReserveError);
+    mailer().send(CODE_EMAIL);
+    expect(gas.mail.sent.map((m) => m.to)).toEqual(['new1@example.net', 'parent@example.com']);
+  });
+
   it('a lone sign-in code still goes out with Gmail even when the quota is nearly used up', () => {
     settings();
     emailReply = failWith('send_failed');
@@ -504,7 +530,26 @@ describe('sendMany (notification batches)', () => {
     gas.mail.quota = SIGN_IN_EMAIL_RESERVE + 2;
     const results = mailer().sendMany(families(4));
     expect(results.map((r) => r.ok)).toEqual([true, true, false, false]);
-    expect(results[2]).toEqual({ ok: false, error: expect.stringMatching(/kept for sign-in codes/) });
+    expect(results[2]).toEqual({ ok: false, error: expect.stringMatching(/kept for sign-in codes/), quota: true });
+    expect(gas.mail.quota).toBe(SIGN_IN_EMAIL_RESERVE);
+  });
+
+  it("reads Gmail's quota before each email, so another execution sending at the same time can't push it below the reserve", () => {
+    // Notifications go out after the write lock is released: e.g. an announcement from the app while
+    // a scheduled run sends its own notices with Gmail.
+    settings([['EMAIL_VIA', 'gmail']]);
+    gas.mail.quota = SIGN_IN_EMAIL_RESERVE + 4;
+    const send = gas.mail.sendEmail.bind(gas.mail);
+    let otherRunSent = false;
+    gas.mail.sendEmail = (message) => {
+      send(message);
+      if (otherRunSent) return;
+      otherRunSent = true;
+      for (let i = 0; i < 3; i += 1) send({ ...message, to: `other-run-${i}@example.com` });
+    };
+    const results = mailer().sendMany(families(4));
+    expect(results.map((r) => r.ok)).toEqual([true, false, false, false]);
+    expect(results.slice(1).every((r) => !r.ok && r.quota)).toBe(true);
     expect(gas.mail.quota).toBe(SIGN_IN_EMAIL_RESERVE);
   });
 
@@ -668,5 +713,28 @@ describe('helpers', () => {
       replyTo: () => SUPPORT,
     });
     expect(m.route()).toEqual({ via: 'gmail', reason: 'no_worker' });
+  });
+});
+
+describe('sign-in codes through the whole app (one execution per request)', () => {
+  const requestCode = (email: string): string => {
+    const answer = createApp(createGasServices()).handle({ action: 'auth.requestCode', params: { email } });
+    return answer.ok ? 'sent' : `${answer.error.code}: ${answer.error.message}`;
+  };
+
+  it(`keeps Gmail's last ${KNOWN_EMAIL_CODE_RESERVE} for verified families while the Worker refuses every email`, () => {
+    // Before mytma.org is onboarded (or past Cloudflare's daily limit, or while the Worker fails),
+    // remainingQuota() still reports the Worker's allowance and every code falls back to Gmail.
+    settings();
+    createApp(createGasServices()).setup({ seedSampleData: true });
+    emailReply = failWith('recipient_not_allowed', 'E_RECIPIENT_NOT_ALLOWED');
+    gas.mail.quota = KNOWN_EMAIL_CODE_RESERVE + 5;
+    const answers = Array.from({ length: 30 }, (_, i) => requestCode(`made.up.${i}@example.net`));
+    expect(answers.slice(0, 5)).toEqual(Array(5).fill('sent'));
+    expect(answers.slice(5)).toEqual(Array(25).fill(expect.stringMatching(/^RATE_LIMITED: .*new sign-ups are paused/)));
+    expect(gas.mail.quota).toBe(KNOWN_EMAIL_CODE_RESERVE);
+    // A guardian of an Active household still gets a code, from the reserve.
+    expect(requestCode('parent@example.com')).toBe('sent');
+    expect(gas.mail.quota).toBe(KNOWN_EMAIL_CODE_RESERVE - 1);
   });
 });
