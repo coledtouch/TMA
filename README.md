@@ -1,0 +1,177 @@
+# TMA Family App
+
+![Timberlane Music Association](public/brand/tma-banner.jpg)
+
+A free phone app for the families of the
+[Timberlane Music Association](https://sites.google.com/view/timberlanemusicassociation/home) (TMA),
+the volunteer-run 501(c)(3) booster club for the music programs at Timberlane Regional Middle and
+High Schools in Plaistow, NH.
+
+It is a **Progressive Web App (PWA)**: families open a link, tap **Add to Home Screen**, and it
+works like an app on iPhone and Android. Nobody has to download anything from an app store. The
+treasurer keeps working in **the same Google Sheet** as today. The app reads that sheet, keeps
+balances straight and notifies families when something changes.
+
+## What it does
+
+**For families**
+
+* See each student's **activity-fund balance** (money earned through fundraisers and earmarked for
+  music activities) and the full history of credits and uses.
+* See each **trip or activity**: what it costs, what's been paid, what's left and when it's due.
+* **Use activity funds for a trip**: the parent asks in the app and the treasurer approves.
+* **Pay the rest online** with PayPal, Venmo, or a debit/credit card (through PayPal), or see how to
+  pay by check.
+* **Choose what to hear about**: High School, Middle School or Elementary; Band, Marching Band, Jazz
+  Band, Orchestra, Chorus or Guitar; and topics (fund changes, payments, reminders, news).
+* Get **push notifications** on their phone, for example *"$50.00 was added to Avery's TMA activity
+  funds."* Email is also available, and text messages if TMA turns them on.
+* **Sign up themselves**. The school can't share family emails, so parents register their own
+  household (parent name, email, optional cell, and each student's name, grade, school and groups).
+  The treasurer verifies the household before any money information is shown.
+* Sign in with a **one-time code sent by email**. There are no passwords to remember.
+
+**For the treasurer and board**
+
+* Keep using **one Google Sheet**: record fundraiser credits, checks and trip enrollments as you do
+  now. See [docs/SHEET.md](docs/SHEET.md).
+* **Approve fund requests** and **verify new households** in the app (*More → Board tools*) or
+  in the sheet.
+* **Send announcements** to everyone or only to some schools and groups, by push, email or text.
+* Automatic **payment-due reminders** and **"concert tomorrow"** reminders.
+
+## Try the demo
+
+The demo runs entirely in your browser with made-up families. No emails, payments or real
+notifications are sent, and nothing leaves your computer.
+
+You need [Node.js](https://nodejs.org/) 20 or newer.
+
+```bash
+npm install
+npm run dev
+```
+
+Open the address it prints (usually http://localhost:5173/). With no backend address configured,
+the app starts in **demo mode**:
+
+* **Try as a parent** signs in as `parent@example.com` (Jordan Thompson, with students Avery and Liam).
+* **Try as the treasurer** signs in as `treasurer@example.com`, who sees *More → Board tools* with a
+  fund request and a new household waiting for review.
+* **Try as a new family**, or type **any other email**, to walk through sign-up.
+* There is no real email in the demo: the sign-in code is shown on screen and filled in for you.
+* **Demo controls** (under **More**): pretend to be the treasurer and post a fundraiser credit for a
+  student, then watch the notification arrive. Turn on notifications first (*More → Notifications →
+  Turn on notifications*) to see a real phone/desktop notification. The card also lists everything
+  the demo "sent" and has a **Reset demo data** button.
+
+Demo data is saved in your browser, so you can come back to it later.
+
+The GitHub Pages site (see [Hosting](docs/SETUP.md#7-host-the-app-on-github-pages)) is also the demo
+until it is connected to TMA's backend, so it can be shared with the board as a prototype link.
+
+## Screenshots
+
+| Home | Trips | Pay online |
+| --- | --- | --- |
+| ![Home screen with students' activity-fund balances](docs/screenshots/home.png) | ![Trips screen with cost, paid and remaining](docs/screenshots/trips.png) | ![Paying online with PayPal](docs/screenshots/pay.png) |
+
+| Notifications | Board tools | Sign in |
+| --- | --- | --- |
+| ![Choosing notifications by school, group and topic](docs/screenshots/notifications.png) | ![Treasurer's approvals and announcements](docs/screenshots/admin.png) | ![Signing in with an email code](docs/screenshots/signin.png) |
+
+The screenshots are taken from the demo by the end-to-end test.
+
+## What it costs
+
+Everything runs on free services inside TMA's own accounts.
+
+| Piece | Cost | Notes |
+| --- | --- | --- |
+| Google Sheet, Apps Script (the app's server) and Gmail | **$0** | A free Gmail account can email about 100 recipients a day, including sign-in codes. Free [Google Workspace for Nonprofits](https://www.google.com/nonprofits/) raises that to about 1,500. |
+| Push notifications (Firebase Cloud Messaging) | **$0** | Free "Spark" plan. No charge per message. |
+| Hosting the app (GitHub Pages) | **$0** | Free for public repositories. |
+| Using activity funds for a trip | **$0** | An internal ledger entry. No payment processor is involved. |
+| Checks and cash | **$0** | |
+| Online payments (PayPal, Venmo, cards) | **Per payment** | 1.99% + $0.49 at PayPal's Confirmed Charity rate (3.49% + $0.49 standard). Families can choose to cover the fee so TMA receives the full amount. See [docs/PAYMENTS.md](docs/PAYMENTS.md). |
+| Text messages (Twilio) | **Optional** | Off by default. About 1¢ per text plus a small monthly phone-number fee. |
+
+## How it works
+
+```
+ Parents' phones (the app)          TMA's Google account (free)
+┌────────────────────────┐  HTTPS  ┌─────────────────────────────────────┐
+│ React PWA              │ ──────▶ │ Apps Script web app                 │
+│ service worker         │         │  reads/writes ▶ TMA's Google Sheet  │
+│ (push + offline)       │         │  sends ▶ Gmail, every 15 min sync   │
+└──────────▲─────────────┘         └──────┬───────────────┬──────────────┘
+           │ push                         │               │
+   Firebase Cloud Messaging ◀─────────────┘           PayPal REST
+```
+
+The full design, including every API action, notification message and scheduled job, is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Documentation
+
+| Document | For | What's in it |
+| --- | --- | --- |
+| [docs/SETUP.md](docs/SETUP.md) | Whoever sets it up | Step-by-step production setup (about an hour, all free), updating, troubleshooting. |
+| [docs/SHEET.md](docs/SHEET.md) | Treasurer | Every tab and column, the daily workflow, importing the existing spreadsheet, all settings. |
+| [docs/PAYMENTS.md](docs/PAYMENTS.md) | Board | Can card payments be fee-free? Fees compared, how the app gets TMA to $0 net cost, IRS caution. |
+| [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md) | Board | Privacy, security, liability, costs, and what happens if the volunteer developer leaves. |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Developers | Behavior spec and contracts. |
+| [apps-script/README.md](apps-script/README.md) | Whoever sets it up | The two files that go into Apps Script. |
+
+## Privacy in short
+
+* **Collected:** parent names, emails, an optional cell number, and each student's first and last
+  name, grade, school, groups and (optionally) instrument. Plus each family's notification choices.
+* **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
+  student emails or phone numbers, or any school records.
+* **Where it lives:** in TMA's own Google Sheet, in TMA's Google account. There is no separate
+  database. Card payments are handled entirely by PayPal, so TMA never sees card numbers.
+* **Who sees what:** a parent sees only their own household. Balances and trips appear only after
+  the treasurer verifies the household. Board members listed in the sheet's Settings tab see what
+  they need to approve requests and sign-ups.
+
+More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
+
+## For developers
+
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Start the app locally (demo mode unless `VITE_API_URL` is set in `.env.local`; see `.env.example`). |
+| `npm test` | Unit tests (Vitest). |
+| `npm run typecheck` | TypeScript checks for the web app, service worker, Apps Script code and configs. |
+| `npm run build` | Typecheck, then build the web app into `dist/`. |
+| `npm run build:web` | Build the web app only. |
+| `npm run build:gas` | Bundle the backend into `apps-script/Code.js`. **Commit the result**: volunteers copy it into Apps Script, and CI fails if it is out of date. |
+| `npm run preview` | Serve the built `dist/` locally. |
+| `npm run e2e` | Playwright test of the demo at phone size; it also takes the screenshots. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
+| `npm run icons` | Regenerate the app icons from `public/brand/timberlane-shield-source.webp`. |
+
+The app connects to a real backend through three build-time variables (`VITE_API_URL`,
+`VITE_FIREBASE_CONFIG`, `VITE_FIREBASE_VAPID_KEY`). With none set, it is the demo.
+
+### Project layout
+
+```
+src/shared/    types, sheet layout (schema.ts) and money helpers shared by everything
+src/server/    backend logic (plain TypeScript; runs in Apps Script and in the demo)
+src/gas/       Apps Script adapters: Sheet, Gmail, PayPal, Firebase, Twilio, menu, triggers
+src/demo/      the in-browser demo backend with sample data
+src/web/       the React app, service worker, push and PayPal UI
+apps-script/   Code.js (generated, committed) and appsscript.json, to paste into Apps Script
+scripts/       build-gas.mjs, make-icons.mjs
+public/        logos and app icons
+docs/          setup, sheet, payments, board FAQ, architecture
+e2e/           Playwright smoke test of the demo
+.github/       CI and the GitHub Pages deployment
+```
+
+Money is always handled as whole cents in code. The sheet stores dollars.
+
+## License
+
+MIT (see `package.json`).

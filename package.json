@@ -14,7 +14,7 @@
     "build:web": "vite build",
     "build:gas": "node scripts/build-gas.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.sw.json --noEmit && tsc -p tsconfig.gas.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.sw.json --noEmit && tsc -p tsconfig.gas.json --noEmit && tsc -p tsconfig.gas-test.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",

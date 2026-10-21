@@ -424,7 +424,8 @@ export function PayPalCheckout(props: {
 * Runtime: images StaleWhileRevalidate (`tma-images`, max 60). **Never cache API calls** (POST anyway).
 * `push`: parse JSON robustly: FCM data message `{data:{title,body,url,tag,topic}}`, `{notification:{…}}`,
   or a plain `PushMessage`. **Always** show a notification (iOS requires it) with icon `icons/icon-192.png`,
-  badge, tag, and `data.url`. Fallback title "TMA update".
+  badge `icons/badge-96.png` (transparent silhouette; Android uses only its alpha), tag, and `data.url`.
+  Fallback title "TMA update".
 * `notificationclick`: close; focus an existing client and `postMessage({type:'navigate', url})`, or
   `clients.openWindow(scope + url)`.
 * `message` `{type:'SKIP_WAITING'}` → `skipWaiting()`.

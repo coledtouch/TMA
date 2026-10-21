@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { SIGN_IN_EMAIL_RESERVE } from './notify';
 import type { PushSender } from './services';
 import { harness, NGUYEN, PARENT, PARENT2, TEST_NOW } from './test-helpers';
 
@@ -100,11 +101,22 @@ describe('syncTick: balance changes', () => {
   });
 
   it('skips email (with a log) when the daily quota is used up', () => {
-    const h = harness({ mailQuota: 1 });
+    const h = harness({ mailQuota: SIGN_IN_EMAIL_RESERVE + 1 });
     h.services.db.tables.Ledger?.push(credit('S0001', 5));
     const report = h.app.syncTick();
     expect(report.notifications.email).toBe(1);
     expect(h.rows('Log').some((r) => String(r.Detail).includes('daily quota'))).toBe(true);
+  });
+
+  it('keeps the last emails of the day for sign-in codes', () => {
+    const h = harness({ mailQuota: SIGN_IN_EMAIL_RESERVE });
+    h.services.db.tables.Ledger?.push(credit('S0001', 5));
+    const report = h.app.syncTick();
+    expect(report.notifications.email).toBe(0);
+    expect(report.notifications.push).toBe(1);
+    expect(h.services.mailer.remainingQuota()).toBe(SIGN_IN_EMAIL_RESERVE);
+    // A parent can still get a code.
+    expect(h.signIn(PARENT)).toBeTruthy();
   });
 
   it('keeps going when the push service throws', () => {

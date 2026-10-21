@@ -25,11 +25,8 @@ declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<PrecacheEn
 
 const FALLBACK_TITLE = 'TMA update';
 const ICON_PATH = 'icons/icon-192.png';
-/**
- * Android draws the badge from the image's alpha channel only. icon-192 is
- * opaque, so a transparent single-colour badge icon would look better here.
- */
-const BADGE_PATH = 'icons/icon-192.png';
+/** Android draws the badge from the alpha channel only, so this is a transparent white silhouette (scripts/make-icons.mjs). */
+const BADGE_PATH = 'icons/badge-96.png';
 const DEFAULT_ROUTE = '#/';
 const TOPICS: ReadonlyArray<PushMessage['topic']> = ['balance', 'payments', 'reminders', 'announcements', 'test', 'admin'];
 /** In-app hash routes only: never let a push payload open another site. */

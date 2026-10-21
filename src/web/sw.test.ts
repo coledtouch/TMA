@@ -33,6 +33,7 @@ vi.mock('workbox-expiration', () => ({ ExpirationPlugin: wb.ExpirationPlugin }))
 
 const SCOPE = 'https://example.github.io/tma/';
 const ICON = `${SCOPE}icons/icon-192.png`;
+const BADGE = `${SCOPE}icons/badge-96.png`;
 const MANIFEST = [{ url: 'index.html', revision: 'abc' }];
 
 type Handler = (event: Record<string, unknown>) => void;
@@ -148,7 +149,7 @@ describe('push', () => {
     expect(self.registration.showNotification).toHaveBeenCalledWith('+$50.00 for Avery', {
       body: '$50.00 was added…',
       icon: ICON,
-      badge: ICON,
+      badge: BADGE,
       tag: 'bal-S0001',
       data: { url: '#/funds' },
       lang: 'en',

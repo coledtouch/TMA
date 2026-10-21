@@ -1,0 +1,77 @@
+# Publishes the web app to GitHub Pages at https://<owner>.github.io/<repo>/.
+#
+# One-time setup (see docs/SETUP.md, step 7):
+#   Settings → Pages → Source: GitHub Actions
+#   Settings → Secrets and variables → Actions → Variables:
+#     VITE_API_URL             Apps Script web app URL (ends in /exec)
+#     VITE_FIREBASE_CONFIG     Firebase web config as one-line JSON
+#     VITE_FIREBASE_VAPID_KEY  Firebase Web Push certificate (public key)
+# These values are public (they end up in the site's JavaScript), so they are
+# variables, not secrets.
+#
+# With no variables set, the site is the DEMO: sample families, simulated
+# PayPal and push. That is the prototype link for the board.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    # The PR branch is listed so the board can try the prototype before merge
+    # (the github-pages environment allows it). Remove it once merged.
+    branches: [main, claude/laughing-goodall-h7za8l]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; let a running deployment finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the web app
+        run: npm run build:web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          VITE_FIREBASE_CONFIG: ${{ vars.VITE_FIREBASE_CONFIG }}
+          VITE_FIREBASE_VAPID_KEY: ${{ vars.VITE_FIREBASE_VAPID_KEY }}
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

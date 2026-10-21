@@ -1,0 +1,173 @@
+/**
+ * Checks the generated apps-script/Code.js itself (run `npm run build:gas`
+ * first; skipped when the file doesn't exist): it must be one plain script
+ * Apps Script can load, and its entry points must work end to end against the
+ * Apps Script fakes.
+ */
+import * as nodeCrypto from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
+import { installGasFakes, uninstallGasFakes, type FakeOutput, type GasFakes } from './testing/fakes';
+
+const CODE_PATH = fileURLToPath(new URL('../../apps-script/Code.js', import.meta.url));
+const code = existsSync(CODE_PATH) ? readFileSync(CODE_PATH, 'utf8') : '';
+
+const ENTRY_POINTS = [
+  'doGet',
+  'doPost',
+  'onOpen',
+  'syncTick',
+  'dailyTick',
+  'setupTma',
+  'setupTmaWithSampleData',
+  'installTriggers',
+  'sendTestPushToMe',
+  'showTmaStatus',
+] as const;
+
+const APPS_SCRIPT_GLOBALS = [
+  'SpreadsheetApp',
+  'UrlFetchApp',
+  'CacheService',
+  'PropertiesService',
+  'LockService',
+  'MailApp',
+  'ScriptApp',
+  'Session',
+  'ContentService',
+  'HtmlService',
+  'Utilities',
+];
+
+/** A service stub that fails the test if module code touches it while loading. */
+function untouchable(name: string): unknown {
+  return new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        throw new Error(`${name}.${String(prop)} was used while the script loaded`);
+      },
+    },
+  );
+}
+
+describe.skipIf(!code)('apps-script/Code.js', () => {
+  it('is a single classic script with no module syntax or browser/Node APIs', () => {
+    expect(code.startsWith('// GENERATED FILE')).toBe(true);
+    expect(code).not.toMatch(/^\s*import[\s{*]/m);
+    expect(code).not.toMatch(/^\s*export[\s{*]/m);
+    expect(code).not.toMatch(/\bimport\s*\(/); // no dynamic imports either
+    // UrlFetchApp.fetch/fetchAll are fine; the browser's global fetch() doesn't exist in Apps Script.
+    expect(code).not.toMatch(/(^|[^.\w$])fetch\s*\(/m);
+    expect(code).not.toMatch(/\b(?:window|document|localStorage|navigator|process)\.\w/);
+    expect(code).not.toMatch(/\brequire\s*\(/);
+    // The test-only in-memory services must never ship.
+    expect(code).not.toContain('createMemoryServices');
+    // Literal U+2028/U+2029 would end a line inside a string or regex in older parsers.
+    expect(code).not.toMatch(new RegExp(`[${String.fromCharCode(0x2028, 0x2029)}]`));
+    new vm.Script(code, { filename: 'Code.js' }); // parses
+  });
+
+  it('loads with Apps Script stubs, touches no service at load time, and exposes every entry point', () => {
+    const sandbox: Record<string, unknown> = { console };
+    for (const name of APPS_SCRIPT_GLOBALS) sandbox[name] = untouchable(name);
+    vm.createContext(sandbox);
+    vm.runInContext(code, sandbox, { filename: 'Code.js' });
+    for (const name of ENTRY_POINTS) {
+      expect(typeof sandbox[name], name).toBe('function');
+    }
+    expect(typeof sandbox.TMA).toBe('object');
+  });
+
+  describe('against the Apps Script fakes', () => {
+    let gas: GasFakes;
+    const g = globalThis as unknown as Record<string, (e?: unknown) => unknown>;
+
+    beforeAll(() => {
+      gas = installGasFakes(nodeCrypto);
+      // As a script in this realm, like Apps Script loads Code.js: top-level functions become globals.
+      vm.runInThisContext(code, { filename: 'Code.js' });
+    });
+
+    // The script's top-level functions are non-deletable globals; Vitest isolates each test file anyway.
+    afterAll(() => uninstallGasFakes());
+
+    const post = (body: unknown): { ok: boolean; data?: any; error?: { code: string; message: string } } => {
+      const out = g.doPost({ postData: { contents: JSON.stringify(body), type: 'text/plain' } }) as FakeOutput;
+      expect(out.mimeType).toBe('JSON');
+      return JSON.parse(out.getContent());
+    };
+
+    it('sets up the sheet with sample data and answers the health check', () => {
+      g.setupTmaWithSampleData();
+      const tabs = gas.spreadsheet.getSheets().map((s) => s.getName());
+      expect(tabs).toEqual(expect.arrayContaining(['Settings', 'Families', 'Students', 'Ledger', 'Payments', 'Redemptions']));
+      expect(gas.properties.getProperty('TOKEN_SECRET')).toMatch(/^[0-9a-f]{64}$/);
+      expect(gas.spreadsheet.getSheetByName('_Snapshot')?.isSheetHidden()).toBe(true);
+
+      const health = JSON.parse((g.doGet({ parameter: { action: 'health' } }) as FakeOutput).getContent());
+      expect(health).toMatchObject({ ok: true, data: { version: expect.any(String) } });
+      expect((g.doGet({ parameter: {} }) as FakeOutput).getContent()).toContain('<h1');
+    });
+
+    it('adds the TMA App menu and installs the schedules', () => {
+      g.onOpen();
+      const menu = gas.ui.menus.find((m) => m.name === 'TMA App');
+      expect(menu?.items.map(([, fn]) => fn)).toEqual(
+        expect.arrayContaining(['syncTick', 'sendTestPushToMe', 'setupTma', 'installTriggers', 'showTmaStatus']),
+      );
+      // Every menu item must point at a real top-level function.
+      for (const [, fn] of menu!.items) expect(typeof g[fn], fn).toBe('function');
+
+      g.installTriggers();
+      expect(gas.scriptApp.triggers.map((t) => t.handler).sort()).toEqual(['dailyTick', 'syncTick']);
+    });
+
+    it('signs a parent in with an emailed code and returns their household', () => {
+      expect(post({ action: 'me.bootstrap', params: {} }).error?.code).toBe('UNAUTHORIZED');
+      expect(post('not json').error?.code).toBe('BAD_REQUEST');
+
+      const sent = post({ action: 'auth.requestCode', params: { email: 'parent@example.com' } });
+      expect(sent).toEqual({ ok: true, data: { sent: true } }); // production mode: no devCode
+      const mail = gas.mail.sent.at(-1)!;
+      expect(mail.to).toBe('parent@example.com');
+      const code = /(\d{6})/.exec(String(mail.subject))?.[1];
+      expect(code).toBeDefined();
+
+      const verified = post({ action: 'auth.verifyCode', params: { email: 'parent@example.com', code } });
+      expect(verified.ok).toBe(true);
+      const token = verified.data.token as string;
+
+      const home = post({ action: 'me.bootstrap', params: {}, token });
+      expect(home.ok).toBe(true);
+      expect(home.data.me).toMatchObject({ email: 'parent@example.com', familyId: 'F0001', familyStatus: 'Active' });
+      const avery = home.data.students.find((s: { student: { id: string } }) => s.student.id === 'S0001');
+      expect(avery).toMatchObject({ balanceCents: 64_000, availableCents: 44_000 });
+      // PayPal isn't configured in a fresh production sheet.
+      expect(home.data.settings.onlinePaymentsEnabled).toBe(false);
+    });
+
+    it('notices a credit the treasurer typed into the Ledger tab and emails the family', () => {
+      const ledger = gas.spreadsheet.getSheetByName('Ledger')!;
+      const headers = ledger.dump()[0] as string[];
+      const row = ledger.getLastRow() + 1;
+      const today = new Date().toISOString().slice(0, 10);
+      const values: Record<string, string | number> = {
+        Date: today,
+        StudentID: 'S0001',
+        Type: 'Fundraiser',
+        Description: 'Wreath sale',
+        Amount: 50,
+      };
+      headers.forEach((h, i) => {
+        if (h in values) ledger.write(row, i + 1, values[h]);
+      });
+
+      const before = gas.mail.sent.length;
+      g.syncTick();
+      const alerts = gas.mail.sent.slice(before).filter((m) => m.subject === '+$50.00 for Avery');
+      expect(alerts.map((m) => m.to).sort()).toEqual(['casey.thompson@example.com', 'parent@example.com']);
+    });
+  });
+});

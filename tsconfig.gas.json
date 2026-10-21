@@ -12,5 +12,5 @@
     "types": ["google-apps-script"]
   },
   "include": ["src/gas", "src/server", "src/shared"],
-  "exclude": ["**/*.test.ts", "src/server/memory.ts"]
+  "exclude": ["**/*.test.ts", "src/server/memory.ts", "src/server/test-helpers.ts"]
 }

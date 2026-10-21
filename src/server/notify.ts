@@ -2,7 +2,7 @@
  * Notification delivery (ARCHITECTURE.md §6): per-recipient prefs decide
  * topics, audience and channels; push goes to every device of the email
  * (invalid tokens are removed), email respects EMAIL_ENABLED and the daily
- * quota, SMS needs SMS_ENABLED + a configured sender + a phone. Each batch is
+ * quota (minus a reserve for sign-in codes), SMS needs SMS_ENABLED + a configured sender + a phone. Each batch is
  * logged. Delivery problems are logged, never thrown.
  */
 import { TABLES } from '../shared/schema';
@@ -53,6 +53,14 @@ function safely<T>(ctx: Ctx, what: string, fn: () => T, fallback: T): T {
 
 const DEVICE_COLUMNS = TABLES.Devices.headers;
 
+/**
+ * Daily email recipients kept back for sign-in codes. Codes and notification
+ * emails share one MailApp quota (about 100 a day on a free Gmail account), so
+ * without this one email announcement to every family would lock everyone out
+ * of signing in until the next day.
+ */
+export const SIGN_IN_EMAIL_RESERVE = 20;
+
 /** Deliver one notice to a list of recipient emails. */
 export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice, opts: DeliverOptions = {}): DeliveryCounts {
   const counts = zeroCounts();
@@ -86,7 +94,7 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
   let quotaSkipped = 0;
   if (mailTo.length > 0) {
     // One quota read per batch (each read is a service call in Apps Script).
-    let quota = safely(ctx, 'mailer.remainingQuota', () => ctx.s.mailer.remainingQuota(), 0);
+    let quota = safely(ctx, 'mailer.remainingQuota', () => ctx.s.mailer.remainingQuota(), 0) - SIGN_IN_EMAIL_RESERVE;
     const { html, text } = renderEmail({
       orgName: settings.pub.orgName,
       title: notice.title,
@@ -133,7 +141,10 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
     }
   }
 
-  const skipped = quotaSkipped > 0 ? ` (${quotaSkipped} email skipped: daily quota used up)` : '';
+  const skipped =
+    quotaSkipped > 0
+      ? ` (${quotaSkipped} email skipped: daily quota used up; the last ${SIGN_IN_EMAIL_RESERVE} are kept for sign-in codes)`
+      : '';
   ctx.log('notify', `${notice.topic}: ${notice.title} → push ${counts.push}, email ${counts.email}, sms ${counts.sms}${skipped}`);
   return counts;
 }
