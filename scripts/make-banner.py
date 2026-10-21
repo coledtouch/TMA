@@ -29,24 +29,22 @@ enclosed = white & ~background
 lab2, n2 = ndimage.label(enclosed)
 sizes = ndimage.sum(enclosed, lab2, index=range(1, n2 + 1))
 interior = lab2 == (int(np.argmax(sizes)) + 1)
-# Grow over the panel's dark border stroke, then fill everything inside it.
-panel = ndimage.binary_fill_holes(ndimage.binary_dilation(interior, iterations=7))
-# Smooth the panel edge into a soft alpha so its rounded corners are not jagged.
-panel_alpha = ndimage.gaussian_filter(panel.astype(np.float32), 0.6)
+# The panel is its white interior plus the dark border stroke around it, and
+# nothing outside the stroke, so no white from the original page survives.
+stroke = ndimage.binary_dilation(interior, iterations=8) & (lum < 128)
+panel = ndimage.binary_fill_holes(interior | stroke)
+# The anti-aliased rim just outside the stroke belongs to the black border:
+# it is drawn in black (with alpha from darkness) in both variants.
+rim = ndimage.binary_dilation(panel, iterations=3) & ~panel
 
 ink_alpha = np.clip((235.0 - lum) / 215.0, 0.0, 1.0)  # darkness -> opacity for the notes
 
 def render(ink_rgb, path):
     out = np.zeros((h, w, 4), dtype=np.float32)
-    ink = np.array(ink_rgb, dtype=np.float32)
+    ink = np.where(rim[..., None], np.array((20, 16, 16), np.float32), np.array(ink_rgb, np.float32))
     # Outside the panel: flat ink colour, alpha from darkness.
-    a_out = ink_alpha * (1.0 - panel_alpha)
-    # Inside the panel: original pixels, opaque.
-    a_in = panel_alpha
-    alpha = np.clip(a_out + a_in, 0.0, 1.0)
-    rgb = np.where(alpha[..., None] > 0,
-                   (ink * a_out[..., None] + img * a_in[..., None]) / np.maximum(alpha[..., None], 1e-6),
-                   0)
+    alpha = np.where(panel, 1.0, ink_alpha)
+    rgb = np.where(panel[..., None], img, ink)
     out[..., :3] = rgb
     out[..., 3] = alpha * 255
     # Crop to content with a small margin.
