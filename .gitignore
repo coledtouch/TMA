@@ -11,3 +11,6 @@ test-results/
 .env.*
 !.env.example
 .clasp.json
+
+# Agent worktrees (temporary isolated checkouts)
+.claude/worktrees/
