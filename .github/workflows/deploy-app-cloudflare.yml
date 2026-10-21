@@ -5,7 +5,9 @@
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
 # and these optional repository variables (Settings → Secrets and variables →
 # Actions → Variables). They are public: they end up in the app's JavaScript.
-#   VITE_API_URL   Apps Script web app URL (ends in /exec). Empty = demo app.
+#   VITE_API_URL   Apps Script web app URL (ends in /exec). When it is not set,
+#                  mytma.org uses TMA's test spreadsheet backend below; the demo
+#                  stays available at https://mytma.org/?demo.
 # Without the secrets the workflow still tests and builds, then skips the deploy.
 name: Deploy app to mytma.org (Cloudflare)
 
@@ -74,7 +76,8 @@ jobs:
       - name: Build the web app
         run: npm run build:web
         env:
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
+          # Test spreadsheet backend ("TMA App - Test Data"); override with the variable.
+          VITE_API_URL: ${{ vars.VITE_API_URL || 'https://script.google.com/macros/s/AKfycbxwPf9fdNK8kNu9objZgwTcANg-11Qgr2AiuIPzSxXXSQAe98T1EXPBQ2pU5sENTeYAFA/exec' }}
 
       # Same pinned Wrangler as the push Worker (workers/push/package-lock.json).
       - name: Install Wrangler
