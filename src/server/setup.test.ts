@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { SETTING_DEFAULTS, TABLE_ORDER } from '../shared/schema';
 import { createApp } from './app';
-import { createMemoryServices } from './memory';
+import { createDeterministicCrypto, createMemoryServices } from './memory';
 import { sampleData } from './sample-data';
+import { generateSecret } from './setup';
 import { harness, PARENT, TEST_NOW } from './test-helpers';
 
 describe('setup()', () => {
@@ -17,12 +18,27 @@ describe('setup()', () => {
     const settings = services.db.tables.Settings ?? [];
     expect(settings.map((r) => r.Key)).toEqual(Object.keys(SETTING_DEFAULTS));
     expect(settings.find((r) => r.Key === 'REMINDER_DAYS')).toMatchObject({ Value: '14, 7, 1', Notes: expect.stringContaining('reminders') });
+    expect(settings.find((r) => r.Key === 'PUSH_RELAY_URL')).toEqual({
+      Key: 'PUSH_RELAY_URL',
+      Value: 'https://tma-push.coleciprari.workers.dev',
+      Notes: 'Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.',
+    });
 
     const secret = services.secrets.get('TOKEN_SECRET');
     const second = app.setup();
     expect(second).toEqual({ createdTables: [], addedColumns: [], seeded: false, secretsInitialized: [] });
     expect(services.secrets.get('TOKEN_SECRET')).toBe(secret);
     expect(services.db.tables.Settings).toHaveLength(Object.keys(SETTING_DEFAULTS).length);
+  });
+
+  it('generateSecret makes distinct 64-hex secrets', () => {
+    const crypto = createDeterministicCrypto('secrets');
+    const a = generateSecret(crypto, 'PUSH_RELAY_SECRET');
+    const b = generateSecret(crypto, 'PUSH_RELAY_SECRET');
+    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    expect(b).toMatch(/^[0-9a-f]{64}$/);
+    expect(a).not.toBe(b);
+    expect(() => generateSecret({ ...crypto, hmacSha256Hex: () => 'short' }, 'TOKEN_SECRET')).toThrow(/TOKEN_SECRET/);
   });
 
   it('only adds missing settings and keeps what the treasurer typed', () => {

@@ -4,8 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api/client';
 import { App } from './App';
+import { exitDemo } from './lib/mode';
 import { disablePush, refreshPushRegistration } from './lib/push';
-import { fakeApi, makeBootstrap, type Handlers } from './test/fixtures';
+import { fakeApi, makeBootstrap, makeSettings, TEST_PUSH_PUBLIC_KEY, type Handlers } from './test/fixtures';
 
 vi.mock('./lib/push', () => ({
   getPushSupport: vi.fn(async () => 'unsupported'),
@@ -22,6 +23,12 @@ vi.mock('./lib/install', () => ({
 
 vi.mock('./components/PayPalCheckout', () => ({ PayPalCheckout: () => null }));
 
+vi.mock('./lib/mode', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./lib/mode')>()),
+  enterDemo: vi.fn(),
+  exitDemo: vi.fn(),
+}));
+
 /** A token shaped like the server's: base64url(JSON{e,v,x}) + "." + signature. */
 function tokenFor(email: string): string {
   const payload = btoa(JSON.stringify({ e: email, v: '1', x: 2_000_000_000 }))
@@ -34,8 +41,8 @@ function tokenFor(email: string): string {
 const EMAIL = 'parent@example.com';
 const CACHE_KEY = `tma.cache.${EMAIL}`;
 
-function renderApp(handlers: Handlers, token: string | null = tokenFor(EMAIL)) {
-  const api = fakeApi(handlers, 'live', token);
+function renderApp(handlers: Handlers, token: string | null = tokenFor(EMAIL), mode: 'demo' | 'live' = 'live') {
+  const api = fakeApi(handlers, mode, token);
   const utils = render(<App api={api} />);
   return { api, ...utils, user: userEvent.setup() };
 }
@@ -48,6 +55,7 @@ describe('App', () => {
 
   afterEach(() => {
     window.location.hash = '';
+    vi.unstubAllEnvs();
   });
 
   it('shows sign-in when signed out, then loads the household after signing in', async () => {
@@ -68,7 +76,28 @@ describe('App', () => {
     expect(await screen.findByRole('article', { name: 'Avery Thompson' })).toBeInTheDocument();
     expect(localStorage.getItem('tma.email')).toBe(EMAIL);
     expect(JSON.parse(localStorage.getItem(CACHE_KEY)!).data.me.email).toBe(EMAIL);
-    expect(refreshPushRegistration).toHaveBeenCalled();
+    expect(refreshPushRegistration).toHaveBeenCalledWith(api, TEST_PUSH_PUBLIC_KEY);
+  });
+
+  it('keeps the push subscription current: with the bootstrap key, and when the browser replaces it', async () => {
+    const { api } = renderApp({ 'me.bootstrap': () => makeBootstrap() });
+    await screen.findByRole('article', { name: 'Avery Thompson' });
+    await waitFor(() => expect(refreshPushRegistration).toHaveBeenCalledWith(api, TEST_PUSH_PUBLIC_KEY));
+    vi.mocked(refreshPushRegistration).mockClear();
+
+    act(() => {
+      window.dispatchEvent(new Event('tma:pushsubscriptionchange'));
+    });
+    expect(refreshPushRegistration).toHaveBeenCalledTimes(1);
+    expect(refreshPushRegistration).toHaveBeenCalledWith(api, TEST_PUSH_PUBLIC_KEY);
+  });
+
+  it('subscribes again with the new key when the server key changes', async () => {
+    const stale = makeBootstrap({ settings: makeSettings({ pushPublicKey: 'BOldKey' }) });
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: '2026-10-20T13:00:00.000Z', data: stale }));
+    const { api } = renderApp({ 'me.bootstrap': () => makeBootstrap() });
+    expect(refreshPushRegistration).toHaveBeenCalledWith(api, 'BOldKey');
+    await waitFor(() => expect(refreshPushRegistration).toHaveBeenLastCalledWith(api, TEST_PUSH_PUBLIC_KEY));
   });
 
   it('paints the cached bootstrap immediately, before the network answers', async () => {
@@ -192,6 +221,59 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: /Sign out/ }));
     expect(await screen.findByLabelText('Email address')).toBeInTheDocument();
     expect(screen.queryByText('Notification settings saved.')).not.toBeInTheDocument();
+  });
+
+  it('shows the demo strip with "Exit demo" while a live build runs the demo', async () => {
+    vi.stubEnv('VITE_API_URL', 'https://script.google.com/macros/s/abc/exec');
+    const { user } = renderApp({ 'me.bootstrap': () => makeBootstrap() }, tokenFor(EMAIL), 'demo');
+    await screen.findByRole('article', { name: 'Avery Thompson' });
+    const strip = screen.getByRole('note', { name: 'Demo' });
+    expect(strip).toHaveTextContent('Demo with made-up families');
+    await user.click(within(strip).getByRole('button', { name: 'Exit demo' }));
+    expect(exitDemo).toHaveBeenCalledTimes(1);
+  });
+
+  it('has no demo strip in the live app or in a demo-only build', async () => {
+    vi.stubEnv('VITE_API_URL', 'https://script.google.com/macros/s/abc/exec');
+    const live = renderApp({ 'me.bootstrap': () => makeBootstrap() });
+    await screen.findByRole('article', { name: 'Avery Thompson' });
+    expect(screen.queryByRole('note', { name: 'Demo' })).not.toBeInTheDocument();
+    live.unmount();
+
+    vi.stubEnv('VITE_API_URL', '');
+    renderApp({ 'me.bootstrap': () => makeBootstrap() }, tokenFor(EMAIL), 'demo');
+    await screen.findByRole('article', { name: 'Avery Thompson' });
+    expect(screen.queryByRole('note', { name: 'Demo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Exit demo' })).not.toBeInTheDocument();
+  });
+
+  it("uses the demo's own cache and leaves the live app's alone when the demo session ends", async () => {
+    const demoCache = `tma.demo.cache.${EMAIL}`;
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: '2026-10-20T13:00:00.000Z', data: makeBootstrap() }));
+    const demoData = makeBootstrap();
+    demoData.students = [];
+    localStorage.setItem(demoCache, JSON.stringify({ savedAt: '2026-10-20T13:00:00.000Z', data: demoData }));
+    localStorage.setItem('tma.email', EMAIL);
+    renderApp(
+      {
+        'me.bootstrap': () => {
+          throw new ApiError('UNAUTHORIZED', 'Please sign in again.');
+        },
+      },
+      tokenFor(EMAIL),
+      'demo',
+    );
+    expect(await screen.findByLabelText('Email address')).toBeInTheDocument();
+    expect(localStorage.getItem(demoCache)).toBeNull();
+    expect(localStorage.getItem(CACHE_KEY)).not.toBeNull();
+    expect(localStorage.getItem('tma.email')).toBe(EMAIL);
+  });
+
+  it('never paints the live cache in the demo', async () => {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ savedAt: '2026-10-20T13:00:00.000Z', data: makeBootstrap() }));
+    renderApp({ 'me.bootstrap': () => new Promise(() => {}) }, tokenFor(EMAIL), 'demo');
+    expect(screen.queryByRole('article', { name: 'Avery Thompson' })).not.toBeInTheDocument();
+    expect(screen.getByText('Loading your TMA info…')).toBeInTheDocument();
   });
 
   it('offers to reload when a new version is ready', async () => {

@@ -1,7 +1,8 @@
 import * as nodeCrypto from 'node:crypto';
+import { parseDate, parseTimeText } from '../server/util';
 import { TABLES } from '../shared/schema';
-import { createSheetStore, mapHeaders, toSheetValue } from './sheet-store';
-import { FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
+import { createSheetStore, mapHeaders, toSheetValue, WALL_CLOCK_FORMAT } from './sheet-store';
+import { FakeSheet, hostTimeZone, installGasFakes, instantIn, uninstallGasFakes, wallClockIn, type GasFakes } from './testing/fakes';
 
 let gas: GasFakes;
 
@@ -333,5 +334,113 @@ describe('SheetStore.overwrite', () => {
     const sheet = gas.spreadsheet.addSheet(FakeSheet.withRows('_Sent', [['Key', 'At'], ['k', 'a']]));
     store().overwrite('_Sent', []);
     expect(sheet.dump()).toEqual([['Key', 'At']]);
+  });
+});
+
+describe('SheetStore time zones', () => {
+  // The script zone is the host's (`new Date(y, m, d)` uses it, as in Apps Script).
+  // A spreadsheet zone ~14 hours away makes a missed conversion change the calendar day.
+  const FAR_ZONE = hostTimeZone() === 'Pacific/Kiritimati' ? 'Pacific/Pago_Pago' : 'Pacific/Kiritimati';
+  /** What Sheets' getValues() returns for a wall-clock value typed into a sheet in `zone`. */
+  const typedIn = (zone: string, year: number, month: number, day: number, hour = 0, minute = 0) =>
+    instantIn({ year, month, day, hour, minute, second: 0, ms: 0 }, zone);
+
+  it('reads typed dates and times with the sheet’s wall clock when the spreadsheet zone differs', () => {
+    gas.spreadsheet.timeZone = FAR_ZONE;
+    const typedDate = typedIn(FAR_ZONE, 2026, 10, 21);
+    // Without the fix the core would see another day.
+    expect(parseDate(typedDate)).not.toBe('2026-10-21');
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Ledger', [['Date', 'StudentID', 'Amount'], [typedDate, 'S1', 50]]));
+    gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [
+        ['ID', 'Date', 'Time', 'Title'],
+        ['E1', typedIn(FAR_ZONE, 2026, 12, 10), typedIn(FAR_ZONE, 1899, 12, 30, 19, 30), 'Winter Concert'],
+      ]),
+    );
+    const s = store();
+
+    const date = s.read('Ledger')[0].data.Date as Date;
+    expect([date.getFullYear(), date.getMonth() + 1, date.getDate(), date.getHours(), date.getMinutes()]).toEqual([2026, 10, 21, 0, 0]);
+    expect(parseDate(date)).toBe('2026-10-21');
+    const event = s.read('Events')[0].data;
+    expect(parseDate(event.Date)).toBe('2026-12-10');
+    expect(parseTimeText(event.Time)).toBe('7:30 PM');
+    expect(gas.formatDateCalls.every(([, zone, pattern]) => zone === FAR_ZONE && pattern === WALL_CLOCK_FORMAT)).toBe(true);
+  });
+
+  it('round-trips Dates the app writes (append and update); the sheet shows the script zone’s wall clock', () => {
+    gas.spreadsheet.timeZone = FAR_ZONE;
+    const sheet = gas.spreadsheet.addSheet(FakeSheet.withRows('Log', [['At', 'Kind', 'Detail']]));
+    const at = new Date('2026-10-21T14:05:06.789Z');
+    const s = store();
+    s.append('Log', [{ At: at, Kind: 'notify', Detail: 'x' }]);
+
+    const stored = sheet.raw(2, 1) as Date;
+    expect(wallClockIn(stored, FAR_ZONE)).toEqual(wallClockIn(at, hostTimeZone()));
+    expect((s.read('Log')[0].data.At as Date).getTime()).toBe(at.getTime());
+
+    const later = new Date('2026-12-31T23:59:59.000Z');
+    s.update('Log', 2, { At: later });
+    expect((s.read('Log')[0].data.At as Date).getTime()).toBe(later.getTime());
+    // Text and invalid dates are written as before.
+    s.update('Log', 2, { At: new Date('nope'), Detail: '2026-10-21' });
+    expect(sheet.raw(2, 1)).toBe('');
+    expect(sheet.raw(2, 3)).toBe('2026-10-21');
+  });
+
+  it('looks the zones up once, converts each distinct instant once, and leaves Dates alone when the zones match', () => {
+    const same = new Date(2026, 9, 21);
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Ledger', [['Date', 'StudentID'], [same, 'S1']]));
+    const plain = store();
+    expect(plain.read('Ledger')[0].data.Date).toBe(same);
+    plain.append('Ledger', [{ Date: same, StudentID: 'S2' }]);
+    expect(gas.spreadsheet.getSheetByName('Ledger')!.raw(3, 1)).toBe(same);
+    expect(gas.formatDateCalls).toHaveLength(0);
+
+    gas.spreadsheet.timeZone = FAR_ZONE;
+    gas.spreadsheet.timeZoneLookups = 0;
+    const day = typedIn(FAR_ZONE, 2026, 10, 1);
+    gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Payments', [
+        ['Date', 'StudentID', 'Amount'],
+        [day, 'S1', 5],
+        [day, 'S2', 6],
+        [day, 'S3', 7],
+        [typedIn(FAR_ZONE, 2026, 10, 2), 'S4', 8],
+      ]),
+    );
+    const s = store();
+    const dates = s.read('Payments').map((r) => parseDate(r.data.Date));
+    expect(dates).toEqual(['2026-10-01', '2026-10-01', '2026-10-01', '2026-10-02']);
+    s.read('Ledger'); // two rows, one instant
+    s.invalidate();
+    s.read('Payments');
+    // Two distinct Payments instants + one Ledger instant, even after re-reading.
+    expect(gas.formatDateCalls).toHaveLength(3);
+    expect(gas.spreadsheet.timeZoneLookups).toBe(1);
+  });
+
+  it('keeps Sheets’ values when the spreadsheet zone cannot be read; converts when only the script zone is unknown', () => {
+    const typed = typedIn(FAR_ZONE, 2026, 10, 21);
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Ledger', [['Date', 'StudentID'], [typed, 'S1']]));
+    vi.spyOn(gas.spreadsheet, 'getSpreadsheetTimeZone').mockImplementation(() => {
+      throw new Error('Service error: Spreadsheets');
+    });
+    expect(store().read('Ledger')[0].data.Date).toBe(typed);
+    vi.restoreAllMocks();
+
+    gas.spreadsheet.timeZone = FAR_ZONE;
+    vi.spyOn(Session, 'getScriptTimeZone').mockImplementation(() => {
+      throw new Error('nope');
+    });
+    expect(parseDate(store().read('Ledger')[0].data.Date)).toBe('2026-10-21');
+  });
+
+  it('toSheetValue applies the date conversion to valid Dates only', () => {
+    const shift = (d: Date) => new Date(d.getTime() + 1000);
+    const d = new Date('2026-10-21T00:00:00Z');
+    expect((toSheetValue(d, shift) as Date).getTime()).toBe(d.getTime() + 1000);
+    expect(toSheetValue(new Date('nope'), shift)).toBe('');
+    expect(toSheetValue('2026-10-21', shift)).toBe('2026-10-21');
   });
 });

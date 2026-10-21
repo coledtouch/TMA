@@ -10,13 +10,14 @@ costs **$0**, and needs no programming, just careful clicking. Do it on a comput
 | [2](#2-fill-in-the-settings-tab) | Fill in the Settings tab | 5 min |
 | [3](#3-deploy-the-web-app-the-apps-server) | Deploy the web app (the app's server) | 5 min |
 | [4](#4-turn-on-the-schedules) | Turn on the schedules | 2 min |
-| [5](#5-push-notifications-firebase) | Push notifications (Firebase) | 10 min |
+| [5](#5-push-notifications-cloudflare-free) | Push notifications (Cloudflare, free). Already running: just check it. | 2 min |
 | [6](#6-online-payments-paypal) | Online payments (PayPal). Optional, can be done later. | 15 min plus PayPal's approval |
 | [7](#7-host-the-app-on-github-pages) | Put the app online (GitHub Pages) | 10 min |
 | [8](#8-optional-text-messages-twilio) | Text messages (Twilio). Optional, **costs money**. | 20 min plus carrier approval |
 | [9](#9-go-live-checklist-and-test-plan) | Go-live checklist and test | 30 min |
 | [10](#10-updating-the-app-later) | Updating the app later | |
 | [11](#11-troubleshooting) | Troubleshooting | |
+| [Test](#test-spreadsheet) | Optional: try the real app with the test spreadsheet first | 15 min |
 
 **How families sign in.** There are no passwords. A parent types their email, TMA's Gmail sends a
 6-digit code ("Your TMA sign-in code: 123456"), and they type it in. Codes expire after 10 minutes.
@@ -27,8 +28,8 @@ but they see **no money information** until the treasurer verifies the household
 
 ## 0. Before you start
 
-* **Use TMA's Google account** (`timberlanemusictma@gmail.com`) for everything: the spreadsheet,
-  the script and Firebase. Then nothing depends on one volunteer's personal account.
+* **Use TMA's Google account** (`timberlanemusictma@gmail.com`) for everything: the spreadsheet
+  and the script. Then nothing depends on one volunteer's personal account.
 * **Use a browser window signed in to only that account.** Apps Script gets confused when several
   Google accounts are signed in at once. In Chrome, create a separate profile for TMA (click the
   profile picture at the top right → *Add*), or use a private/incognito window.
@@ -67,10 +68,12 @@ but they see **no money information** until the treasurer verifies the household
       is TMA's own script running in TMA's own account.
    3. Google lists what the script may do. In plain words: view and change **only this
       spreadsheet** (not the rest of TMA's Drive), show its menu, **send email as TMA**, connect to
-      outside services (PayPal, Firebase, Twilio), **run on a schedule**, and see which Google
-      account is using it. Click **Allow**.
+      outside services (PayPal, TMA's push Worker, Twilio), **run on a schedule**, and see which
+      Google account is using it. Click **Allow**.
 
-   The *Execution log* at the bottom should end with *Execution completed*.
+   The *Execution log* at the bottom should end with *Execution completed*. Just before that it
+   says *Push: linked this sheet to the push Worker* and *Push: saved the Worker's public key*.
+   If it shows a ⚠ line about push instead, carry on and see [step 5](#5-push-notifications-cloudflare-free).
 7. Go back to the spreadsheet tab and **reload the page**. After a few seconds a **TMA App** menu
    appears next to *Help*, and the tabs Families, Students, Ledger, Activities, Enrollments,
    Payments, Redemptions, Announcements, Events and Settings exist. (A few system tabs are hidden.
@@ -85,6 +88,8 @@ sheet is still empty**: *File → Make a copy*, name it **TMA App – practice**
 *Extensions → Apps Script*, choose **setupTmaWithSampleData** and **Run** (authorize again). The copy
 fills up with made-up families and trips. **Never run setupTmaWithSampleData on the real
 spreadsheet.** It only fills tabs that are empty, but there's no reason to risk it.
+To try the **real app** (real emails and notifications) on sample data, see
+[Test spreadsheet](#test-spreadsheet).
 
 ## 2. Fill in the Settings tab
 
@@ -144,75 +149,118 @@ announcements) and sends reminders once a day around 8 AM.
 
 Running *Install schedules* again is safe: it replaces the old schedules instead of adding more.
 
-## 5. Push notifications (Firebase)
+## 5. Push notifications (Cloudflare, free)
 
-Push notifications go through **Firebase Cloud Messaging**, which is free on Firebase's
-no-cost **Spark** plan (no credit card needed). You'll collect three things:
+Push notifications are sent by a small program that TMA runs on **Cloudflare's free Workers plan**.
+These docs call it the **push Worker**. It **is already running** at
+`https://tma-push.coleciprari.workers.dev`, so there is nothing to sign up for or buy.
 
-* the **web config** → `VITE_FIREBASE_CONFIG` (public, goes into GitHub in step 7),
-* the **Web Push key** → `VITE_FIREBASE_VAPID_KEY` (public, goes into GitHub in step 7),
-* a **service-account key** → Script Property `FCM_SERVICE_ACCOUNT` (**secret**, goes into Apps Script).
+The push Worker holds **no family information**. The phones' notification addresses stay in TMA's
+spreadsheet (the hidden **Devices** tab). For each notification, the script hands the Worker the
+message and the phone's address. The Worker locks the message so only that phone can read it and
+passes it to Apple, Google, Mozilla or Microsoft, who deliver it.
 
-**A. Create the project**
+**A. What setup already did.** The Settings key `PUSH_RELAY_URL` already holds the Worker's address.
+When you ran **setupTma** in step 1, the script:
 
-1. Go to **https://console.firebase.google.com** (signed in as the TMA account).
-2. **Create a project** (it may say *Get started by setting up a Firebase project*). Name it
-   `TMA Family App`. Google Analytics isn't needed. Turn it off. Click **Create project**.
+1. made a long random password and saved it as the Script Property `PUSH_RELAY_SECRET`,
+2. introduced itself to the Worker with that password. The **first** spreadsheet to do this is the
+   only one the Worker takes orders from afterwards,
+3. saved the Worker's public key as the Script Property `PUSH_PUBLIC_KEY`. The app gives this key to
+   phones when parents turn on notifications.
 
-**B. Register the web app and copy its config**
+If the Worker couldn't be reached at that moment, nothing is broken: run **TMA App → Set up / repair
+tabs** again later. It's always safe.
 
-1. On the project's home page click **+ Add app** → the **Web** icon (`</>`).
-2. Nickname: `TMA web`. Leave *Firebase Hosting* unticked (unless you choose Firebase Hosting in
-   step 7). Click **Register app**.
-3. The page shows code like this:
+**B. Check it.** **TMA App → Status** should include:
 
-   ```js
-   const firebaseConfig = {
-     apiKey: "AIza…",
-     authDomain: "tma-family-app.firebaseapp.com",
-     projectId: "tma-family-app",
-     storageBucket: "tma-family-app.firebasestorage.app",
-     messagingSenderId: "123456789012",
-     appId: "1:123456789012:web:abc123…"
-   };
-   ```
+```
+Push Worker: https://tma-push.coleciprari.workers.dev
+Push Worker health: reachable ✓, linked to a sheet ✓, keys ✓
+Push public key (PUSH_PUBLIC_KEY): saved ✓
+Push notifications: configured
+```
 
-4. Turn it into **one line of JSON**: keep only the part from `{` to `}`, put **double quotes**
-   around every name, and remove the line breaks:
+You can also open `https://tma-push.coleciprari.workers.dev/health` in any browser. It should show
+`"registered":true` and `"hasKeys":true`.
 
-   ```json
-   {"apiKey":"AIza…","authDomain":"tma-family-app.firebaseapp.com","projectId":"tma-family-app","storageBucket":"tma-family-app.firebasestorage.app","messagingSenderId":"123456789012","appId":"1:123456789012:web:abc123…"}
-   ```
+* A ✗, or *not saved yet*: run **TMA App → Set up / repair tabs**, then check Status again.
+* *unreachable*: check that `PUSH_RELAY_URL` in the Settings tab is blank or the address above, and
+  try again in a few minutes.
+* Set up says **"The push Worker is already linked to a different Apps Script secret"**: another
+  spreadsheet (for example the [test spreadsheet](#test-spreadsheet)) linked to the Worker first.
+  Follow [E](#e-linking-a-different-spreadsheet-or-rotating-the-keys) below.
 
-   **This is `VITE_FIREBASE_CONFIG`.** These values are not secret. Every Firebase website contains
-   them. You can find them again later under ⚙ **Project settings → General → Your apps**.
+Nothing about push goes into GitHub. Phones can turn on notifications as soon as the app is online
+(step 7).
 
-**C. Generate the Web Push key**
+**C. iPhone and iPad.** Apple only delivers web notifications to apps **added to the Home Screen**, on
+**iOS/iPadOS 16.4 or later**. Parents open the app in **Safari**, tap **Share → Add to Home Screen**,
+open TMA from the Home Screen, and then turn on notifications under *More → Notifications*. The app
+shows these steps on an iPhone. On Android and computers, notifications work in Chrome, Edge, Firefox
+and Safari without installing anything.
 
-1. Click ⚙ (next to *Project Overview*) → **Project settings** → the **Cloud Messaging** tab.
-2. Check that **Firebase Cloud Messaging API (V1)** says **Enabled**. If it says Disabled, click
-   the ⋮ menu next to it → *Manage API in Google Cloud Console* → **Enable**.
-3. Scroll to **Web configuration → Web Push certificates** → **Generate key pair**. Copy the long
-   *Key pair* value. **This is `VITE_FIREBASE_VAPID_KEY`** (a public key).
+**D. How the Worker gets deployed** (for whoever maintains the code). The Worker's code is in
+`workers/push` ([its README](../workers/push/README.md)). GitHub deploys it with the workflow
+`.github/workflows/deploy-push-worker.yml` whenever that folder changes on `main`, or by hand
+(**Actions → Deploy push Worker (Cloudflare) → Run workflow**). The workflow needs two repository
+secrets (*Settings → Secrets and variables → Actions → **Secrets***), which are **already set up for
+TMA**:
 
-**D. Let the script send notifications (service-account key)**
+* `CLOUDFLARE_API_TOKEN`: a Cloudflare API token made from the *Edit Cloudflare Workers* template.
+* `CLOUDFLARE_ACCOUNT_ID`: the ID of the Cloudflare account the Worker runs in.
 
-1. Still in **Project settings**, open the **Service accounts** tab → **Generate new private key** →
-   **Generate key**. A `.json` file downloads.
-2. Open the file with Notepad (Windows) or TextEdit (Mac). Select everything and copy it. It starts
-   with `{ "type": "service_account", "project_id": …`.
-3. In Apps Script: **Project Settings** (⚙) → scroll to **Script Properties** → **Add script property**:
-   * Property: `FCM_SERVICE_ACCOUNT`
-   * Value: paste the whole file contents
-   * **Save script properties**.
-4. **Delete the downloaded file** and empty the trash/recycle bin.
+The Worker stays well inside Cloudflare's free plan: the script sends it at most 5 notifications per
+request, and it stores nothing but its own key pair and a scrambled (hashed) copy of the password.
 
-> ⚠ **Treat this key like a password.** Anyone who has it could send notifications to TMA's
-> families. If it ever leaks, delete it in the Google Cloud console (*IAM & Admin → Service
-> accounts* → the `firebase-adminsdk` account → *Keys* → delete) and generate a new one.
+#### E. Linking a different spreadsheet, or rotating the keys
 
-**E. Check:** **TMA App → Status** shows *Push notifications (Firebase): configured*. Phones
-can register only after step 7, when the app is rebuilt with the two `VITE_FIREBASE_…` values.
+The Worker trusts the first spreadsheet that links to it. Do this when you want **another
+spreadsheet** to send the notifications (for example, moving from the test spreadsheet to the real
+one), or when the password may have leaked or the Apps Script project was copied. You need access to
+the Cloudflare account the Worker runs in.
+
+1. **In every spreadsheet that is linked now**: *Extensions → Apps Script → Project Settings (⚙) →
+   Script Properties*, delete `PUSH_RELAY_SECRET` and `PUSH_PUBLIC_KEY`, and **Save script
+   properties**. Do this first. A spreadsheet that still has the old password links itself again
+   automatically the next time it sends a notification.
+2. **In Cloudflare** (dash.cloudflare.com): *Storage & Databases → KV* → the `TMA_PUSH` namespace →
+   delete the two keys `relay:secret-sha256` and `vapid:v1`.
+3. **Wait about 5 minutes.** The Worker remembers the old values for that long.
+4. **In the spreadsheet that should send notifications**: **TMA App → Set up / repair tabs**. It makes
+   a new password, links it, and the Worker makes a new key pair. Check with **TMA App → Status**
+   (see B).
+
+Phones that had notifications on were set up with the old key, so the Worker now reports them as
+expired and the script removes them from the Devices tab. Each of those phones signs up again with the
+new key by itself **the next time the app is opened**. If a phone can't, the app shows *Turn on
+notifications* again.
+
+#### F. Moving the Worker to another Cloudflare account
+
+For example, to a Cloudflare account that belongs to TMA. Someone comfortable with GitHub should do
+this.
+
+1. Create a free Cloudflare account at **https://dash.cloudflare.com/sign-up**. Open
+   **Workers & Pages** once and, if asked, choose a `workers.dev` subdomain (it becomes part of the
+   Worker's address).
+2. *Storage & Databases → KV → Create* a namespace named `TMA_PUSH`. Copy its **ID**.
+3. In the GitHub repository, edit `workers/push/wrangler.toml`: under `[[kv_namespaces]]`, replace the
+   `id = "…"` value with the new ID. Commit to `main`.
+4. In Cloudflare: *My Profile → API Tokens → Create Token* → **Edit Cloudflare Workers** template →
+   choose the new account → *Continue to summary* → **Create Token**. Copy the token. Copy the
+   **Account ID** too (*Workers & Pages → Overview*, right-hand column).
+5. In GitHub: *Settings → Secrets and variables → Actions → Secrets*: update `CLOUDFLARE_API_TOKEN`
+   and `CLOUDFLARE_ACCOUNT_ID` with the new values.
+6. *Actions → Deploy push Worker (Cloudflare) → Run workflow* (branch `main`). When it finishes, the
+   run's summary shows the new address, `https://tma-push.<subdomain>.workers.dev`, and its health check.
+7. In the spreadsheet's **Settings** tab, set `PUSH_RELAY_URL` to the new address.
+8. In Apps Script → *Project Settings → Script Properties*, delete `PUSH_RELAY_SECRET` and
+   `PUSH_PUBLIC_KEY` (they belong to the old Worker). Then **TMA App → Set up / repair tabs**, and
+   check **TMA App → Status** shows the new address with ✓s.
+9. Phones follow the new key by themselves the next time the app is opened, as in E.
+10. Once everything works, delete the old Worker in the old account (*Workers & Pages → tma-push →
+    Settings → Delete*).
 
 ## 6. Online payments (PayPal)
 
@@ -278,46 +326,35 @@ contains no secrets, so a public repository is fine.
 
 1. In the repository on github.com: **Settings → Pages → Build and deployment → Source:
    GitHub Actions**.
-2. **Settings → Secrets and variables → Actions → Variables** tab → **New repository variable**,
-   three times:
+2. **Settings → Secrets and variables → Actions → Variables** tab → **New repository variable**:
 
    | Name | Value |
    | --- | --- |
    | `VITE_API_URL` | The Web app URL from step 3 (ends in `/exec`) |
-   | `VITE_FIREBASE_CONFIG` | The one-line JSON from step 5B |
-   | `VITE_FIREBASE_VAPID_KEY` | The key pair from step 5C |
 
-   Use **Variables**, not *Secrets*. These values are public (they end up in the app's code anyway),
-   and the workflow reads them as variables.
+   Use **Variables**, not *Secrets*. This value is public (it ends up in the app's code anyway),
+   and the workflow reads it as a variable. Push notifications need no variable: the app gets the
+   push Worker's key from the script.
 3. Open the **Actions** tab → **Deploy to GitHub Pages** → **Run workflow** → branch `main` →
    **Run workflow**. (It also runs by itself whenever something is pushed to `main`.) Wait for the
    green check, about 2–3 minutes.
 4. The app is now at **`https://<owner>.github.io/<repo>/`**, for example
    `https://coledtouch.github.io/TMA/`. The address is also shown under *Settings → Pages*.
 5. In the spreadsheet's **Settings** tab set `APP_URL` to that address (with the `/` at the end).
-6. Open the address on your phone. The sign-in page should **not** show the *Demo* box. If it
-   does, the variables weren't picked up: check their names and run the workflow again.
+6. Open the address on your phone. The sign-in page should **not** show the *Demo* box (only a
+   small *See a demo with sample data* link at the bottom). If it shows the Demo box, the variable
+   wasn't picked up: check its name and run the workflow again.
 
-**Whenever you change one of these variables, run the workflow again.** The values are built into
-the app.
+**Whenever you change `VITE_API_URL`, run the workflow again.** The value is built into the app.
 
-**Without any variables, the site is the demo.** That's useful as a prototype link for the board.
+**Without the variable, the whole site is the demo.** With it, the demo is still one link away:
+**`https://<owner>.github.io/<repo>/?demo`** (for example `https://coledtouch.github.io/TMA/?demo`)
+opens the demo with made-up families. That browser stays in the demo, with a strip at the top
+saying so, until someone taps **Exit demo**. Demo sign-ins and data are kept apart from the real
+app's. Share the `?demo` link with the board as the prototype.
 
-**Alternative: Firebase Hosting** (also free on the Spark plan; you get `https://<project-id>.web.app`).
-This needs Node.js on your computer and a terminal:
-
-```bash
-npm ci
-# Create a file named .env.production.local with the three lines:
-#   VITE_API_URL=…
-#   VITE_FIREBASE_CONFIG={"apiKey":"…",…}
-#   VITE_FIREBASE_VAPID_KEY=…
-npm run build:web
-npx firebase-tools login
-npx firebase-tools init hosting   # use your existing project; public directory: dist; single-page app: No;
-                                  # GitHub deploys: No; don't overwrite dist/index.html
-npx firebase-tools deploy --only hosting
-```
+*For developers:* any static host works too. Build with `VITE_API_URL` set (`npm run build:web`) and
+upload the `dist/` folder.
 
 ## 8. Optional: text messages (Twilio)
 
@@ -341,11 +378,15 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 **Checklist**
 
 - [ ] **TMA App → Status** shows: a web app URL, your `APP_URL`, both schedules ✓, `TOKEN_SECRET`
-      among the secrets set, push *configured*, PayPal as intended, email *on*.
+      and `PUSH_RELAY_SECRET` among the secrets set, the push Worker *reachable ✓, linked to a sheet ✓,
+      keys ✓*, push *configured*, PayPal as intended, email *on*.
+- [ ] The push Worker is linked to **this** spreadsheet, not the test one (see
+      [Test spreadsheet](#test-spreadsheet)): *Send me a test notification* reaches your phone.
 - [ ] Settings: `ADMIN_EMAILS`, `SUPPORT_EMAIL`, `OTHER_PAYMENT_INSTRUCTIONS` and `DONATE_URL` are
       right, and `FEE_PERCENT` matches TMA's actual PayPal rate.
 - [ ] Data imported, and the first *Run sync now* done (see [SHEET.md](SHEET.md#importing-the-existing-spreadsheet)).
-- [ ] The app's address opens **without** the Demo box.
+- [ ] The app's address opens **without** the Demo box, and `VITE_API_URL` is this spreadsheet's
+      `/exec` URL (not the test spreadsheet's).
 - [ ] Only the treasurer and one or two board members can edit the spreadsheet (*Share* button).
 
 **Test plan** (two people, two phones, about 30 minutes)
@@ -393,6 +434,9 @@ Do steps 2 and 3 together. The menu and schedules use the saved code right away,
 using the previously deployed version until step 3. If Google asks for permissions again, run
 **setupTma** once from the editor and allow.
 
+**The push Worker (Cloudflare)** updates by itself when its code in `workers/push` changes on
+`main` ([step 5D](#5-push-notifications-cloudflare-free)). Nothing to do in the spreadsheet.
+
 *For developers:* change the TypeScript in `src/`, run `npm run build:gas`, and commit the new
 `apps-script/Code.js` with your change. CI fails if you forget.
 
@@ -407,8 +451,19 @@ using the previously deployed version until step 3. If Google asks for permissio
 * **"Notifications are blocked."** The parent tapped *Don't Allow* once. iPhone: *Settings app →
   Notifications → TMA → Allow Notifications*. Android/computer: the site settings (lock icon next
   to the address) → *Notifications → Allow*.
-* **"Phone notifications aren't set up for TMA yet."** The app was built without the
-  `VITE_FIREBASE_…` variables. Do step 7 again.
+* **"Phone notifications aren't set up for TMA yet."** The spreadsheet isn't linked to the push
+  Worker yet, or `PUSH_RELAY_URL` in Settings isn't an `https://` address. Run **TMA App → Set up /
+  repair tabs** and check **TMA App → Status** ([step 5B](#5-push-notifications-cloudflare-free)),
+  then close and reopen the app.
+* **"This browser's push service isn't supported."** The browser uses a notification service the
+  push Worker doesn't deliver to (some privacy-focused browsers do). Use Chrome, Safari, Firefox or
+  Edge.
+* **Set up says "⚠ … already linked to a different Apps Script secret".** Another spreadsheet (often
+  the test one) linked to the push Worker first. Follow
+  [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys).
+* **Status says "Push Worker health: unreachable".** Check `PUSH_RELAY_URL` in Settings (blank means
+  the standard address), and open `<that address>/health` in a browser. If Cloudflare is having a
+  problem, notifications resume by themselves once it's fixed; email still works meanwhile.
 * **The test works but balance notifications don't arrive.** Check that the schedules are installed
   (*TMA App → Status*), that the household **and** the student are `Active`, and that the parent
   hasn't turned off *Activity fund changes* in *More → Notifications*. The very first sync only records
@@ -442,9 +497,6 @@ using the previously deployed version until step 3. If Google asks for permissio
 * **Where to see what happened:** the hidden **Log** tab (*View → Hidden sheets*), *Board tools →
   Recent activity* in the app, and **Executions** in the Apps Script sidebar for errors.
   Google may also email the TMA account a "Summary of failures".
-* **Firebase says "Key creation is disabled".** This only happens with Google Workspace accounts that
-  block service-account keys. A Workspace admin can allow keys for this one project, or create the
-  Firebase project under the free Gmail account instead.
 
 **PayPal**
 
@@ -465,6 +517,41 @@ using the previously deployed version until step 3. If Google asks for permissio
 * **A parent changed email address.** Update the email on their Families row. Signing in with the
   new address then opens their household.
 
+## Test spreadsheet
+
+Before real families use the app, TMA can try the **real app** (real sign-in emails, real phone
+notifications) on a **test copy** of the spreadsheet. One already exists in the TMA volunteer's
+Google Drive. It holds the made-up sample families plus a test administrator household (its email
+is in that copy's `ADMIN_EMAILS`, so it can try *Board tools*). No real family's information is in it.
+
+**Connect it** the same way as the real one:
+
+1. Open the test spreadsheet, signed in to the Google account that owns it, and do
+   [step 1](#1-create-the-spreadsheet-and-add-the-script), items 2 to 6: *Extensions → Apps Script*,
+   paste `Code.js` and `appsscript.json`, and run **setupTma**. (Not *setupTmaWithSampleData*: the
+   sample data is already there.) This also links the test copy to the push Worker.
+2. Check its **Settings** tab ([step 2](#2-fill-in-the-settings-tab)): `ADMIN_EMAILS` lists the test
+   administrator's email.
+3. Deploy it as a web app ([step 3](#3-deploy-the-web-app-the-apps-server)) and copy its `/exec` URL.
+4. Optional: **TMA App → Install schedules** ([step 4](#4-turn-on-the-schedules)), so balance
+   changes and reminders go out by themselves.
+5. In the GitHub repository: *Settings → Secrets and variables → Actions → Variables* → set
+   `VITE_API_URL` to that `/exec` URL (create it, or edit it with the pencil icon). Then *Actions →
+   Deploy to GitHub Pages → Run workflow* ([step 7](#7-host-the-app-on-github-pages)).
+6. In the test spreadsheet's Settings, set `APP_URL` to `https://coledtouch.github.io/TMA/`.
+
+Now **`https://coledtouch.github.io/TMA/`** is the real app working on the test spreadsheet, and
+**`https://coledtouch.github.io/TMA/?demo`** still opens the demo with made-up families, for anyone
+who just wants to look around. While the test copy is connected, sign-in codes and notification
+emails come from the Google account that owns it.
+
+**Moving to the real spreadsheet later.** Set up the real spreadsheet (steps 1 to 4), change
+`VITE_API_URL` to **its** `/exec` URL and run the Pages workflow again. Testers then have to sign in
+again, because their sign-ins belonged to the test copy. The push Worker is still linked to the test
+copy, so the real spreadsheet's setup shows *⚠ … already linked to a different Apps Script secret*.
+Follow [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys) to link the real
+spreadsheet instead. Testers who had notifications on get them again once they have signed in again.
+
 ## Script Properties (secrets)
 
 Secrets never go in the spreadsheet. They live in **Apps Script → Project Settings (⚙) → Script
@@ -476,7 +563,8 @@ keep spreadsheet editors to a minimum.
 | --- | --- | --- |
 | `TOKEN_SECRET` | Always (**created automatically** by setup) | Signs everyone's sign-in sessions. Don't share it. Changing it signs everyone out. If it's ever deleted, *TMA App → Set up / repair tabs* creates a new one. |
 | `PAYPAL_SECRET` | Online payments | The PayPal app's Secret, from the same app (sandbox or live) as `PAYPAL_CLIENT_ID`. |
-| `FCM_SERVICE_ACCOUNT` | Push notifications | The whole Firebase service-account JSON file (step 5D). |
+| `PUSH_RELAY_SECRET` | Push notifications (**created automatically** by setup) | The password the script uses with the push Worker (step 5). Don't share it. To replace it, follow [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys); just deleting it isn't enough. |
+| `PUSH_PUBLIC_KEY` | Push notifications (**saved automatically** by setup) | The push Worker's public key, which phones subscribe with. Not secret. If `PUSH_RELAY_URL` changes, delete it and run *Set up / repair tabs*. |
 | `TWILIO_ACCOUNT_SID` | Text messages | From the Twilio console. |
 | `TWILIO_AUTH_TOKEN` | Text messages | From the Twilio console. |
 | `TWILIO_FROM` | Text messages | The Twilio number (`+16035550123`) or a Messaging Service SID (`MG…`). |
@@ -497,7 +585,9 @@ The current figures are on Google's [Apps Script quotas](https://developers.goog
 page, and Google changes them from time to time.
 
 **What this means for ~300 families on a free Gmail account.** Push notifications don't count
-toward the email limit, so the more families turn on push, the better. The app always keeps the
+toward the email limit, so the more families turn on push, the better. The script hands them to the
+push Worker 5 at a time, so even a notification to every family's phones uses only a few hundred of
+the daily calls to outside services. (The Worker's own free plan allows 100,000 requests a day.) The app always keeps the
 last **20** emails of each day for sign-in codes: once fewer than 20 remain, notification emails
 are skipped (the Log tab says how many), and only sign-in codes are sent. Even so, one announcement
 sent **by email** to everyone uses most of the day's quota, leaving room for only about 20

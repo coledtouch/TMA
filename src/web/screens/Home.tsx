@@ -63,33 +63,34 @@ export function Home() {
 }
 
 function HomeNudges() {
-  const { api, refresh } = useApp();
+  const { api, data, refresh } = useApp();
   const toast = useToast();
   const install = useInstallPrompt();
   const [support, setSupport] = useState<PushSupport | null>(null);
   const [busy, setBusy] = useState(false);
+  const publicKey = data.settings.pushPublicKey ?? '';
 
   useEffect(() => {
     let alive = true;
-    getPushSupport({ mode: api.mode })
+    getPushSupport({ mode: api.mode, publicKey })
       .then((s) => alive && setSupport(s))
       .catch(() => alive && setSupport('unsupported'));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [api.mode, publicKey]);
 
   async function turnOn() {
     setBusy(true);
     try {
-      const res = await enablePush(api);
+      const res = await enablePush(api, publicKey);
       if (res.ok) {
         setSupport('enabled');
         toast("Notifications are on. We'll keep you posted.");
         void refresh({ force: true });
       } else {
         toast(res.reason, 'error');
-        setSupport(await getPushSupport({ mode: api.mode }).catch(() => 'unsupported' as const));
+        setSupport(await getPushSupport({ mode: api.mode, publicKey }).catch(() => 'unsupported' as const));
       }
     } catch (err) {
       toast(errorMessage(err), 'error');

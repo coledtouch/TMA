@@ -5,8 +5,10 @@
  * a fake gateway; push notifications become in-app banners ('tma:push' window
  * events) and, when the browser allows it, real notifications.
  *
- * Loaded lazily by src/web/api/client.ts only when VITE_API_URL is empty, so
- * none of this ships to families using the live app.
+ * Loaded lazily by src/web/api/client.ts only in demo mode (a build without
+ * VITE_API_URL, or a live build after "?demo"; see src/web/lib/mode.ts), so
+ * families using the live app never download it. Everything it stores uses the
+ * demo's own localStorage keys ('tma.demo.…'), never the live app's.
  */
 import type { TableName } from '../shared/schema';
 import { TABLES } from '../shared/schema';
@@ -26,9 +28,11 @@ import { createFakePaymentGateway, createMemoryServices, type MemoryDb, type Mem
 import { sampleData } from '../server/sample-data';
 import type { App, CellValue, PushResult, PushSender, RowData } from '../server/services';
 import { idKey, nyDate } from '../server/util';
-import { ApiError, type ApiClient } from '../web/api/client';
+import { ApiError, persistToken, readStoredToken, type ApiClient } from '../web/api/client';
 import { DEMO_TOKEN_PREFIX, forgetDemoPushToken } from '../web/lib/push';
-import { getItem, removeItem, setItem, STORAGE_KEYS } from '../web/lib/storage';
+import { DEMO_DB_KEY, getItem, removeItem, setItem } from '../web/lib/storage';
+
+export { DEMO_DB_KEY };
 
 export interface DemoOutboxItem {
   at: string;
@@ -73,7 +77,6 @@ declare global {
   }
 }
 
-export const DEMO_DB_KEY = 'tma.demo.db.v1';
 const DEMO_DB_VERSION = 1;
 /** Sample dates are relative to the seed day; start fresh when a saved demo gets this old. */
 const DEMO_MAX_AGE_DAYS = 30;
@@ -252,6 +255,8 @@ export function createDemoClient(options: DemoClientOptions = {}): DemoClient {
 
     const push: PushSender = {
       enabled: () => true,
+      // Demo devices register "demo-…" tokens and never subscribe the browser, so there is no key.
+      publicKey: () => '',
       send(tokens, message): PushResult[] {
         const owners = new Map<string, string>();
         for (const row of services?.store.read('Devices') ?? []) {
@@ -356,10 +361,7 @@ export function createDemoClient(options: DemoClientOptions = {}): DemoClient {
     return new Promise((resolve) => setTimeout(resolve, ms > 0 ? ms : 0));
   };
 
-  let token: string | null = (() => {
-    const stored = getItem(STORAGE_KEYS.session);
-    return stored && stored.trim() ? stored : null;
-  })();
+  let token: string | null = readStoredToken('demo');
 
   const controls: DemoControls = {
     async addCredit(studentId, amountCents, description) {
@@ -414,8 +416,7 @@ export function createDemoClient(options: DemoClientOptions = {}): DemoClient {
     getToken: () => token,
     setToken(next) {
       token = next && next.trim() ? next : null;
-      if (token) setItem(STORAGE_KEYS.session, token);
-      else removeItem(STORAGE_KEYS.session);
+      persistToken('demo', token);
     },
     async call<A extends ApiAction>(action: A, params: ApiParams<A>): Promise<ApiResult<A>> {
       const sentToken = token;

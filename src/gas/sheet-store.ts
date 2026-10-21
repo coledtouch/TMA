@@ -8,6 +8,14 @@
  * - Headers are matched with normalizeHeader + TABLES[...].aliases, so column
  *   order, spelling and extra treasurer columns never matter.
  * - Text that Sheets would evaluate as a formula is written as plain text.
+ * - Date cells: Sheets keeps wall-clock dates and times in the SPREADSHEET's
+ *   time zone (File → Settings), while this script's Dates (and the core's
+ *   getFullYear/getDate/getHours) use the SCRIPT's zone (appsscript.json,
+ *   America/New_York). When the two differ (e.g. an uploaded file converted
+ *   in UTC), a typed 10/21/2026 would read as Oct 20 at 8 PM. So every Date
+ *   read is rebuilt with the sheet's wall clock in the script zone, and every
+ *   Date written gets the script zone's wall clock in the sheet zone, so
+ *   values round-trip and the treasurer sees New York times.
  */
 import { normalizeHeader, TABLES, type TableName } from '../shared/schema';
 import type { CellValue, RowData, Store, StoredRow } from '../server/services';
@@ -21,6 +29,9 @@ const MAX_CELL_CHARS = 50000;
 /** A leading = + - @ makes Sheets parse text as a formula; a leading ' is eaten as a text marker. */
 const FORMULA_START = /^[=+\-@']/;
 const NUMERIC_TEXT = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+/** Utilities.formatDate/parseDate pattern for a wall-clock time. */
+export const WALL_CLOCK_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS";
+const WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/;
 
 export interface SheetStore extends Store {
   /** Forget memoized reads (all tabs, or one). Called after taking the script lock. */
@@ -74,10 +85,13 @@ export function mapHeaders(table: TableName, headerRow: readonly unknown[]): Map
   return columns;
 }
 
-/** Convert a core value to what we hand to Range.setValues. */
-export function toSheetValue(value: CellValue | undefined): SheetValue {
+/**
+ * Convert a core value to what we hand to Range.setValues. `toSheetDate`
+ * moves a Date into the spreadsheet's time zone (identity when the zones match).
+ */
+export function toSheetValue(value: CellValue | undefined, toSheetDate: (d: Date) => Date = (d) => d): SheetValue {
   if (value === null || value === undefined) return '';
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : value;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : toSheetDate(value);
   if (typeof value === 'number') return Number.isFinite(value) ? value : '';
   if (typeof value === 'boolean') return value;
   const text = String(value);
@@ -91,16 +105,94 @@ function isBlank(value: unknown): boolean {
   return value === null || value === undefined || (typeof value === 'string' && value.trim() === '');
 }
 
+function pad(n: number, width: number): string {
+  return String(n).padStart(width, '0');
+}
+
+/** A Date at this wall-clock time in the script's (= the runtime's local) time zone; any year, unlike new Date(y, …). */
+function localDate(year: number, month: number, day: number, hour: number, minute: number, second: number, ms: number): Date {
+  const d = new Date(2000, 0, 1, 0, 0, 0, 0);
+  d.setFullYear(year, month - 1, day);
+  d.setHours(hour, minute, second, ms);
+  return d;
+}
+
+/**
+ * Converts Dates between the spreadsheet's time zone and the script's. One
+ * per store (= per execution): the zones are looked up once, and read
+ * conversions are memoized because date columns repeat the same days.
+ */
+export class SheetTimeZone {
+  /** The spreadsheet's zone when it differs from the script's, else null; undefined until looked up. */
+  private zone: string | null | undefined;
+  private readonly readMemo = new Map<number, number>();
+
+  constructor(private readonly spreadsheet: Spreadsheet) {}
+
+  /** The spreadsheet zone, or null when no conversion is needed. */
+  sheetZone(): string | null {
+    if (this.zone === undefined) this.zone = this.lookUp();
+    return this.zone;
+  }
+
+  /** A Date read from the sheet -> the same wall-clock time in the script zone. */
+  fromSheet(value: Date): Date {
+    const zone = this.sheetZone();
+    const t = value.getTime();
+    if (zone === null || Number.isNaN(t)) return value;
+    let local = this.readMemo.get(t);
+    if (local === undefined) {
+      const m = WALL_CLOCK_RE.exec(Utilities.formatDate(value, zone, WALL_CLOCK_FORMAT));
+      local = m ? localDate(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], +m[7]).getTime() : t;
+      this.readMemo.set(t, local);
+    }
+    return new Date(local);
+  }
+
+  /** A Date from the core -> a Date the sheet shows with the script zone's wall-clock time. */
+  toSheet(value: Date): Date {
+    const zone = this.sheetZone();
+    if (zone === null || Number.isNaN(value.getTime()) || value.getFullYear() < 0 || value.getFullYear() > 9999) return value;
+    const wallClock =
+      `${pad(value.getFullYear(), 4)}-${pad(value.getMonth() + 1, 2)}-${pad(value.getDate(), 2)}` +
+      `T${pad(value.getHours(), 2)}:${pad(value.getMinutes(), 2)}:${pad(value.getSeconds(), 2)}.${pad(value.getMilliseconds(), 3)}`;
+    const converted = Utilities.parseDate(wallClock, zone, WALL_CLOCK_FORMAT);
+    return converted instanceof Date && !Number.isNaN(converted.getTime()) ? converted : value;
+  }
+
+  private lookUp(): string | null {
+    let sheetZone = '';
+    try {
+      sheetZone = String(this.spreadsheet.getSpreadsheetTimeZone() ?? '').trim();
+    } catch {
+      return null; // can't tell: keep Sheets' values as they come
+    }
+    if (!sheetZone) return null;
+    let scriptZone = '';
+    try {
+      scriptZone = Session.getScriptTimeZone();
+    } catch {
+      // Unknown script zone: converting is still right (it is a no-op when the zones match).
+    }
+    return sheetZone === scriptZone ? null : sheetZone;
+  }
+}
+
 class SpreadsheetStore implements SheetStore {
   /** null = the tab does not exist. */
   private readonly layouts = new Map<TableName, Layout | null>();
   /** Data rows; dropped on every write to the tab. */
   private readonly rowCache = new Map<TableName, StoredRow[]>();
+  private readonly timeZone: SheetTimeZone;
+  private readonly toSheetDate: (d: Date) => Date;
 
   constructor(
     private readonly spreadsheet: Spreadsheet,
     private readonly withLock: <T>(fn: () => T) => T,
-  ) {}
+  ) {
+    this.timeZone = new SheetTimeZone(spreadsheet);
+    this.toSheetDate = (d) => this.timeZone.toSheet(d);
+  }
 
   invalidate(table?: TableName): void {
     if (table) {
@@ -171,7 +263,7 @@ class SpreadsheetStore implements SheetStore {
     const cells: Array<{ column: number; value: SheetValue }> = [];
     for (const [key, value] of Object.entries(patch)) {
       const column = layout.columns.get(key);
-      if (column !== undefined && value !== undefined) cells.push({ column, value: toSheetValue(value) });
+      if (column !== undefined && value !== undefined) cells.push({ column, value: toSheetValue(value, this.toSheetDate) });
     }
     cells.sort((a, b) => a.column - b.column);
     // One setValues per run of adjacent columns; untouched cells are never rewritten.
@@ -238,7 +330,8 @@ class SpreadsheetStore implements SheetStore {
       const data: RowData = {};
       let blank = true;
       for (const [header, column] of columns) {
-        const value = line[column - 1] as CellValue;
+        const raw = line[column - 1] as CellValue;
+        const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
         data[header] = value;
         if (!isBlank(value)) blank = false;
       }
@@ -301,7 +394,7 @@ class SpreadsheetStore implements SheetStore {
       const line: SheetValue[] = [];
       for (let c = first; c <= last; c += 1) {
         const header = byColumn.get(c);
-        line.push(header === undefined ? '' : toSheetValue(row[header]));
+        line.push(header === undefined ? '' : toSheetValue(row[header], this.toSheetDate));
       }
       return line;
     });

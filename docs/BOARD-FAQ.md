@@ -19,8 +19,9 @@ it that would be valuable to a criminal.
 * **Parents:** name, email, an optional cell number. A second parent is optional.
 * **Students:** first and last name, grade, school level, music groups, and optionally instrument.
 * **Money:** activity-fund credits and uses, trip costs and payments (amounts and dates).
-* **Settings:** each parent's notification choices, and a code that lets TMA send push
-  notifications to their phone.
+* **Settings:** each parent's notification choices, and, for each phone where they turned on
+  notifications, the browser's notification address (a web address at Apple, Google, Mozilla or
+  Microsoft plus two keys). It is not a phone number.
 
 **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
 student emails or phone numbers, photos, grades or any school records.
@@ -29,8 +30,27 @@ student emails or phone numbers, photos, grades or any school records.
 
 In **TMA's own Google Sheet, in TMA's Google account**. The app's server is a script attached to
 that sheet. It runs inside Google and can open **only that one spreadsheet**, not the rest of TMA's
-Google Drive. There is no other database. Push notifications pass through Google's Firebase. Card
-payments happen entirely on PayPal.
+Google Drive. There is no other database. Push notifications pass through a small program TMA runs
+on Cloudflare's free plan (the "push Worker", see below) and then through Apple's, Google's,
+Mozilla's or Microsoft's notification service to the phone. Card payments happen entirely on PayPal.
+
+### What does the Cloudflare push Worker store?
+
+Almost nothing, and **no family information**. It keeps exactly two things:
+
+* its own **key pair**, the digital stamp that tells Apple, Google, Mozilla and Microsoft the
+  notifications really come from TMA, and
+* a **hash** (a scrambled fingerprint that can't be turned back into the original) of the password
+  TMA's script uses with it, so it only takes orders from TMA's spreadsheet.
+
+The phones' notification addresses stay in TMA's spreadsheet (the hidden **Devices** tab). For each
+notification, the script hands the Worker the message and that one address. The Worker encrypts the
+message so that only the receiving phone can read it (Apple, Google and the others see only
+scrambled data), passes it on, and forgets it. It keeps no copies, and its logs show only which
+notification service answered, never names, addresses or message text.
+
+It runs on **Cloudflare's free Workers plan** (up to 100,000 requests a day). The script sends up to
+5 notifications per request, so even a notification to every family uses a tiny fraction of that.
 
 ### Who can see what?
 
@@ -50,10 +70,10 @@ payments happen entirely on PayPal.
 * **Every request is checked** against the sheet: who the person is, which household they belong
   to, and whether they're a board member. Nothing is taken on trust from the phone.
 * **Least privilege:** the script may only open this spreadsheet, send email as TMA, contact
-  PayPal/Firebase/Twilio, and run its own schedule.
+  PayPal, TMA's push Worker and Twilio, and run its own schedule.
 * **PayPal handles all card data.** TMA never sees or stores card numbers.
-* **Secrets** (PayPal and Firebase keys) are kept out of the spreadsheet, in the script's private
-  settings.
+* **Secrets** (the PayPal key and the push Worker password) are kept out of the spreadsheet, in the
+  script's private settings.
 
 ### What about children's privacy (COPPA)?
 
@@ -71,8 +91,8 @@ what's needed, and follow the music department's and district's guidance.
 
 ### What does it cost?
 
-**$0** to run: Google Sheet, Apps Script, Gmail, Firebase push notifications and GitHub Pages are
-all free at TMA's size. Online card/PayPal payments have per-payment fees, which families can choose
+**$0** to run: Google Sheet, Apps Script, Gmail, GitHub Pages and the push Worker (Cloudflare's free
+Workers plan) are all free at TMA's size. Online card/PayPal payments have per-payment fees, which families can choose
 to cover. Text messages are optional and cost about 1¢ each. Details:
 [PAYMENTS.md](PAYMENTS.md) and the [README](../README.md#what-it-costs).
 
@@ -83,6 +103,11 @@ Google Sheet plus a script inside TMA's account, and a website hosted for free. 
 step-by-step documentation are in the GitHub repository, so another volunteer can take over.
 Occasional updates may be needed if Google, PayPal or Apple change something.
 
+One piece lives outside Google: the **push Worker** on Cloudflare. Make sure TMA can sign in to the
+Cloudflare account it runs in, or move it to a TMA-owned account
+([SETUP.md, step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account)). If it ever stopped,
+the app would keep working and emails would still go out; only phone notifications would pause.
+
 **To switch it off:** in the spreadsheet open *Extensions → Apps Script* → **Triggers** (delete
 the two schedules) and **Deploy → Manage deployments → Archive**. All the data stays in the
 spreadsheet, exactly as the treasurer has always kept it.
@@ -92,7 +117,8 @@ spreadsheet, exactly as the treasurer has always kept it.
 Delete their rows in **Families** and **Students**, and their email's rows in the hidden
 **Preferences** and **Devices** tabs (*View → Hidden sheets*). Keep the **Ledger** and **Payments**
 rows for TMA's financial records. They contain only a student ID and amounts. Once the household
-and student rows are gone, nobody can see that family's information in the app.
+and student rows are gone, nobody can see that family's information in the app. There is nothing to
+delete on Cloudflare: the push Worker keeps no family information.
 
 ### Can families stop emails and notifications?
 
@@ -121,6 +147,8 @@ volunteers whether or not TMA uses this app.
 2. **Share the spreadsheet** only with the treasurer and one or two board members, each with their
    own Google account, rather than sharing the password.
 3. Keep `ADMIN_EMAILS` current. Remove people when they leave the board.
-4. Once a year, mark graduated students and departed families `Inactive`, and delete data you no
+4. Know who can sign in to the Cloudflare account that runs the push Worker, and keep that list
+   short too.
+5. Once a year, mark graduated students and departed families `Inactive`, and delete data you no
    longer need.
-5. Adopt the written activity-fund policy above.
+6. Adopt the written activity-fund policy above.

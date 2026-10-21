@@ -220,6 +220,9 @@ describe('createGasServices', () => {
     gas.properties.setProperty('PAYPAL_SECRET', 'shh');
     expect(services.payments.enabled()).toBe(true);
     expect(services.push.enabled()).toBe(false);
+    gas.properties.setProperty('PUSH_RELAY_SECRET', 'd'.repeat(64));
+    expect(services.push.enabled()).toBe(true); // Settings PUSH_RELAY_URL defaults to the TMA Worker
+    expect(services.push.baseUrl()).toBe('https://tma-push.coleciprari.workers.dev');
     expect(services.sms.enabled()).toBe(false);
     expect(services.clock.now()).toBeInstanceOf(Date);
   });

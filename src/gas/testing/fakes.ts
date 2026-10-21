@@ -68,6 +68,126 @@ export function base64(bytes: readonly number[]): string {
 const asBytes = (data: string | readonly number[]): number[] => (typeof data === 'string' ? utf8(data) : [...data]);
 
 // ---------------------------------------------------------------------------
+// Time zones (Utilities.formatDate / parseDate, Java SimpleDateFormat subset)
+// ---------------------------------------------------------------------------
+
+/** The host's local zone: what `new Date(y, m, d…)` uses, like the script zone in Apps Script. */
+export function hostTimeZone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone;
+}
+
+interface WallClock {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  ms: number;
+}
+
+/** Wall-clock fields of an instant in `timeZone`. */
+export function wallClockIn(date: Date, timeZone: string): WallClock {
+  const parts: Record<string, string> = {};
+  const format = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  for (const part of format.formatToParts(date)) parts[part.type] = part.value;
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour) % 24, // some engines print midnight as 24 with hour12:false
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+    ms: date.getUTCMilliseconds(),
+  };
+}
+
+function utcOf(w: WallClock): number {
+  const d = new Date(Date.UTC(2000, 0, 1));
+  d.setUTCFullYear(w.year, w.month - 1, w.day);
+  d.setUTCHours(w.hour, w.minute, w.second, w.ms);
+  return d.getTime();
+}
+
+/** The instant whose wall clock in `timeZone` is `w` (like Java's lenient parse). */
+export function instantIn(w: WallClock, timeZone: string): Date {
+  const target = utcOf(w);
+  let t = target;
+  for (let i = 0; i < 4; i += 1) {
+    const diff = utcOf(wallClockIn(new Date(t), timeZone)) - target;
+    if (diff === 0) break;
+    t -= diff;
+  }
+  return new Date(t);
+}
+
+const PATTERN_FIELDS: Record<string, keyof WallClock> = {
+  yyyy: 'year',
+  MM: 'month',
+  dd: 'day',
+  HH: 'hour',
+  mm: 'minute',
+  ss: 'second',
+  SSS: 'ms',
+};
+
+/** Split a SimpleDateFormat pattern into fields and literals; throws on letters the fake doesn't know. */
+function tokenize(pattern: string): Array<{ field: keyof WallClock; width: number } | { literal: string }> {
+  const out: Array<{ field: keyof WallClock; width: number } | { literal: string }> = [];
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === "'") {
+      const end = pattern.indexOf("'", i + 1);
+      if (end < 0) throw new Error(`Unterminated quote in date pattern ${pattern}`);
+      out.push({ literal: pattern.slice(i + 1, end) });
+      i = end + 1;
+    } else if (/[A-Za-z]/.test(c)) {
+      let j = i;
+      while (pattern[j] === c) j += 1;
+      const token = pattern.slice(i, j);
+      const field = PATTERN_FIELDS[token];
+      if (!field) throw new Error(`FakeUtilities: unsupported date pattern letter(s) "${token}"`);
+      out.push({ field, width: token.length });
+      i = j;
+    } else {
+      out.push({ literal: c });
+      i += 1;
+    }
+  }
+  return out;
+}
+
+export function fakeFormatDate(date: Date, timeZone: string, pattern: string): string {
+  const w = wallClockIn(date, timeZone);
+  return tokenize(pattern)
+    .map((t) => ('literal' in t ? t.literal : String(w[t.field]).padStart(t.width, '0')))
+    .join('');
+}
+
+export function fakeParseDate(text: string, timeZone: string, pattern: string): Date {
+  const tokens = tokenize(pattern);
+  const re = new RegExp(
+    `^${tokens.map((t) => ('literal' in t ? t.literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : `(\\d{${t.width}})`)).join('')}$`,
+  );
+  const m = re.exec(text);
+  if (!m) throw new Error(`Unparseable date: "${text}"`);
+  const w: WallClock = { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0, ms: 0 };
+  let group = 1;
+  for (const t of tokens) if (!('literal' in t)) w[t.field] = Number(m[group++]);
+  return instantIn(w, timeZone);
+}
+
+// ---------------------------------------------------------------------------
 // SpreadsheetApp
 // ---------------------------------------------------------------------------
 
@@ -257,6 +377,14 @@ export class FakeSheet {
 export class FakeSpreadsheet {
   readonly sheets: FakeSheet[] = [];
   readonly toasts: string[] = [];
+  /** File → Settings → Time zone. Defaults to the script (host) zone. */
+  timeZone = hostTimeZone();
+  timeZoneLookups = 0;
+
+  getSpreadsheetTimeZone(): string {
+    this.timeZoneLookups += 1;
+    return this.timeZone;
+  }
 
   addSheet(sheet: FakeSheet): FakeSheet {
     this.sheets.push(sheet);
@@ -535,6 +663,10 @@ export interface GasFakes {
   mail: FakeMail;
   scriptApp: FakeScriptApp;
   session: { email: string };
+  /** Session.getScriptTimeZone(): the host's zone, since `new Date(y, m, d)` in the code under test uses it. */
+  scriptTimeZone: string;
+  /** Utilities.formatDate calls, in order (date ISO, zone, pattern). */
+  formatDateCalls: Array<[string, string, string]>;
   /** When false, SpreadsheetApp.getUi() throws as it does in triggers and web requests. */
   uiAvailable: boolean;
   flushes: number;
@@ -567,6 +699,8 @@ export function installGasFakes(host: HostCrypto): GasFakes {
     mail: new FakeMail(),
     scriptApp: new FakeScriptApp(),
     session: { email: 'treasurer@example.com' },
+    scriptTimeZone: hostTimeZone(),
+    formatDateCalls: [],
     uiAvailable: true,
     flushes: 0,
     uuids: [],
@@ -591,7 +725,10 @@ export function installGasFakes(host: HostCrypto): GasFakes {
     LockService: { getScriptLock: () => fakes.lock },
     MailApp: fakes.mail,
     ScriptApp: fakes.scriptApp,
-    Session: { getActiveUser: () => ({ getEmail: () => fakes.session.email }) },
+    Session: {
+      getActiveUser: () => ({ getEmail: () => fakes.session.email }),
+      getScriptTimeZone: () => fakes.scriptTimeZone,
+    },
     ContentService: {
       MimeType: { JSON: 'JSON', TEXT: 'TEXT' },
       createTextOutput: (content: string) => new FakeOutput(content),
@@ -617,6 +754,11 @@ export function installGasFakes(host: HostCrypto): GasFakes {
       },
       base64Encode: (data: string | Bytes) => base64(asBytes(data)),
       base64EncodeWebSafe: (data: string | Bytes) => base64(asBytes(data)).replace(/\+/g, '-').replace(/\//g, '_'),
+      formatDate: (date: Date, timeZone: string, pattern: string) => {
+        fakes.formatDateCalls.push([date.toISOString(), timeZone, pattern]);
+        return fakeFormatDate(date, timeZone, pattern);
+      },
+      parseDate: (text: string, timeZone: string, pattern: string) => fakeParseDate(text, timeZone, pattern),
       newBlob: (data: string | Bytes) => {
         const bytes = asBytes(data);
         return { getBytes: () => toSigned(bytes), getDataAsString: () => (typeof data === 'string' ? data : '') };

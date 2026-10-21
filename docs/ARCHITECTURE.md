@@ -15,7 +15,8 @@ will maintain it and for contributors adding features. Contracts live in code:
 * About 300 families. Today TMA runs on **one Google Sheet + Gmail + Facebook**, with
   everything uploaded by hand. The school cannot share family emails, so families
   must be able to **sign themselves up**.
-* **No new spending.** Everything must run on free tiers inside TMA's own Google account.
+* **No new spending.** Everything must run on free tiers: TMA's own Google account, GitHub Pages,
+  and Cloudflare's free Workers plan (for push notifications).
 * Families can:
   * see each student's **earmarked activity-fund balance** and history,
   * see **trip/activity costs, what's paid and what's left**,
@@ -36,20 +37,35 @@ will maintain it and for contributors adding features. Contracts live in code:
 ┌───────────────────────┐   HTTPS POST   ┌───────────────────────────────────────────┐
 │ React app (src/web)   │ ─────────────▶ │ Apps Script web app  (apps-script/Code.js)│
 │ Service worker (push, │  text/plain    │   = src/gas adapters + src/server core    │
-│ offline cache)        │  JSON          │        │ reads/writes                      │
+│ offline cache)        │  JSON          │        │ reads/writes                     │
 └──────────▲────────────┘                │        ▼                                  │
-           │ Web Push                    │ Google Sheet (treasurer's ledger)         │
-┌──────────┴────────────┐                │ MailApp (email), time triggers (sync)     │
-│ Firebase Cloud        │ ◀───────────── │ UrlFetchApp → FCM HTTP v1, PayPal REST,   │
-│ Messaging (free)      │   send         │               Twilio (optional, paid)     │
-└───────────────────────┘                └───────────────────────────────────────────┘
+           │ Web Push                    │ Google Sheet (treasurer's ledger; Devices │
+┌──────────┴────────────┐                │   tab = browsers' push subscriptions)     │
+│ Browser push services │                │ MailApp (email), time triggers (sync)     │
+│ (Google, Apple,       │                │ UrlFetchApp → push Worker, PayPal REST,   │
+│ Mozilla, Microsoft)   │                │               Twilio (optional, paid)     │
+└──────────▲────────────┘                └─────────────────────┬─────────────────────┘
+           │ encrypted, VAPID-signed                           │ POST /send (≤ 5 each)
+┌──────────┴───────────────────────────────────────────────────▼─────────────────────┐
+│ tma-push: Cloudflare Worker (workers/push, free plan). Stateless Web Push sender:  │
+│ VAPID signing + RFC 8291 encryption. Its KV holds only its VAPID key pair and the  │
+│ SHA-256 of the relay secret Apps Script registered (no family data).               │
+└────────────────────────────────────────────────────────────────────────────────────┘
            PayPal JS SDK buttons in the page ⇄ PayPal (orders created/captured server-side)
 ```
 
-* **Static hosting** (free): GitHub Pages (workflow included) or Firebase Hosting.
-* **Demo mode**: when `VITE_API_URL` is empty, the browser runs the *same backend core*
-  (`src/server`) against an in-memory, localStorage-persisted copy of the sample sheet
-  (`src/demo`). PayPal and push are simulated. This is the prototype link for the board.
+* **Static hosting** (free): GitHub Pages, built and published by `.github/workflows/deploy-pages.yml`.
+  The only build setting is `VITE_API_URL` (the Apps Script `/exec` URL).
+* **Push Worker** (free): `workers/push`, a Cloudflare Worker deployed by
+  `.github/workflows/deploy-push-worker.yml`, live at `https://tma-push.coleciprari.workers.dev`
+  (Settings `PUSH_RELAY_URL`). Apps Script keeps each browser's push subscription in the Devices tab
+  and asks the Worker to deliver. The Worker knows no families. See §9 and §9.1.
+* **Demo mode**: the browser runs the *same backend core* (`src/server`) against an in-memory,
+  localStorage-persisted copy of the sample sheet (`src/demo`). PayPal and push are simulated. A build
+  without `VITE_API_URL` is always the demo. A live build opens the demo when the address has `?demo`
+  (or someone taps *See a demo with sample data* on the sign-in screen) and keeps it in that browser
+  until **Exit demo** (§10 "Live and demo in one build"). So `https://<owner>.github.io/<repo>/?demo`
+  stays the board's prototype link after the site goes live.
 
 ### Directory layout
 
@@ -60,6 +76,7 @@ src/gas/      Apps Script adapters + entry points; bundled to apps-script/Code.j
 src/demo/     browser wiring of the core with in-memory services (demo mode)
 src/web/      React PWA: screens, components, api client, push, install, PayPal UI, sw.ts
 apps-script/  Code.js (generated, committed so volunteers can copy/paste), appsscript.json
+workers/push/ Cloudflare Worker that delivers Web Push (own package.json, tests, wrangler.toml)
 scripts/      build-gas.mjs, make-icons.mjs
 docs/         this spec, SETUP, SHEET, PAYMENTS, BOARD-FAQ
 e2e/          Playwright smoke test of demo mode
@@ -73,8 +90,15 @@ e2e/          Playwright smoke test of demo mode
   and match known names case-insensitively, canonicalizing to the Settings spelling.
   Unknown names are kept as typed.
 * **Dates**: `Date` objects, `YYYY-MM-DD`, `M/D/YYYY`, `M/D/YY`, or sheet serial numbers.
-  Use the calendar date. Avoid timezone drift by reading `Date` cells in the script
-  timezone (`America/New_York`): use getFullYear/getMonth/getDate of the Date as returned.
+  Use the calendar date: getFullYear/getMonth/getDate of the Date as the store returns it, which is
+  in the script time zone (`America/New_York`, from `appsscript.json`). The Apps Script SheetStore
+  makes that true even when the **spreadsheet's** time zone (*File → Settings*) differs from the
+  script's, for example a file uploaded and converted in UTC. Sheets keeps wall-clock values in the
+  spreadsheet's zone, so in that case every `Date` read is rebuilt with the sheet's wall-clock time in
+  the script zone (`Utilities.formatDate`, memoized per instant), and every `Date` written gets the
+  script zone's wall-clock time in the sheet zone (`Utilities.parseDate`). A typed `10/21/2026` stays
+  Oct 21, app timestamps (Last Seen, Sent, Log At) round-trip exactly, and the treasurer sees New York
+  times. When the two zones match, nothing is converted.
 * **Money**: `dollarsToCents`. Writes use `centsToDollars`.
 * **Emails**: trim + lower-case. Families match on `Email` or `Parent 2 Email`.
 * **Status** blank means `Active` for Families/Students (treasurer rows), `Going` for Enrollments,
@@ -133,8 +157,8 @@ Writes run inside `services.withLock`.
 | `me.bootstrap` | Build `Bootstrap` for the caller (see §5.1). |
 | `household.save` | See §5.2. Returns fresh Bootstrap. |
 | `prefs.save` | Sanitize: channel/topic booleans; schools/ensembles must be in Settings lists; `smsPhone` digits only (10–15 digits) or removed. Upsert `Preferences` row for the caller's email. `sms` may only be true when `Settings.SMS_ENABLED` and a phone is set. |
-| `push.register` | Token 20–4096 chars. Upsert `Devices` by token: set Email/FamilyID, update Last Seen. Max 10 devices per email; drop the oldest. Returns the device count for the email. |
-| `push.unregister` | Delete (blank out) the row with that token if it belongs to the caller. |
+| `push.register` | `token` is the browser's `PushSubscription` as JSON (≤ 4096 chars), checked the way the push Worker checks it (`src/server/push-subscription.ts`): endpoint `https://` on the default port, no credentials, ≤ 2048 chars, host on the Worker's allowlist (§9.1; otherwise `BAD_REQUEST` "This browser's push service isn't supported. Try Chrome, Safari, Firefox or Edge."); `p256dh` a 65-byte P-256 point, `auth` 16 bytes (base64url or base64). Stored as the canonical token `{"endpoint","keys":{"p256dh","auth"}}`: host lower-cased, keys base64url without padding, no `expirationTime`. In `mode==='demo'` only, a `demo-…` token is accepted instead. Anything else (including old-style tokens) → `BAD_REQUEST`. Rate limit 30 per email per hour. Upsert `Devices` **by endpoint**, so a browser that re-subscribes with new keys updates its row: set Email, FamilyID, Token, User Agent, Last Seen. The device moves to whoever signs in on it. Max 10 devices per email; drop the least recently seen. Returns the device count for the email. |
+| `push.unregister` | `token` is the stored token or the browser's raw subscription JSON; only its endpoint matters (demo: the `demo-…` token itself). Blank out the **caller's own** rows for that endpoint. Anything unparseable → `BAD_REQUEST`, which the app ignores. |
 | `push.test` | Send "Test notification ✅ / Notifications are working on this device." to the caller's devices (push only). |
 | `redemption.request` | Caller's family must be Active, the student Active and in the family, the activity Open and `allowFunds`, enrollment Going. Amount is an integer ≥ 100 (=$1) and ≤ available funds and ≤ (remaining − pending requests for that activity). Append a `Redemptions` row (Pending). Notify admins (§6, admin message). |
 | `redemption.cancel` | Only the caller's family's own **Pending** request → Cancelled. |
@@ -196,8 +220,9 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
 * audience match (announcements/events only): audience both empty → everyone; prefs both empty →
   receives everything; otherwise, if both audience lists are non-empty the recipient needs a match in each.
   If one audience list is empty, a match on the other suffices.
-* channels: push → every device token for that email (if `push.enabled()`); delete tokens that
-  return `invalid`. email → if `EMAIL_ENABLED` and `mailer.remainingQuota()` is above the 20 recipients
+* channels: push → every device token (stored push subscription) for that email (if
+  `push.enabled()`); delete tokens that return `invalid` (the browser unsubscribed, or the
+  subscription was made with an old Worker key). email → if `EMAIL_ENABLED` and `mailer.remainingQuota()` is above the 20 recipients
   kept back for sign-in codes (`SIGN_IN_EMAIL_RESERVE`; codes and notifications share one quota); skip
   with a log otherwise. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
   Admin-chosen channels further restrict announcements.
@@ -255,7 +280,8 @@ into `report.errors` so one failure doesn't block the rest:
 `setup({seedSampleData})`: `ensureTable` for every table in `TABLE_ORDER`. Write missing Settings keys
 with their defaults and the `Notes`. Create TOKEN_SECRET if missing. If `seedSampleData` and the Families,
 Students and Ledger tables are all empty → write the sample data from `src/server/sample-data.ts`.
-Return the `SetupReport`.
+Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / repair tabs*) also creates
+`PUSH_RELAY_SECRET` and links the push Worker (§9).
 
 ### Sample data (also the demo's data), fictional people only
 
@@ -298,7 +324,9 @@ Return the `SetupReport`.
 * SheetStore: `SpreadsheetApp.getActive()`. The script is **container-bound** (created from the sheet via
   Extensions → Apps Script), so it only ever touches that one spreadsheet. Read with one `getDataRange().getValues()` per table per request (memoize per execution).
   Header row → canonical map via normalizeHeader+aliases. append uses one `setValues` call. Hide `system` tabs.
-  Add the header note from `TABLES[t].note` to A1 when creating.
+  Add the header note from `TABLES[t].note` to A1 when creating. Dates are converted between the
+  spreadsheet's and the script's time zones when they differ (`SheetTimeZone`, see §3 "Dates"); the
+  two zones are looked up once per execution.
 * Cache: `CacheService.getScriptCache()`. Lock: `LockService.getScriptLock().waitLock(20000)`.
 * Crypto: `Utilities.computeHmacSha256Signature`, uuid via `Utilities.getUuid()`, digits via uuid
   hex → numbers (rejection sampling).
@@ -313,12 +341,42 @@ Return the `SetupReport`.
   exists, so a fixed `payment_source.paypal` could contradict the button they press). Capture: POST `/v2/checkout/orders/{id}/capture` with header
   `PayPal-Request-Id`. Parse `purchase_units[0].payments.captures[0]`. Enabled when PAYPAL_CLIENT_ID (Settings) and
   PAYPAL_SECRET (Script Properties) are set.
-* FCM sender: service-account JSON from Script Properties `FCM_SERVICE_ACCOUNT`; RS256 JWT signed with
-  `Utilities.computeRsaSha256Signature`, exchanged at `https://oauth2.googleapis.com/token` for scope
-  `https://www.googleapis.com/auth/firebase.messaging`, token cached 50 min. Send one request per token
-  using `UrlFetchApp.fetchAll` to `https://fcm.googleapis.com/v1/projects/<project_id>/messages:send` with
-  **data-only** messages `{token, data:{title, body, url, tag, topic}, webpush:{headers:{Urgency:'high', TTL:'86400'}}}`.
-  404/`UNREGISTERED`/`INVALID_ARGUMENT` on the token → `invalid`.
+* **Push relay sender** (`src/gas/push-relay.ts`): the `PushSender`, over the push Worker (§9.1).
+  * Worker address: Settings `PUSH_RELAY_URL` (blank = the default
+    `https://tma-push.coleciprari.workers.dev`). A value that isn't an `https://` address (e.g. `off`)
+    switches push off.
+  * Script Properties: `PUSH_RELAY_SECRET`, the shared secret (64 hex chars from `generateSecret`,
+    created by Set up; it must be 32–256 characters with no control characters), and
+    `PUSH_PUBLIC_KEY`, the Worker's VAPID public key (not secret; saved so page loads don't call the Worker).
+  * `enabled()` = a valid URL **and** a valid secret. `publicKey()` = `PUSH_PUBLIC_KEY` when it is a
+    valid P-256 key, else GET `/vapid-public-key`, validate and save it; a failed lookup is cached for
+    5 minutes so page loads don't wait on an unreachable Worker. `buildSettings` exposes it as
+    `PublicSettings.pushPublicKey`: `''` when push is off, and it never throws.
+  * `send(tokens, message)`: tokens that aren't subscriptions (demo tokens, rows typed by hand) are
+    `invalid` without any request. Payload = JSON `{title, body, url, tag, topic}`, at most 3000 bytes
+    of UTF-8 (a long body is shortened with "…", the other fields are clipped). `ttl` 86400; `urgency`
+    `normal` for reminders and announcements, `high` otherwise; `topic` = the tag sanitized to
+    `[A-Za-z0-9_-]{1,32}`, so a newer push with the same tag replaces an undelivered one.
+    **5 messages per `/send` request** (the Worker accepts 10, but its free plan gives each request
+    about 10 ms of CPU), up to 20 requests per `UrlFetchApp.fetchAll`, header
+    `Authorization: Bearer <PUSH_RELAY_SECRET>`. Results map back one to one; every message of a failed
+    request is `error`.
+  * Recovery, at most once per execution each: `401` → POST `/register` again (the Worker forgot this
+    sheet, e.g. its KV was cleared) and retry; `no_keys` (a `503`, or as the Worker actually answers, a
+    `200` whose every result is `no_keys`) → GET `/vapid-public-key` (which creates the pair), save
+    `PUSH_PUBLIC_KEY`, retry. Subscriptions are never deleted for either.
+  * Logs carry counts, HTTP codes and the Worker's reason codes only: never endpoints, payloads or the
+    secret (error text is scrubbed of it).
+* **Set up links the push Worker** (`linkPushWorker` in `src/gas/entry.ts`, run by `setupTma`,
+  `setupTmaWithSampleData` and *Set up / repair tabs*): under the script lock, create `PUSH_RELAY_SECRET`
+  if missing; then, outside the lock, POST `/register` with it (trust on first use) and GET
+  `/vapid-public-key` → `PUSH_PUBLIC_KEY`. Each step is reported in the dialog and the log. A `409
+  already_registered` ("The push Worker is already linked to a different Apps Script secret…"), an
+  unreachable Worker or a non-https `PUSH_RELAY_URL` only adds a ⚠ line: setup never fails because of
+  the Worker. After changing `PUSH_RELAY_URL`, run Set up again: the saved key belongs to the old Worker.
+* **Status** prints the Worker URL, its `/health` (reachable, linked to a sheet, keys), whether
+  `PUSH_PUBLIC_KEY` is saved, and whether push is configured. Secrets are listed by name only.
+  "Linked to a sheet" means *some* secret is registered with the Worker, not necessarily this sheet's.
 * Twilio SMS (optional; costs about 1¢ per text): `TWILIO_*` secrets set → enabled. POST form to
   `https://api.twilio.com/2010-04-01/Accounts/<sid>/Messages.json` with basic auth.
 * `onOpen()` adds a sheet menu **TMA App**: Run sync now · Send me a test notification · Set up / repair tabs ·
@@ -326,8 +384,47 @@ Return the `SetupReport`.
   syncTick every 15 min and dailyTick at 8 AM.
 * `appsscript.json`: timeZone `America/New_York`, runtime V8, webapp {executeAs USER_DEPLOYING,
   access ANYONE_ANONYMOUS}, oauthScopes (least privilege): `spreadsheets.currentonly`,
-  `script.container.ui`, `script.send_mail`, `script.external_request`, `script.scriptapp`, and
-  `userinfo.email` (the menu's "Send me a test notification" needs `Session.getActiveUser().getEmail()`).
+  `script.container.ui`, `script.send_mail`, `script.external_request` (PayPal, the push Worker,
+  Twilio), `script.scriptapp`, and `userinfo.email` (the menu's "Send me a test notification" needs
+  `Session.getActiveUser().getEmail()`).
+
+### 9.1 Push Worker (workers/push, Cloudflare)
+
+A stateless Web Push sender on Cloudflare's free Workers plan, written with WebCrypto only: RFC 8030
+delivery, RFC 8292 VAPID (its own P-256 key; the ES256 JWT is cached per push service for 12 hours) and
+RFC 8291 `aes128gcm` encryption, so only the subscribed browser can read a notification. Push used to
+go through Firebase Cloud Messaging; this Worker replaced it so TMA needs no Firebase project and no
+service-account key. The full reference is `workers/push/README.md`.
+
+| Endpoint | Answer |
+| --- | --- |
+| `GET /health` | `{ok:true, name:'tma-push', registered, hasKeys}` |
+| `GET /vapid-public-key` | `{publicKey}`: base64url of the 65-byte uncompressed P-256 point. Creates the key pair on first use; no other endpoint creates keys. |
+| `POST /register` `{secret}` (32–256 chars) | `200 {registered:true, first}` the first time, or again with the same secret. `409 {error:'already_registered'}` for any other secret (trust on first use). `400` bad body, `413` over 4 KB. |
+| `POST /send`, header `Authorization: Bearer <secret>`, body `{messages:[{subscription:{endpoint, keys:{p256dh, auth}}, payload, ttl?, urgency?, topic?}]}` | `200 {results:[{status:'ok'\|'invalid'\|'error', code?, reason?}]}`, one per message in the same order. `401 {error:'unauthorized'}` (no secret registered, missing or wrong). `400`. `413` for more than 10 messages or over 256 KB. With no key pair yet, `200` with every result `{status:'error', reason:'no_keys'}` and nothing sent. |
+
+* `invalid` (Apps Script deletes the Devices row): `gone` (404/410), `vapid_rejected` (403, e.g. made
+  with an old key), `endpoint_not_allowed`, `bad_keys`. `error` (kept; may work next time):
+  `payload_too_large`, `rate_limited`, `push_service_error`, `unexpected_status`, `network` (no answer in
+  15 s), `bad_payload`, `bad_message`, `internal`, `no_keys`.
+* Per message: `payload` a string of at most 3000 bytes of UTF-8; `ttl` default 86400, clamped to
+  0–2419200; `urgency` `very-low`, `low`, `normal` or `high` (default `high`); `topic`
+  `[A-Za-z0-9_-]{1,32}`.
+* Endpoint allowlist (an SSRF guard): `https://` on the default port, host `fcm.googleapis.com` (Chrome,
+  Edge, Android), `updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` (Safari and
+  iPhone/iPad Home Screen apps), or a host ending in `.push.apple.com` or `.notify.windows.com`. The same
+  list is copied in `src/server/push-subscription.ts` and `src/web/lib/push.ts`: **change all three together.**
+* KV namespace `TMA_PUSH` holds only `vapid:v1` (the key pair) and `relay:secret-sha256` (hex SHA-256
+  of the registered secret, compared in constant time). No subscriptions, payloads or family data are
+  stored. Logs show only the push service host and status.
+* **Free-plan limits**: about 10 ms of CPU per request (hence at most 5 messages per request from Apps
+  Script), 50 subrequests per request (10 messages are 10 fetches), 100,000 requests a day, and KV
+  100,000 reads and 1,000 writes a day (each Worker instance caches what it read for 5 minutes; writes
+  happen only at setup). One notification to every device costs one `/send` request per 5 devices.
+* Deployed by `.github/workflows/deploy-push-worker.yml` (Worker tests, typecheck, `wrangler deploy`)
+  on pushes that touch `workers/push/`, or by hand, with the repository secrets `CLOUDFLARE_API_TOKEN`
+  and `CLOUDFLARE_ACCOUNT_ID`. Rotating keys and moving to another Cloudflare account:
+  `docs/SETUP.md` §5 and `workers/push/README.md`.
 
 ## 10. Browser app (src/web)
 
@@ -341,11 +438,12 @@ export class ApiError extends Error { code: ApiErrorCode }
 export interface ApiClient {
   readonly mode: 'demo' | 'live';
   getToken(): string | null;
-  setToken(token: string | null): void;      // persists to localStorage 'tma.session'
+  setToken(token: string | null): void;      // persists to this mode's key: 'tma.session' or 'tma.demo.session'
   call<A extends ApiAction>(action: A, params: ApiParams<A>): Promise<ApiResult<A>>; // throws ApiError
 }
 export function createLiveClient(apiUrl: string): ApiClient;       // fetch POST text/plain, 30 s timeout
-export function createApiClient(): ApiClient;  // VITE_API_URL ? live : demo (lazy import of src/demo)
+export function createApiClient(mode?: AppMode): ApiClient;  // mode 'live' and VITE_API_URL set ? live
+                                                             // : demo (lazy import of src/demo)
 // The demo client is created on first use, so createApiClient() returns ApiClient & { loadDemo(): Promise<DemoControls> }
 // in demo mode; UI code reaches the controls through getDemoControls(api) (null in live mode).
 export function getDemoControls(api: ApiClient): Promise<DemoControls | null>;
@@ -364,14 +462,29 @@ export function createDemoClient(options?: { latencyMs?: [number, number]; now?:
 // Demo push: the PushSender fake dispatches window event 'tma:push' (detail: PushMessage) and, when
 // Notification.permission === 'granted', shows a real notification through the SW registration.
 
-// src/web/lib/push.ts
+// src/web/lib/push.ts  (publicKey = settings.pushPublicKey from me.bootstrap)
 export type PushSupport = 'ready' | 'enabled' | 'needs-install' | 'blocked' | 'unsupported' | 'not-configured';
-export function getPushSupport(options?: { mode?: 'demo' | 'live' }): Promise<PushSupport>; // demo: always ready/enabled
-export function enablePush(api: ApiClient): Promise<{ ok: true } | { ok: false; reason: string }>;
+export function getPushSupport(options?: { mode?: 'demo' | 'live'; publicKey?: string }): Promise<PushSupport>;
+  // mode defaults to lib/mode.ts; live without a valid key → 'not-configured'; demo: always ready/enabled
+export function enablePush(api: ApiClient, publicKey?: string): Promise<{ ok: true } | { ok: false; reason: string }>;
 export function disablePush(api: ApiClient): Promise<void>;
-export function refreshPushRegistration(api: ApiClient): Promise<void>; // on signed-in start; never throws
+export function refreshPushRegistration(api: ApiClient, publicKey?: string): Promise<void>; // never throws
+export function canonicalToken(subscription: unknown): string | null; // what push.register stores
 export function isIos(): boolean;
 export function isStandalone(): boolean;
+
+// src/web/lib/mode.ts  (see "Live and demo in one build")
+export type AppMode = 'demo' | 'live';
+export function initAppMode(): AppMode;       // once in main.tsx: storage migration + "?demo" switch
+export function currentAppMode(): AppMode;
+export function canExitDemo(mode?: AppMode): boolean;   // the demo, on a build that has a live backend
+export function enterDemo(): void;            // remembers 'tma.mode' = 'demo' and reloads
+export function exitDemo(): void;             // forgets it and reloads
+export function liveApiUrl(): string;         // VITE_API_URL ('' = demo-only build)
+export function hasLiveBackend(): boolean;
+
+// src/web/lib/storage.ts
+export function storageKeys(mode: AppMode): { session; email; cachePrefix; dismissedPrefix; push };
 
 // src/web/lib/install.ts
 export function useInstallPrompt(): {
@@ -380,7 +493,8 @@ export function useInstallPrompt(): {
 };
 
 // src/web/lib/sw-register.ts
-export function registerServiceWorker(): void;     // virtual:pwa-register; exposes update banner via event 'tma:sw-update'
+export function registerServiceWorker(mode?: AppMode): void; // virtual:pwa-register; window events:
+  // 'tma:sw-update' (update banner), and in live mode only 'tma:push' and 'tma:pushsubscriptionchange'
 
 // src/web/components/PayPalCheckout.tsx
 export function PayPalCheckout(props: {
@@ -395,6 +509,9 @@ export function PayPalCheckout(props: {
 * **Sign in**: TMA banner logo, "Sign in with your email", code step, and a clear note that new families can
   sign up with any email. Demo mode shows a banner with one-tap "Try as a parent" (parent@example.com),
   "Try as the treasurer" (treasurer@example.com) and "Try as a new family" buttons, and auto-fills devCode.
+  A live build adds a "See a demo with sample data" link; while a live build runs the demo, the demo
+  banner has **Exit demo**, and signed-in screens show a slim strip ("Demo with made-up families.
+  Nothing here is real.") with its own Exit demo button. A demo-only build shows neither.
 * **Home**: greeting; notification/installation nudges (dismissible); per-student cards (name, grade, school,
   ensemble chips, **available funds** big number, pending note); "Coming up" (next payments due, next events);
   latest 3 announcements. Pending/None family → a card explaining verification, or "Set up your household".
@@ -419,7 +536,8 @@ export function PayPalCheckout(props: {
 
 ### UX rules
 
-* Fast first paint: render the cached bootstrap from localStorage (`tma.cache.<email>`) immediately, then refresh.
+* Fast first paint: render the cached bootstrap from localStorage (`tma.cache.<email>`, or
+  `tma.demo.cache.<email>` in the demo) immediately, then refresh.
   Show "Offline: showing info from <time>" when the fetch fails.
 * Refresh on focus/visibility change (max once per 60 s) and after every mutation.
 * Toasts in an `aria-live="polite"` region. Dialogs are accessible (`role=dialog`, focus trap,
@@ -434,33 +552,97 @@ export function PayPalCheckout(props: {
 
 * `precacheAndRoute(self.__WB_MANIFEST)`; `cleanupOutdatedCaches()`; navigation route → precached `index.html`.
 * Runtime: images StaleWhileRevalidate (`tma-images`, max 60). **Never cache API calls** (POST anyway).
-* `push`: parse JSON robustly: FCM data message `{data:{title,body,url,tag,topic}}`, `{notification:{…}}`,
-  or a plain `PushMessage`. **Always** show a notification (iOS requires it) with icon `icons/icon-192.png`,
-  badge `icons/badge-96.png` (transparent silhouette; Android uses only its alpha), tag, and `data.url`.
-  Fallback title "TMA update".
+* `push`: the payload is the JSON `PushMessage` Apps Script sent through the Worker
+  (`{title, body, url, tag, topic}`); plain text becomes the body. Parse robustly. **Always** show a
+  notification (iOS requires it) with icon `icons/icon-192.png`, badge `icons/badge-96.png` (transparent
+  silhouette; Android uses only its alpha), tag, and `data.url`. Fallback title "TMA update". Also post
+  `{type:'push', message}` to open app windows (in-app banner and refresh).
+* `pushsubscriptionchange` (mostly Firefox, when the push service expires or replaces a subscription):
+  post `{type:'pushsubscriptionchange'}` to open app windows. Subscribing again needs the server's key
+  and registering needs the parent's sign-in, so the page does it (`refreshPushRegistration`).
+* Messages go only to windows **inside the app's scope**: on GitHub Pages other sites of the same owner
+  share the origin and must not see families' messages.
 * `notificationclick`: close; focus an existing client and `postMessage({type:'navigate', url})`, or
   `clients.openWindow(scope + url)`.
 * `message` `{type:'SKIP_WAITING'}` → `skipWaiting()`.
 
 ### Push enablement (src/web/lib/push.ts)
 
-* Live mode needs `VITE_FIREBASE_CONFIG` + `VITE_FIREBASE_VAPID_KEY`; otherwise `not-configured`.
-* iOS/iPadOS Safari not in standalone → `needs-install` (Web Push only works from a Home Screen app on iOS 16.4+).
-* `enablePush`: `Notification.requestPermission()` (must be called from a click) → wait for SW ready →
-  dynamic `import('firebase/app')`/`import('firebase/messaging')` → `getToken(messaging, {vapidKey,
-  serviceWorkerRegistration})` → `push.register` → store token in localStorage `tma.pushToken`.
-  On every app start with permission granted, refresh the token and re-register if it changed.
-* Demo mode: permission + register a fake token `demo-<uuid>`; notifications come from the demo PushSender.
+* Live mode uses the **standard Push API**, no SDK and no build setting. The key to subscribe with is the
+  Worker's VAPID public key, which the server sends as `settings.pushPublicKey` in `me.bootstrap`. Empty
+  or not a 65-byte P-256 point → `not-configured` ("Phone notifications aren't set up for TMA yet").
+* iOS/iPadOS Safari not in standalone → `needs-install` (Web Push only works from a Home Screen app on
+  iOS/iPadOS 16.4+). No service worker, `Notification` or `PushManager` → `unsupported`. Permission
+  denied → `blocked`. Granted, and this device has a live push record → `enabled`. Otherwise `ready`.
+* `enablePush(api, key)`: `Notification.requestPermission()` first (it must run in the tap, before any
+  other await, for Safari) → wait for the service worker (15 s) → `pushManager.getSubscription()`; a
+  subscription made with a different key, or with none, is unsubscribed (push services would refuse it,
+  and the browser won't subscribe with a new key while it exists) → `pushManager.subscribe({userVisibleOnly:
+  true, applicationServerKey})` → `canonicalToken` (a push service outside the Worker's allowlist is
+  unsubscribed and answered with the `unsupported` message) → `push.register` → save the record
+  `{token, key, at}` in localStorage `tma.push`. The previous token is unregistered (best effort) only
+  when its endpoint differs; with the same endpoint that would delete the row just registered.
+* `refreshPushRegistration(api, key)` runs from `App.tsx` once the bootstrap is loaded, again whenever
+  `pushPublicKey` changes, and on the `tma:pushsubscriptionchange` window event. It acts only when the
+  parent turned push on here, permission is `granted` and a session exists. It subscribes again when the
+  subscription is missing or was made with another key (**key rotation**: after the Worker's keys are
+  replaced, each phone follows the new key the next time the app is opened), and re-registers when the
+  token or key changed or the last registration is over 7 days old (keeps Last Seen fresh). If a new
+  subscription can't be made, it clears the record so the screen offers *Turn on notifications* again.
+  It never turns push on by itself.
+* Races: enable, disable and refresh each bump a counter. A refresh that was overtaken stops before
+  changing anything, and takes its registration back out only if push was turned off meanwhile.
+* `disablePush`: `push.unregister` (an expired session still clears the device) → unsubscribe the
+  browser → clear the record. Sign-out calls it, waiting at most 4 s.
+* Demo mode: permission (for real pop-ups) + register a fake token `demo-<uuid>`, recorded in
+  `tma.demo.push`; notifications come from the demo PushSender. The demo never touches the browser's
+  real push subscription, which belongs to the live app.
+
+### Live and demo in one build (src/web/lib/mode.ts)
+
+* A build without `VITE_API_URL` is always the demo and never saves a mode.
+* On a live build, `?demo` or `?demo=1` sets localStorage `tma.mode` = `demo`, then is removed from the
+  address (the `#/route` is kept); `?demo=0` switches back. If storage can't be written, the switch
+  stays in the address instead. *See a demo with sample data* (`enterDemo`) and **Exit demo**
+  (`exitDemo`) do the same. Switching always reloads, so nothing in memory crosses modes.
+* Per-person state is kept under separate keys per mode (`storageKeys`), so trying the demo never mixes
+  a demo sign-in, cached data or push registration with the real ones:
+
+  | What | Live | Demo |
+  | --- | --- | --- |
+  | Session token | `tma.session` | `tma.demo.session` |
+  | Last email used | `tma.email` | `tma.demo.email` |
+  | Cached bootstrap | `tma.cache.<email>` | `tma.demo.cache.<email>` |
+  | Dismissed nudges | `tma.dismissed.<id>` | `tma.demo.dismissed.<id>` |
+  | Push registration | `tma.push` | `tma.demo.push` |
+
+  Shared: `tma.mode`, `tma.storage` (layout version) and the demo's database `tma.demo.db.v1`. Each
+  client persists and clears only its own session key, so `UNAUTHORIZED` in one mode never signs the
+  other out.
+* One-time migration (`tma.storage` = `2`): if this browser has run the demo (`tma.demo.db.v1` exists),
+  the older un-prefixed session, email, cache and dismissed keys move to the demo keys, and a `demo-…`
+  `tma.pushToken` becomes the demo push record. The old `tma.pushToken` and `tma.pushToken.at` are
+  always removed. Without this, board members who used the old demo link would briefly see sample data
+  in the live app.
+* While a live build runs the demo, the page ignores real `push` and `pushsubscriptionchange` messages
+  from the service worker (system notifications still show, and tapping one still navigates).
 
 ## 11. Testing
 
 * `src/shared`, `src/server`: Vitest, node environment, using `createMemoryServices()` from
   `src/server/memory.ts` (MemoryStore, fake cache with injectable clock, deterministic crypto, outbox
   recorders for mail/sms/push, a fake PaymentGateway).
-* `src/gas`: Vitest with hand-written mocks of SpreadsheetApp/Utilities/UrlFetchApp/etc. (headers, aliasing,
-  JWT shape, PayPal request bodies, FCM payloads). `src/gas/bundle.test.ts` checks the generated
-  `apps-script/Code.js` itself (plain script, no service calls at load time, every entry point) and drives
-  it end to end against those fakes; it is skipped until `npm run build:gas` has run.
+* `src/gas`: Vitest with hand-written mocks of SpreadsheetApp/Utilities/UrlFetchApp/Session/etc. (headers,
+  aliasing, date conversion between a far-away spreadsheet zone and the script zone, which must pass
+  whatever the machine's own time zone is, PayPal request bodies, push Worker requests: 5-message batches, payload limits, 401 re-registration and
+  `no_keys` recovery). `src/gas/bundle.test.ts` checks the generated `apps-script/Code.js` itself (plain
+  script, no service calls at load time, every entry point) and drives it end to end against those fakes,
+  including setup linking the Worker, `push.register` and a sync push; it is skipped until
+  `npm run build:gas` has run.
+* `workers/push`: its own Vitest config, run by the Worker's deploy workflow (not by `npm test`):
+  `npx vitest run --config workers/push/vitest.config.ts`. It checks the RFC 8291 Appendix A vector
+  byte for byte, decrypts real output with an independent receiver, verifies the VAPID JWT signature,
+  and drives every endpoint against an in-memory KV with a mocked `fetch`.
 * `src/demo/flow.test.ts`: the board walkthrough through the demo client (parent requests funds and pays,
   treasurer approves and verifies a household, announces, posts a credit → `tma:push` to the parent).
 * `src/web`: Vitest + Testing Library in jsdom (`// @vitest-environment jsdom` docblock).

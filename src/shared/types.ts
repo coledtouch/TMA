@@ -225,6 +225,11 @@ export interface PublicSettings {
   donateUrl: string;
   privacyNote: string;
   smsEnabled: boolean;
+  /**
+   * VAPID public key (base64url, uncompressed P-256 point) of the TMA push
+   * Worker. Browsers subscribe with it. '' when push is not configured.
+   */
+  pushPublicKey: string;
 }
 
 // ---------------------------------------------------------------------------

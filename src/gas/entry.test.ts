@@ -15,6 +15,7 @@ import {
   showTmaStatus,
   syncTick,
 } from './entry';
+import { storedToken, testSubscription } from '../server/test-helpers';
 import { FakeOutput, FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
 
 const core = vi.hoisted(() => ({
@@ -164,13 +165,90 @@ describe('sheet menu and schedules', () => {
     expect(core.setup.mock.calls).toEqual([[{ seedSampleData: false }], [{ seedSampleData: true }]]);
     expect(gas.lock.calls).toEqual(['waitLock 20000', 'releaseLock', 'waitLock 20000', 'releaseLock']);
     expect(gas.ui.alerts[0].message).toContain('Created tabs: Families');
-    expect(gas.ui.alerts[0].message).toContain('Created secrets: TOKEN_SECRET');
+    expect(gas.ui.alerts[0].message).toContain('Created secrets: TOKEN_SECRET, PUSH_RELAY_SECRET');
+    // The second run keeps the relay secret it made the first time.
+    expect(gas.ui.alerts[1].message).toContain('Created secrets: TOKEN_SECRET\n');
   });
 
   it('setup still works without a UI (e.g. from the script editor log)', () => {
     vi.spyOn(console, 'info').mockImplementation(() => undefined);
     gas.uiAvailable = false;
     expect(() => setupTma()).not.toThrow();
+  });
+
+  describe('push Worker linking', () => {
+    const DEFAULT_WORKER = 'https://tma-push.coleciprari.workers.dev';
+    const KEY = Buffer.from([0x04, ...nodeCrypto.randomBytes(64)]).toString('base64url');
+
+    function worker(registered: () => string | null, register?: (secret: string) => void) {
+      const seen: string[] = [];
+      gas.fetch.handler = (r) => {
+        seen.push(`${r.method.toUpperCase()} ${r.url}`);
+        if (r.url === `${DEFAULT_WORKER}/register`) {
+          const secret = (JSON.parse(r.payload as string) as { secret: string }).secret;
+          const current = registered();
+          if (current === null) {
+            register?.(secret);
+            return { code: 200, body: { registered: true, first: true } };
+          }
+          return current === secret ? { code: 200, body: { registered: true, first: false } } : { code: 409, body: { error: 'already_registered' } };
+        }
+        if (r.url === `${DEFAULT_WORKER}/vapid-public-key`) return { code: 200, body: { publicKey: KEY } };
+        return { code: 404, body: { error: 'not_found' } };
+      };
+      return seen;
+    }
+
+    it('creates PUSH_RELAY_SECRET, registers it with the Worker (first use) and saves the public key', () => {
+      let stored: string | null = null;
+      const seen = worker(() => stored, (secret) => (stored = secret));
+      setupTma();
+      const secret = gas.properties.getProperty('PUSH_RELAY_SECRET');
+      expect(secret).toMatch(/^[0-9a-f]{64}$/);
+      expect(stored).toBe(secret);
+      expect(gas.properties.getProperty('PUSH_PUBLIC_KEY')).toBe(KEY);
+      expect(seen).toEqual([`POST ${DEFAULT_WORKER}/register`, `GET ${DEFAULT_WORKER}/vapid-public-key`]);
+      const message = gas.ui.alerts[0].message;
+      expect(message).toContain(`Push: linked this sheet to the push Worker (${DEFAULT_WORKER}).`);
+      expect(message).toContain('PUSH_PUBLIC_KEY');
+      expect(message).not.toContain(secret);
+    });
+
+    it('keeps an existing secret and reports a sheet that is already linked', () => {
+      gas.properties.setProperty('PUSH_RELAY_SECRET', 'e'.repeat(64));
+      worker(() => 'e'.repeat(64));
+      const report = setupTma();
+      expect(report.secretsInitialized).toEqual(['TOKEN_SECRET']);
+      expect(gas.properties.getProperty('PUSH_RELAY_SECRET')).toBe('e'.repeat(64));
+      expect(gas.ui.alerts[0].message).toContain(`Push: this sheet is linked to the push Worker (${DEFAULT_WORKER}).`);
+      expect(gas.properties.getProperty('PUSH_PUBLIC_KEY')).toBe(KEY);
+    });
+
+    it('warns (without failing setup) when the Worker belongs to another secret', () => {
+      const seen = worker(() => 'someone-elses-secret-'.repeat(3));
+      expect(() => setupTma()).not.toThrow();
+      const message = gas.ui.alerts[0].message;
+      expect(message).toContain('⚠ Push: The push Worker is already linked to a different Apps Script secret. See workers/push/README.md (rotate keys).');
+      expect(message).not.toContain('someone-elses-secret');
+      expect(gas.properties.getProperty('PUSH_PUBLIC_KEY')).toBeNull();
+      expect(seen).toHaveLength(1);
+    });
+
+    it('warns (without failing setup) when the Worker is unreachable', () => {
+      gas.fetch.handler = () => {
+        throw new Error('Address unavailable: https://tma-push.coleciprari.workers.dev/register');
+      };
+      expect(() => setupTma()).not.toThrow();
+      expect(gas.ui.alerts[0].message).toMatch(/⚠ Push: Could not reach the push Worker \(Address unavailable/);
+      expect(gas.ui.alerts[0].message).toContain('run it again later');
+    });
+
+    it('says push is off when PUSH_RELAY_URL is not an https address', () => {
+      gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['PUSH_RELAY_URL', 'off']]));
+      setupTma();
+      expect(gas.fetch.requests).toHaveLength(0);
+      expect(gas.ui.alerts[0].message).toContain('Push notifications are off: Settings PUSH_RELAY_URL');
+    });
   });
 
   it('installTriggers replaces only its own triggers', () => {
@@ -186,14 +264,8 @@ describe('sheet menu and schedules', () => {
 });
 
 describe('sendTestPushToMe', () => {
-  const ACCOUNT = (() => {
-    const { privateKey } = nodeCrypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-    return JSON.stringify({
-      project_id: 'tma',
-      client_email: 'sa@tma.iam.gserviceaccount.com',
-      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-    });
-  })();
+  const WORKER = 'https://tma-push.coleciprari.workers.dev';
+  const SECRET = '7c1d'.repeat(16);
 
   function devices(rows: string[][]) {
     return gas.spreadsheet.addSheet(
@@ -201,37 +273,52 @@ describe('sendTestPushToMe', () => {
     );
   }
 
-  it('pushes to the signed-in user\'s devices only, removes dead tokens, emails, and logs', () => {
+  it('pushes through the Worker to the signed-in user\'s devices only, removes dead ones, emails, and logs', () => {
     gas.session.email = 'Treasurer@Example.com';
-    gas.properties.setProperty('FCM_SERVICE_ACCOUNT', ACCOUNT);
+    gas.properties.setProperty('PUSH_RELAY_SECRET', SECRET);
+    const live = storedToken(testSubscription('live'));
+    const dead = storedToken(testSubscription('dead'));
+    const other = storedToken(testSubscription('other'));
     const sheet = devices([
-      ['treasurer@example.com', 'F1', 'tok-live', 'iPhone', 'x', 'x'],
-      ['someone@example.com', 'F2', 'tok-other', 'Android', 'x', 'x'],
-      [' TREASURER@example.com ', 'F1', 'tok-dead', 'Pixel', 'x', 'x'],
+      ['treasurer@example.com', 'F1', live, 'iPhone', 'x', 'x'],
+      ['someone@example.com', 'F2', other, 'Android', 'x', 'x'],
+      [' TREASURER@example.com ', 'F1', dead, 'Pixel', 'x', 'x'],
+      ['treasurer@example.com', 'F1', 'demo-device-parent', 'Demo', 'x', 'x'],
     ]);
     const sentTo: string[] = [];
     gas.fetch.handler = (r) => {
-      if (r.url.includes('oauth2')) return { code: 200, body: { access_token: 'at', expires_in: 3600 } };
-      const msg = (JSON.parse(r.payload as string) as { message: { token: string; data: Record<string, string> } }).message;
-      sentTo.push(msg.token);
-      expect(msg.data).toMatchObject({ title: 'Test notification ✅', topic: 'test' });
-      return msg.token === 'tok-dead'
-        ? { code: 404, body: { error: { status: 'NOT_FOUND', details: [{ errorCode: 'UNREGISTERED' }] } } }
-        : { code: 200, body: {} };
+      expect(r.url).toBe(`${WORKER}/send`);
+      expect(r.headers.Authorization).toBe(`Bearer ${SECRET}`);
+      const { messages } = JSON.parse(r.payload as string) as { messages: Array<{ subscription: { endpoint: string }; payload: string }> };
+      for (const m of messages) {
+        sentTo.push(m.subscription.endpoint);
+        expect(JSON.parse(m.payload)).toMatchObject({ title: 'Test notification ✅', topic: 'test' });
+      }
+      return {
+        code: 200,
+        body: { results: messages.map((m) => (m.subscription.endpoint.includes('device-dead') ? { status: 'invalid', reason: 'gone' } : { status: 'ok' })) },
+      };
     };
 
     const report = sendTestPushToMe();
 
-    expect(sentTo.sort()).toEqual(['tok-dead', 'tok-live']);
-    expect(report).toMatchObject({ email: 'treasurer@example.com', devices: 2, push: 1, removed: 1, emailSent: true });
-    // Dead device row blanked (so the tab now ends at row 3); the others are untouched.
+    expect(sentTo.map((e) => e.replace(/.*device-/, ''))).toEqual(['live:APA91bH', 'dead:APA91bH']);
+    expect(report).toMatchObject({ email: 'treasurer@example.com', devices: 3, push: 1, removed: 2, emailSent: true });
+    // Dead and demo rows blanked; the others are untouched.
     expect([1, 2, 3, 4, 5, 6].map((c) => sheet.raw(4, c))).toEqual(['', '', '', '', '', '']);
-    expect(sheet.dump().map((row) => row[2])).toEqual(['Token', 'tok-live', 'tok-other']);
+    expect(sheet.dump().map((row) => row[2])).toEqual(['Token', live, other]);
     expect(gas.mail.sent[0]).toMatchObject({ to: 'treasurer@example.com' });
     const log = gas.spreadsheet.getSheetByName('Log')!.dump();
     expect(log[1][1]).toBe('notify');
     expect(log[1][2]).toBe('test: Test notification ✅ → push 1, email 1, sms 0');
-    expect(gas.ui.alerts[0].message).toContain('Push: delivered to 1 of 2 device(s).');
+    expect(gas.ui.alerts[0].message).toContain('Push: delivered to 1 of 3 device(s).');
+  });
+
+  it('explains how to set push up when the relay secret is missing', () => {
+    devices([['treasurer@example.com', 'F1', storedToken(testSubscription('x')), 'iPhone', 'x', 'x']]);
+    const report = sendTestPushToMe();
+    expect(report.notes[0]).toContain('TMA App → Set up / repair tabs');
+    expect(gas.fetch.requests).toHaveLength(0);
   });
 
   it('explains what is missing when nothing can be pushed', () => {
@@ -257,26 +344,48 @@ describe('sendTestPushToMe', () => {
 });
 
 describe('showTmaStatus', () => {
-  it('lists secret names (never values), integrations and quota', () => {
+  it('lists secret names (never values), integrations, the push Worker and quota', () => {
     gas.properties.setProperty('TOKEN_SECRET', 'super-secret-token-value');
     gas.properties.setProperty('PAYPAL_SECRET', 'super-secret-paypal');
+    gas.properties.setProperty('PUSH_RELAY_SECRET', 'super-secret-relay-value-0123456789abcdef');
     gas.spreadsheet.addSheet(
       FakeSheet.withRows('Settings', [['Key', 'Value'], ['PAYPAL_CLIENT_ID', 'AbcPublic'], ['ONLINE_PAYMENTS', 'TRUE']]),
     );
     gas.scriptApp.newTrigger('syncTick').timeBased().everyMinutes(15).create();
     gas.mail.quota = 93;
+    gas.fetch.handler = (r) =>
+      r.url === 'https://tma-push.coleciprari.workers.dev/health'
+        ? { code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: false } }
+        : { code: 404, body: {} };
 
     const text = showTmaStatus();
 
     expect(text).toContain('Web app URL: https://script.google.com/macros/s/FAKE/exec');
-    expect(text).toContain('Secrets set: TOKEN_SECRET, PAYPAL_SECRET');
-    expect(text).toContain('Secrets not set: FCM_SERVICE_ACCOUNT, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM');
+    expect(text).toContain('Secrets set: TOKEN_SECRET, PAYPAL_SECRET, PUSH_RELAY_SECRET');
+    expect(text).toContain('Secrets not set: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM');
     expect(text).toContain('PayPal: configured (sandbox); online payments on');
-    expect(text).toContain('Push notifications (Firebase): not configured');
+    expect(text).toContain('Push Worker: https://tma-push.coleciprari.workers.dev');
+    expect(text).toContain('Push Worker health: reachable ✓, linked to a sheet ✓, keys ✗ (TMA App → Set up / repair tabs)');
+    expect(text).toContain('Push public key (PUSH_PUBLIC_KEY): not saved yet');
+    expect(text).toContain('Push notifications: configured');
     expect(text).toContain('sync every 15 min ✓, daily reminders ✗ (TMA App → Install schedules)');
     expect(text).toContain('93 emails left today');
     expect(text).not.toContain('super-secret');
+    expect(text).not.toMatch(/firebase|fcm/i);
     expect(gas.ui.alerts[0]).toEqual({ title: 'TMA App status', message: text });
+    // Read-only: only the health check went out.
+    expect(gas.fetch.requests.map((r) => `${r.method} ${r.url}`)).toEqual(['get https://tma-push.coleciprari.workers.dev/health']);
+  });
+
+  it('shows a saved public key and an unreachable Worker', () => {
+    gas.properties.setProperty('PUSH_PUBLIC_KEY', Buffer.from([0x04, ...nodeCrypto.randomBytes(64)]).toString('base64url'));
+    gas.fetch.handler = () => {
+      throw new Error('Address unavailable');
+    };
+    const text = showTmaStatus();
+    expect(text).toContain('Push Worker health: unreachable (Address unavailable)');
+    expect(text).toContain('Push public key (PUSH_PUBLIC_KEY): saved ✓');
+    expect(text).toContain('Push notifications: not configured (TMA App → Set up / repair tabs)');
   });
 
   it('points to setup when TOKEN_SECRET is missing', () => {

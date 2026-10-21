@@ -11,5 +11,11 @@ The TMA app's free backend, ready to paste into the TMA Google Sheet's
 Once the code is in, the sheet gets a **TMA App** menu (Run sync now, Send me a
 test notification, Set up / repair tabs, Install schedules, Status).
 
-Step-by-step setup (deploying the web app, Script Properties for PayPal,
-Firebase and Twilio, schedules): see [`docs/SETUP.md`](../docs/SETUP.md).
+**Set up / repair tabs** also links the sheet to the TMA push Worker (the
+Cloudflare Worker in [`workers/push`](../workers/push/README.md) that delivers
+push notifications): it creates the `PUSH_RELAY_SECRET` Script Property,
+registers it with the Worker at Settings `PUSH_RELAY_URL`, and saves the
+Worker's public key as `PUSH_PUBLIC_KEY`. **Status** shows whether that worked.
+
+Step-by-step setup (deploying the web app, Script Properties for PayPal and
+Twilio, schedules): see [`docs/SETUP.md`](../docs/SETUP.md).

@@ -7,7 +7,9 @@
  * authorization, so module scope must not touch any Apps Script service.
  */
 import { createApp } from '../server/app';
+import { canonicalP256Key } from '../server/push-subscription';
 import type { App } from '../server/services';
+import { generateSecret } from '../server/setup';
 import { SETTING_DEFAULTS, type SecretName } from '../shared/schema';
 import type { ApiAction, ApiRequest, ApiResponse, SetupReport, TickReport } from '../shared/types';
 import { paypalEnv } from './paypal';
@@ -27,7 +29,7 @@ const SCHEDULED_HANDLERS = ['syncTick', 'dailyTick'];
 const SECRET_NAMES: readonly SecretName[] = [
   'TOKEN_SECRET',
   'PAYPAL_SECRET',
-  'FCM_SERVICE_ACCOUNT',
+  'PUSH_RELAY_SECRET',
   'TWILIO_ACCOUNT_SID',
   'TWILIO_AUTH_TOKEN',
   'TWILIO_FROM',
@@ -166,8 +168,15 @@ export function setupTmaWithSampleData(): SetupReport {
 
 function runSetup(seedSampleData: boolean): SetupReport {
   const { services, app } = boot();
-  const report = services.withLock(() => app.setup({ seedSampleData }));
-  services.logger.info('setup', report);
+  const report = services.withLock(() => {
+    const result = app.setup({ seedSampleData });
+    if (services.secrets.get('PUSH_RELAY_SECRET')) return result;
+    services.secrets.set('PUSH_RELAY_SECRET', generateSecret(services.crypto, 'PUSH_RELAY_SECRET'));
+    return { ...result, secretsInitialized: [...result.secretsInitialized, 'PUSH_RELAY_SECRET'] };
+  });
+  // Network calls run outside the lock.
+  const push = linkPushWorker(services);
+  services.logger.info('setup', { ...report, push });
   const lines = [
     report.createdTables.length ? `Created tabs: ${report.createdTables.join(', ')}` : 'All tabs were already there.',
     report.addedColumns.length
@@ -175,10 +184,37 @@ function runSetup(seedSampleData: boolean): SetupReport {
       : 'No columns were missing.',
     report.seeded ? 'Filled the empty tabs with sample (fictional) data.' : '',
     report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(', ')}` : '',
+    ...push,
   ].filter(Boolean);
   const next = 'Next: Deploy → New deployment → Web app, then TMA App → Install schedules.';
   alert('TMA App set up', `${lines.join('\n')}\n\n${next}`);
   return report;
+}
+
+/**
+ * Link this sheet to the push Worker (POST /register with PUSH_RELAY_SECRET,
+ * trust on first use) and save the Worker's public key, which browsers
+ * subscribe with. Never throws: an unreachable Worker only means no push
+ * notifications until Set up runs again. Returns lines for the setup dialog.
+ */
+export function linkPushWorker(services: GasServices): string[] {
+  const push = services.push;
+  const base = push.baseUrl();
+  if (!base) return ['⚠ Push notifications are off: Settings PUSH_RELAY_URL is not an https:// address.'];
+  const lines: string[] = [];
+  try {
+    const { first } = push.register();
+    lines.push(first ? `Push: linked this sheet to the push Worker (${base}).` : `Push: this sheet is linked to the push Worker (${base}).`);
+  } catch (error) {
+    return [`⚠ Push: ${errorMessage(error)} Phones won't get notifications until Set up links the push Worker; run it again later.`];
+  }
+  try {
+    push.refreshPublicKey();
+    lines.push("Push: saved the Worker's public key (Script Property PUSH_PUBLIC_KEY).");
+  } catch (error) {
+    lines.push(`⚠ Push: could not get the Worker's public key. ${errorMessage(error)} Run Set up again later.`);
+  }
+  return lines;
 }
 
 /** Replace this project's syncTick/dailyTick triggers with fresh ones. */
@@ -227,7 +263,7 @@ export function showTmaStatus(): string {
     `Secrets set: ${present.join(', ') || 'none'}`,
     `Secrets not set: ${missing.join(', ') || 'none'}`,
     `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting('PAYPAL_ENV'))})` : 'not configured'}; online payments ${yes(services.flag('ONLINE_PAYMENTS'))}`,
-    `Push notifications (Firebase): ${services.push.enabled() ? 'configured' : 'not configured'}`,
+    ...pushStatus(services),
     `Text messages (Twilio): ${services.sms.enabled() ? 'configured' : 'not configured'}; SMS setting ${yes(services.flag('SMS_ENABLED'))}`,
     `Email: ${yes(services.flag('EMAIL_ENABLED'))}; ${safely(() => services.mailer.remainingQuota(), 0)} emails left today`,
     `Version: ${VERSION}`,
@@ -238,9 +274,32 @@ export function showTmaStatus(): string {
   return text;
 }
 
+/** Status lines for the push Worker. Never prints PUSH_RELAY_SECRET. */
+function pushStatus(services: GasServices): string[] {
+  const push = services.push;
+  const base = push.baseUrl();
+  if (!base) return ['Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off'];
+  const health = push.health();
+  const setUp = ' (TMA App → Set up / repair tabs)';
+  const healthLine = health.reachable
+    ? `Push Worker health: reachable ✓, linked to a sheet ${health.registered ? '✓' : `✗${setUp}`}, keys ${health.hasKeys ? '✓' : `✗${setUp}`}`
+    : `Push Worker health: unreachable (${health.httpCode ? `HTTP ${health.httpCode}` : health.error || 'no answer'})`;
+  const keySaved = canonicalP256Key(services.secrets.get('PUSH_PUBLIC_KEY')) !== null;
+  return [
+    `Push Worker: ${base}`,
+    healthLine,
+    `Push public key (PUSH_PUBLIC_KEY): ${keySaved ? 'saved ✓' : `not saved yet${setUp}`}`,
+    `Push notifications: ${push.enabled() ? 'configured' : `not configured${setUp}`}`,
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export function summarizeTick(report: TickReport): string {
   const n = report.notifications;

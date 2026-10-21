@@ -1,35 +1,21 @@
 // @vitest-environment jsdom
 import type { ApiAction, ApiParams } from '../../shared/types';
 import { ApiError, type ApiClient } from '../api/client';
+import { MODE_KEY } from './mode';
 import {
+  applicationServerKey,
+  canonicalToken,
   DEMO_TOKEN_PREFIX,
   disablePush,
   enablePush,
   forgetDemoPushToken,
   getPushSupport,
+  isDeliverableEndpoint,
   isIos,
   isStandalone,
-  PUSH_TOKEN_KEY,
-  readFirebaseConfig,
   refreshPushRegistration,
 } from './push';
-
-const fb = vi.hoisted(() => ({
-  initializeApp: vi.fn(),
-  getApps: vi.fn(),
-  isSupported: vi.fn(),
-  getMessaging: vi.fn(),
-  getToken: vi.fn(),
-  deleteToken: vi.fn(),
-}));
-
-vi.mock('firebase/app', () => ({ initializeApp: fb.initializeApp, getApps: fb.getApps }));
-vi.mock('firebase/messaging', () => ({
-  isSupported: fb.isSupported,
-  getMessaging: fb.getMessaging,
-  getToken: fb.getToken,
-  deleteToken: fb.deleteToken,
-}));
+import { storageKeys } from './storage';
 
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
@@ -38,15 +24,91 @@ const IPAD_DESKTOP_UA =
 const ANDROID_UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
 
-const FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyExampleExampleExample',
-  authDomain: 'tma-app.firebaseapp.com',
-  projectId: 'tma-app',
-  messagingSenderId: '1234567890',
-  appId: '1:1234567890:web:abcdef',
-};
-const VAPID = `B${'x'.repeat(86)}`;
-const REGISTRATION = { scope: 'https://example.org/tma/' } as unknown as ServiceWorkerRegistration;
+/** The push Worker's VAPID public key (base64url, 65-byte P-256 point), and a rotated one. */
+const KEY = 'BIeCLnOS97NnYj0RLVAmSyNq0kf9FdqRZDBYrjHNSolsjMrbO_ZNFGlion9tcR_EDhXoz0tUEw6MpU-GFVht8Z8';
+const NEW_KEY = 'BLF4x_X7A6_2hr1srUFwSczcUU0tw0UmHl9Wa3Ha8a4xVYJQV3FCuzJmIwfAX-J2nQRCcJ0U4Qfpm7esz6acqKw';
+/** A browser's subscription keys. */
+const P256DH = 'BLiMNAE4WkUW7IsQSZJRebfRwHESWUCL0lncEToJAee__ewUFcw0C9H18fQj_OPhkhPHJLPwWclCDUerWNUgf_8';
+const AUTH = 'zuANbj48wKSj0RvuadgMNQ';
+const ENDPOINT_1 = 'https://fcm.googleapis.com/fcm/send/device-one:APA91bExample';
+const ENDPOINT_2 = 'https://fcm.googleapis.com/fcm/send/device-two:APA91bExample';
+
+const LIVE = storageKeys('live');
+const DEMO = storageKeys('demo');
+
+function bytes(b64url: string): number[] {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  return Array.from(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4)), (c) => c.charCodeAt(0));
+}
+
+function toBase64Url(data: number[]): string {
+  return btoa(String.fromCharCode(...data)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** What push.register must receive for a subscription: canonical JSON, endpoint then keys, no expirationTime. */
+function tokenFor(endpoint: string): string {
+  return `{"endpoint":"${endpoint}","keys":{"p256dh":"${P256DH}","auth":"${AUTH}"}}`;
+}
+
+function storeLiveRecord(endpoint: string, { key = KEY, at = new Date().toISOString() } = {}): void {
+  localStorage.setItem(LIVE.push, JSON.stringify({ token: tokenFor(endpoint), key, at }));
+}
+
+function liveRecord(): { token: string; key?: string; at: string } | null {
+  const raw = localStorage.getItem(LIVE.push);
+  return raw ? (JSON.parse(raw) as { token: string; key?: string; at: string }) : null;
+}
+
+// --- fake Push API -------------------------------------------------------------
+
+class FakeSubscription {
+  readonly unsubscribe = vi.fn(async () => {
+    if (this.manager.current === this) this.manager.current = null;
+    return true;
+  });
+
+  constructor(
+    private readonly manager: FakePushManager,
+    readonly endpoint: string,
+    private readonly key: Uint8Array | null,
+  ) {}
+
+  get options() {
+    return { userVisibleOnly: true, applicationServerKey: this.key ? this.key.slice().buffer : null };
+  }
+
+  toJSON() {
+    return { endpoint: this.endpoint, expirationTime: null, keys: { p256dh: P256DH, auth: AUTH } };
+  }
+}
+
+class FakePushManager {
+  current: FakeSubscription | null = null;
+  /** Endpoints handed out by subscribe(), in order. */
+  endpoints = [ENDPOINT_1, ENDPOINT_2, 'https://fcm.googleapis.com/fcm/send/device-three'];
+  subscribeError: Error | null = null;
+
+  readonly getSubscription = vi.fn(async () => this.current);
+
+  readonly subscribe = vi.fn(async (options: PushSubscriptionOptionsInit) => {
+    if (this.subscribeError) throw this.subscribeError;
+    const key = new Uint8Array(options.applicationServerKey as Uint8Array);
+    if (this.current) {
+      // Like Chrome: a different key while a subscription exists is an error.
+      const same = Array.from(new Uint8Array(this.current.options.applicationServerKey!)).join() === Array.from(key).join();
+      if (!same) throw new DOMException('A subscription with a different applicationServerKey already exists.', 'InvalidStateError');
+      return this.current;
+    }
+    this.current = new FakeSubscription(this, this.endpoints.shift() ?? ENDPOINT_1, key);
+    return this.current;
+  });
+
+  /** A subscription that already exists in the browser. */
+  existing(endpoint: string, key: string | null): FakeSubscription {
+    this.current = new FakeSubscription(this, endpoint, key ? new Uint8Array(bytes(key)) : null);
+    return this.current;
+  }
+}
 
 // --- environment helpers ----------------------------------------------------
 
@@ -75,19 +137,16 @@ class FakeNotification {
   });
 }
 
-/** A browser that can do Web Push (Android Chrome by default). */
-function pushCapableBrowser({ ua = ANDROID_UA, permission = 'default' as NotificationPermission } = {}): void {
+/** A browser that can do Web Push (Android Chrome by default) with a ready service worker. */
+function pushCapableBrowser({ ua = ANDROID_UA, permission = 'default' as NotificationPermission } = {}): FakePushManager {
+  const pushManager = new FakePushManager();
   FakeNotification.permission = permission;
   FakeNotification.nextAnswer = 'granted';
   vi.stubGlobal('Notification', FakeNotification);
   vi.stubGlobal('PushManager', function PushManager() {});
-  setNavigator({ userAgent: ua, serviceWorker: { ready: Promise.resolve(REGISTRATION) } });
-}
-
-function liveEnv({ config = JSON.stringify(FIREBASE_CONFIG), vapid = VAPID } = {}): void {
-  vi.stubEnv('VITE_API_URL', 'https://script.google.com/macros/s/abc/exec');
-  vi.stubEnv('VITE_FIREBASE_CONFIG', config);
-  vi.stubEnv('VITE_FIREBASE_VAPID_KEY', vapid);
+  const registration = { scope: 'https://example.org/tma/', pushManager };
+  setNavigator({ userAgent: ua, serviceWorker: { ready: Promise.resolve(registration) } });
+  return pushManager;
 }
 
 type Call = { action: ApiAction; params: unknown };
@@ -107,15 +166,14 @@ function fakeApi(mode: 'demo' | 'live', fail?: ApiError): ApiClient & { calls: C
   };
 }
 
+function tokensOf(calls: Call[]): Array<[ApiAction, string]> {
+  return calls.map((c) => [c.action, (c.params as { token: string }).token]);
+}
+
 beforeEach(() => {
   localStorage.clear();
-  fb.getApps.mockReset().mockReturnValue([]);
-  fb.initializeApp.mockReset().mockImplementation((_options: unknown, name: string) => ({ name }));
-  fb.isSupported.mockReset().mockResolvedValue(true);
-  fb.getMessaging.mockReset().mockReturnValue({ kind: 'messaging' });
-  fb.getToken.mockReset().mockResolvedValue('fcm-token-1234567890-abcdefghij');
-  fb.deleteToken.mockReset().mockResolvedValue(true);
   FakeNotification.requestPermission.mockClear();
+  vi.stubEnv('VITE_API_URL', 'https://script.google.com/macros/s/abc/exec');
 });
 
 afterEach(() => {
@@ -157,107 +215,178 @@ describe('isStandalone', () => {
   });
 });
 
-// --- configuration ------------------------------------------------------------
+// --- keys and tokens ------------------------------------------------------------
 
-describe('readFirebaseConfig', () => {
-  it('parses the JSON config and keeps only Firebase web keys', () => {
-    liveEnv({ config: JSON.stringify({ ...FIREBASE_CONFIG, evil: '<script>' }) });
-    const config = readFirebaseConfig();
-    expect(config?.vapidKey).toBe(VAPID);
-    expect(config?.options).toEqual(FIREBASE_CONFIG);
+describe('applicationServerKey', () => {
+  it("decodes the Worker's base64url public key to the 65 key bytes", () => {
+    const key = applicationServerKey(KEY);
+    expect(key).toBeInstanceOf(Uint8Array);
+    expect(Array.from(key!)).toEqual(bytes(KEY));
+    expect(key![0]).toBe(4);
+    expect(Array.from(applicationServerKey(`  ${KEY}  `)!)).toEqual(bytes(KEY));
   });
 
   it.each([
-    ['empty config', '', VAPID],
-    ['not JSON', '{apiKey: "x"}', VAPID],
-    ['missing appId', JSON.stringify({ ...FIREBASE_CONFIG, appId: '' }), VAPID],
-    ['array', '[]', VAPID],
-    ['missing VAPID key', JSON.stringify(FIREBASE_CONFIG), ''],
-    ['bad VAPID key', JSON.stringify(FIREBASE_CONFIG), 'not a key!'],
-  ])('returns null for %s', (_label, config, vapid) => {
-    liveEnv({ config, vapid });
-    expect(readFirebaseConfig()).toBeNull();
+    ['empty', ''],
+    ['missing', undefined],
+    ['not base64', 'not a key!'],
+    ['too short', KEY.slice(0, 40)],
+    ['a compressed point', toBase64Url([2, ...bytes(KEY).slice(1, 33)])],
+    ['65 bytes that are not an uncompressed point', toBase64Url([5, ...bytes(KEY).slice(1)])],
+    ['too long', `${KEY}${KEY}${KEY}`],
+  ])('rejects %s', (_label, value) => {
+    expect(applicationServerKey(value)).toBeNull();
+  });
+});
+
+describe('isDeliverableEndpoint', () => {
+  it.each([
+    'https://fcm.googleapis.com/fcm/send/abc',
+    'https://updates.push.services.mozilla.com/wpush/v2/abc',
+    'https://web.push.apple.com/QOabc',
+    'https://api.push.apple.com/3/device/abc',
+    'https://wns2-by3p.notify.windows.com/w/?token=abc',
+  ])('accepts %s', (endpoint) => {
+    expect(isDeliverableEndpoint(endpoint)).toBe(true);
+  });
+
+  it.each([
+    'http://fcm.googleapis.com/fcm/send/abc',
+    'https://fcm.googleapis.com:8443/fcm/send/abc',
+    'https://evil.example/fcm.googleapis.com',
+    'https://fcm.googleapis.com.evil.example/x',
+    'https://user:pw@fcm.googleapis.com/x',
+    'https://push.apple.com.evil.example/x',
+    'not a url',
+    `https://fcm.googleapis.com/${'a'.repeat(2100)}`,
+  ])('rejects %s', (endpoint) => {
+    expect(isDeliverableEndpoint(endpoint)).toBe(false);
+  });
+});
+
+describe('canonicalToken', () => {
+  it('keeps only the endpoint and keys, in a fixed order', () => {
+    const token = canonicalToken({ expirationTime: 123, keys: { auth: AUTH, p256dh: P256DH, extra: 'x' }, endpoint: ENDPOINT_1 });
+    expect(token).toBe(tokenFor(ENDPOINT_1));
+    expect(JSON.parse(token!)).toEqual({ endpoint: ENDPOINT_1, keys: { p256dh: P256DH, auth: AUTH } });
+  });
+
+  it.each([
+    ['no keys', { endpoint: ENDPOINT_1 }],
+    ['an unknown push service', { endpoint: 'https://push.example.com/abc', keys: { p256dh: P256DH, auth: AUTH } }],
+    ['a short p256dh', { endpoint: ENDPOINT_1, keys: { p256dh: P256DH.slice(0, 20), auth: AUTH } }],
+    ['a long auth', { endpoint: ENDPOINT_1, keys: { p256dh: P256DH, auth: `${AUTH}AAAA` } }],
+    ['not an object', 'subscription'],
+  ])('rejects %s', (_label, value) => {
+    expect(canonicalToken(value)).toBeNull();
   });
 });
 
 // --- support states -------------------------------------------------------------
 
 describe('getPushSupport (live)', () => {
-  it('is not-configured when the Firebase env vars are missing', async () => {
-    liveEnv({ config: '', vapid: '' });
+  it('is not-configured without a public key from the server, or with a malformed one', async () => {
+    pushCapableBrowser();
+    expect(await getPushSupport({ mode: 'live' })).toBe('not-configured');
+    expect(await getPushSupport({ mode: 'live', publicKey: '' })).toBe('not-configured');
+    expect(await getPushSupport({ mode: 'live', publicKey: 'nonsense' })).toBe('not-configured');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
+  });
+
+  it('uses the page mode by default (live build)', async () => {
     pushCapableBrowser();
     expect(await getPushSupport()).toBe('not-configured');
+    expect(await getPushSupport({ publicKey: KEY })).toBe('ready');
   });
 
   it('is needs-install on iPhone Safari outside the Home Screen app', async () => {
-    liveEnv();
     setStandaloneMedia(false);
     setNavigator({ userAgent: IPHONE_UA });
-    expect(await getPushSupport()).toBe('needs-install');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('needs-install');
   });
 
   it('is needs-install on iPadOS with a desktop user agent', async () => {
-    liveEnv();
     setNavigator({ userAgent: IPAD_DESKTOP_UA, maxTouchPoints: 5 });
-    expect(await getPushSupport()).toBe('needs-install');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('needs-install');
   });
 
   it('is ready on iPhone once installed to the Home Screen', async () => {
-    liveEnv();
     pushCapableBrowser({ ua: IPHONE_UA });
     setNavigator({ standalone: true });
-    expect(await getPushSupport()).toBe('ready');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
   });
 
   it('is unsupported without the Notification / Push APIs', async () => {
-    liveEnv();
-    setNavigator({ userAgent: ANDROID_UA, serviceWorker: { ready: Promise.resolve(REGISTRATION) } });
-    expect(await getPushSupport()).toBe('unsupported');
+    setNavigator({ userAgent: ANDROID_UA, serviceWorker: { ready: new Promise(() => {}) } });
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('unsupported');
   });
 
-  it('reports blocked, ready and enabled from the permission and stored token', async () => {
-    liveEnv();
+  it('reports blocked, ready and enabled from the permission and stored registration', async () => {
     pushCapableBrowser({ permission: 'denied' });
-    expect(await getPushSupport()).toBe('blocked');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('blocked');
 
     FakeNotification.permission = 'granted';
-    expect(await getPushSupport()).toBe('ready');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
 
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-1234567890-abcdefghij');
-    expect(await getPushSupport()).toBe('enabled');
+    storeLiveRecord(ENDPOINT_1);
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('enabled');
 
     FakeNotification.permission = 'default';
-    expect(await getPushSupport()).toBe('ready');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
   });
 
-  it('honours an explicit mode', async () => {
-    liveEnv({ config: '', vapid: '' });
-    expect(await getPushSupport({ mode: 'demo' })).toBe('ready');
+  it('ignores a stored value that is not a subscription (e.g. an old Firebase or demo token)', async () => {
+    pushCapableBrowser({ permission: 'granted' });
+    for (const token of ['fcm-token-1234567890', 'demo-abc', '{"endpoint":"https://evil.example/x","keys":{}}']) {
+      localStorage.setItem(LIVE.push, JSON.stringify({ token, at: new Date().toISOString() }));
+      expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
+    }
+    localStorage.setItem(LIVE.push, '{not json');
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
   });
 });
 
 describe('getPushSupport (demo)', () => {
   it('is ready on any device (banners show in the app) and enabled once a demo token is stored', async () => {
-    vi.stubEnv('VITE_API_URL', '');
     setNavigator({ userAgent: IPHONE_UA });
+    expect(await getPushSupport({ mode: 'demo' })).toBe('ready');
+    localStorage.setItem(DEMO.push, JSON.stringify({ token: `${DEMO_TOKEN_PREFIX}abc`, at: new Date().toISOString() }));
+    expect(await getPushSupport({ mode: 'demo' })).toBe('enabled');
+  });
+
+  it('keeps the demo and live registrations apart', async () => {
+    pushCapableBrowser({ permission: 'granted' });
+    storeLiveRecord(ENDPOINT_1);
+    expect(await getPushSupport({ mode: 'demo' })).toBe('ready');
+    localStorage.clear();
+    localStorage.setItem(DEMO.push, JSON.stringify({ token: `${DEMO_TOKEN_PREFIX}abc`, at: '' }));
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
+  });
+
+  it('is the default without VITE_API_URL, or after "?demo" on a live build', async () => {
+    vi.stubEnv('VITE_API_URL', '');
     expect(await getPushSupport()).toBe('ready');
-    localStorage.setItem(PUSH_TOKEN_KEY, `${DEMO_TOKEN_PREFIX}abc`);
-    expect(await getPushSupport()).toBe('enabled');
+    vi.stubEnv('VITE_API_URL', 'https://script.google.com/macros/s/abc/exec');
+    localStorage.setItem(MODE_KEY, 'demo');
+    expect(await getPushSupport()).toBe('ready'); // no key needed in the demo
   });
 });
 
 // --- enable / disable -------------------------------------------------------------
 
 describe('enablePush (demo)', () => {
-  it('registers a demo token and stores it', async () => {
+  it('registers a demo token, stores it under the demo key and never touches the real subscription', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
     const api = fakeApi('demo');
     expect(await enablePush(api)).toEqual({ ok: true });
     expect(api.calls).toHaveLength(1);
     expect(api.calls[0].action).toBe('push.register');
     const token = (api.calls[0].params as { token: string }).token;
     expect(token).toMatch(/^demo-[0-9a-f-]{32,36}$/);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBe(token);
-    expect(fb.getToken).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(DEMO.push)!).token).toBe(token);
+    expect(localStorage.getItem(LIVE.push)).toBeNull();
+    expect(pushManager.getSubscription).not.toHaveBeenCalled();
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
   });
 
   it('asks for permission when possible but carries on when it is denied', async () => {
@@ -272,9 +401,9 @@ describe('enablePush (demo)', () => {
   it('replaces this device’s previous demo token', async () => {
     const api = fakeApi('demo');
     await enablePush(api);
-    const first = localStorage.getItem(PUSH_TOKEN_KEY);
+    const first = JSON.parse(localStorage.getItem(DEMO.push)!).token as string;
     await enablePush(api);
-    const second = localStorage.getItem(PUSH_TOKEN_KEY);
+    const second = JSON.parse(localStorage.getItem(DEMO.push)!).token as string;
     expect(second).not.toBe(first);
     expect(api.calls.map((c) => c.action)).toEqual(['push.register', 'push.register', 'push.unregister']);
     expect(api.calls[2].params).toEqual({ token: first });
@@ -283,175 +412,378 @@ describe('enablePush (demo)', () => {
   it('returns the server message when registration fails', async () => {
     const api = fakeApi('demo', new ApiError('RATE_LIMITED', 'Too many device registrations.'));
     expect(await enablePush(api)).toEqual({ ok: false, reason: 'Too many device registrations.' });
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(localStorage.getItem(DEMO.push)).toBeNull();
   });
 
-  it('forgetDemoPushToken clears only demo tokens', () => {
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-real-token-123456789');
+  it('forgetDemoPushToken clears only the demo registration', () => {
+    storeLiveRecord(ENDPOINT_1);
+    localStorage.setItem(DEMO.push, JSON.stringify({ token: 'demo-123', at: '' }));
     forgetDemoPushToken();
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBe('fcm-real-token-123456789');
-    localStorage.setItem(PUSH_TOKEN_KEY, 'demo-123');
-    forgetDemoPushToken();
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(localStorage.getItem(DEMO.push)).toBeNull();
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
   });
 });
 
 describe('enablePush (live)', () => {
-  it('asks permission, gets an FCM token with the app service worker and registers it', async () => {
-    liveEnv();
-    pushCapableBrowser();
+  it('asks permission, subscribes with the decoded key and registers the canonical subscription JSON', async () => {
+    const pushManager = pushCapableBrowser();
     const api = fakeApi('live');
 
-    expect(await enablePush(api)).toEqual({ ok: true });
+    expect(await enablePush(api, KEY)).toEqual({ ok: true });
 
     expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1);
-    expect(fb.initializeApp).toHaveBeenCalledWith(FIREBASE_CONFIG, 'tma');
-    expect(fb.getToken).toHaveBeenCalledWith({ kind: 'messaging' }, { vapidKey: VAPID, serviceWorkerRegistration: REGISTRATION });
-    expect(api.calls).toEqual([
-      { action: 'push.register', params: { token: 'fcm-token-1234567890-abcdefghij', userAgent: ANDROID_UA } },
-    ]);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBe('fcm-token-1234567890-abcdefghij');
-    expect(await getPushSupport()).toBe('enabled');
+    expect(pushManager.subscribe).toHaveBeenCalledTimes(1);
+    const options = pushManager.subscribe.mock.calls[0][0];
+    expect(options.userVisibleOnly).toBe(true);
+    expect(options.applicationServerKey).toBeInstanceOf(Uint8Array);
+    expect(Array.from(options.applicationServerKey as Uint8Array)).toEqual(bytes(KEY));
+    expect(api.calls).toEqual([{ action: 'push.register', params: { token: tokenFor(ENDPOINT_1), userAgent: ANDROID_UA } }]);
+    expect(liveRecord()).toMatchObject({ token: tokenFor(ENDPOINT_1), key: KEY });
+    expect(localStorage.getItem(DEMO.push)).toBeNull();
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('enabled');
   });
 
-  it('reuses the named Firebase app on later calls', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    fb.getApps.mockReturnValue([{ name: '[DEFAULT]' }, { name: 'tma' }]);
-    await enablePush(fakeApi('live'));
-    expect(fb.initializeApp).not.toHaveBeenCalled();
-    expect(fb.getMessaging).toHaveBeenCalledWith({ name: 'tma' });
+  it('reuses a subscription this browser already has for the same key', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    const api = fakeApi('live');
+    expect(await enablePush(api, KEY)).toEqual({ ok: true });
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+    expect(tokensOf(api.calls)).toEqual([['push.register', tokenFor(ENDPOINT_2)]]);
+  });
+
+  it('drops a subscription made with an old key before subscribing with the new one', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const old = pushManager.existing(ENDPOINT_2, KEY);
+    const api = fakeApi('live');
+
+    expect(await enablePush(api, NEW_KEY)).toEqual({ ok: true });
+
+    expect(old.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(old.unsubscribe.mock.invocationCallOrder[0]).toBeLessThan(pushManager.subscribe.mock.invocationCallOrder[0]);
+    expect(Array.from(pushManager.subscribe.mock.calls[0][0].applicationServerKey as Uint8Array)).toEqual(bytes(NEW_KEY));
+    expect(tokensOf(api.calls)).toEqual([['push.register', tokenFor(ENDPOINT_1)]]);
+    expect(liveRecord()?.key).toBe(NEW_KEY);
+  });
+
+  it('replaces a subscription that was made without a key', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const keyless = pushManager.existing(ENDPOINT_2, null);
+    expect(await enablePush(fakeApi('live'), KEY)).toEqual({ ok: true });
+    expect(keyless.unsubscribe).toHaveBeenCalled();
+    expect(pushManager.subscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces the token this device registered before', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    storeLiveRecord(ENDPOINT_2);
+    pushManager.existing(ENDPOINT_1, KEY);
+    const api = fakeApi('live');
+    await enablePush(api, KEY);
+    expect(tokensOf(api.calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_1)],
+      ['push.unregister', tokenFor(ENDPOINT_2)],
+    ]);
   });
 
   it('stops when the parent blocks notifications', async () => {
-    liveEnv();
-    pushCapableBrowser();
+    const pushManager = pushCapableBrowser();
     FakeNotification.nextAnswer = 'denied';
     const api = fakeApi('live');
-    const result = await enablePush(api);
-    expect(result.ok).toBe(false);
+    const result = await enablePush(api, KEY);
     expect(result.ok === false && result.reason).toMatch(/blocked/i);
     expect(api.calls).toEqual([]);
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('asks again when the parent closes the prompt', async () => {
+    pushCapableBrowser();
+    FakeNotification.nextAnswer = 'default';
+    const result = await enablePush(fakeApi('live'), KEY);
+    expect(result.ok === false && result.reason).toMatch(/still off/);
   });
 
   it('explains needs-install / not-configured without asking for permission', async () => {
-    liveEnv();
     setNavigator({ userAgent: IPHONE_UA });
-    const iphone = await enablePush(fakeApi('live'));
+    const iphone = await enablePush(fakeApi('live'), KEY);
     expect(iphone.ok === false && iphone.reason).toMatch(/Home Screen/);
 
-    liveEnv({ config: '' });
     pushCapableBrowser();
-    const unconfigured = await enablePush(fakeApi('live'));
+    const unconfigured = await enablePush(fakeApi('live'), '');
     expect(unconfigured.ok === false && unconfigured.reason).toMatch(/hasn't switched on/);
+    const noKey = await enablePush(fakeApi('live'));
+    expect(noKey.ok === false && noKey.reason).toMatch(/hasn't switched on/);
     expect(FakeNotification.requestPermission).not.toHaveBeenCalled();
   });
 
-  it('reports browsers Firebase cannot use', async () => {
-    liveEnv();
-    pushCapableBrowser();
-    fb.isSupported.mockResolvedValue(false);
-    const result = await enablePush(fakeApi('live'));
+  it('does not keep a subscription on a push service TMA cannot deliver to', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.endpoints = ['https://push.example.com/send/abc'];
+    const api = fakeApi('live');
+    const result = await enablePush(api, KEY);
     expect(result.ok === false && result.reason).toMatch(/can't receive notifications/);
+    expect(pushManager.current).toBeNull();
+    expect(api.calls).toEqual([]);
+    expect(liveRecord()).toBeNull();
   });
 
-  it('turns unexpected Firebase failures into a friendly message', async () => {
-    liveEnv();
-    pushCapableBrowser();
-    fb.getToken.mockRejectedValue(new Error('messaging/token-subscribe-failed'));
+  it('turns subscribe failures into friendly messages and stores nothing', async () => {
+    const pushManager = pushCapableBrowser();
+    pushManager.subscribeError = new DOMException('Registration failed - push service not available', 'AbortError');
     const api = fakeApi('live');
-    const result = await enablePush(api);
-    expect(result).toEqual({ ok: false, reason: "Couldn't turn on notifications on this device. Please try again." });
+    expect(await enablePush(api, KEY)).toEqual({
+      ok: false,
+      reason: "Couldn't turn on notifications on this device. Please try again.",
+    });
     expect(api.calls).toEqual([]);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(liveRecord()).toBeNull();
+
+    pushManager.subscribeError = new DOMException('Permission denied', 'NotAllowedError');
+    const denied = await enablePush(api, KEY);
+    expect(denied.ok === false && denied.reason).toMatch(/blocked/);
+  });
+
+  it('gives up when the service worker never becomes ready', async () => {
+    vi.useFakeTimers();
+    try {
+      pushCapableBrowser({ permission: 'granted' });
+      setNavigator({ serviceWorker: { ready: new Promise(() => {}) } });
+      const pending = enablePush(fakeApi('live'), KEY);
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await pending;
+      expect(result.ok === false && result.reason).toMatch(/still getting ready/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the server message when TMA refuses the registration', async () => {
+    pushCapableBrowser({ permission: 'granted' });
+    const result = await enablePush(fakeApi('live', new ApiError('BAD_REQUEST', 'That device token is not valid.')), KEY);
+    expect(result).toEqual({ ok: false, reason: 'That device token is not valid.' });
+    expect(liveRecord()).toBeNull();
   });
 });
 
 describe('disablePush', () => {
-  it('unregisters the token, deletes it from Firebase and forgets it', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-old-1234567890');
+  it('unregisters the token, unsubscribes the browser and forgets it', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
     const api = fakeApi('live');
     await disablePush(api);
-    expect(api.calls).toEqual([{ action: 'push.unregister', params: { token: 'fcm-token-old-1234567890' } }]);
-    expect(fb.deleteToken).toHaveBeenCalledTimes(1);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(tokensOf(api.calls)).toEqual([['push.unregister', tokenFor(ENDPOINT_1)]]);
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(liveRecord()).toBeNull();
   });
 
   it('keeps everything when TMA cannot be reached, so the parent can retry', async () => {
-    liveEnv();
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-old-1234567890');
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
     await expect(disablePush(fakeApi('live', new ApiError('INTERNAL', 'Network problem')))).rejects.toThrow('Network problem');
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBe('fcm-token-old-1234567890');
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
+    expect(sub.unsubscribe).not.toHaveBeenCalled();
   });
 
   it('still clears the device when the session has expired', async () => {
-    liveEnv();
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-old-1234567890');
+    pushCapableBrowser({ permission: 'granted' }).existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
     await disablePush(fakeApi('live', new ApiError('UNAUTHORIZED', 'Please sign in again.')));
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(liveRecord()).toBeNull();
   });
 
-  it('does nothing without a token', async () => {
+  it('does nothing without a registration', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
     const api = fakeApi('live');
     await disablePush(api);
     expect(api.calls).toEqual([]);
+    expect(pushManager.getSubscription).not.toHaveBeenCalled();
+  });
+
+  it('in the demo, forgets only the demo token and leaves the real subscription alone', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const sub = pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    localStorage.setItem(DEMO.push, JSON.stringify({ token: 'demo-abc', at: '' }));
+    const api = fakeApi('demo');
+    await disablePush(api);
+    expect(tokensOf(api.calls)).toEqual([['push.unregister', 'demo-abc']]);
+    expect(localStorage.getItem(DEMO.push)).toBeNull();
+    expect(sub.unsubscribe).not.toHaveBeenCalled();
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
   });
 });
 
 describe('refreshPushRegistration', () => {
-  it('re-registers when Firebase hands out a new token', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-old-1234567890');
-    localStorage.setItem(`${PUSH_TOKEN_KEY}.at`, new Date().toISOString());
-    fb.getToken.mockResolvedValue('fcm-token-new-1234567890');
+  it('stays quiet when the subscription is unchanged and recently registered', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1);
     const api = fakeApi('live');
-    await refreshPushRegistration(api);
-    expect(api.calls.map((c) => [c.action, (c.params as { token: string }).token])).toEqual([
-      ['push.register', 'fcm-token-new-1234567890'],
-      ['push.unregister', 'fcm-token-old-1234567890'],
+    await refreshPushRegistration(api, KEY);
+    expect(api.calls).toEqual([]);
+    expect(pushManager.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('re-registers when the endpoint changed since last time', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    const api = fakeApi('live');
+    await refreshPushRegistration(api, KEY);
+    expect(tokensOf(api.calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_2)],
+      ['push.unregister', tokenFor(ENDPOINT_1)],
     ]);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBe('fcm-token-new-1234567890');
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_2));
   });
 
-  it('stays quiet when the token is unchanged and recently registered', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-1234567890-abcdefghij');
-    localStorage.setItem(`${PUSH_TOKEN_KEY}.at`, new Date().toISOString());
+  it('subscribes again when the browser dropped the subscription', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    storeLiveRecord(ENDPOINT_2);
     const api = fakeApi('live');
+    await refreshPushRegistration(api, KEY);
+    expect(Array.from(pushManager.subscribe.mock.calls[0][0].applicationServerKey as Uint8Array)).toEqual(bytes(KEY));
+    expect(tokensOf(api.calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_1)],
+      ['push.unregister', tokenFor(ENDPOINT_2)],
+    ]);
+  });
+
+  it('re-subscribes with the new key after the Worker keys were replaced', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    const old = pushManager.existing(ENDPOINT_2, KEY);
+    storeLiveRecord(ENDPOINT_2);
+    const api = fakeApi('live');
+    await refreshPushRegistration(api, NEW_KEY);
+    expect(old.unsubscribe).toHaveBeenCalled();
+    expect(Array.from(pushManager.subscribe.mock.calls[0][0].applicationServerKey as Uint8Array)).toEqual(bytes(NEW_KEY));
+    expect(tokensOf(api.calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_1)],
+      ['push.unregister', tokenFor(ENDPOINT_2)],
+    ]);
+    expect(liveRecord()).toMatchObject({ token: tokenFor(ENDPOINT_1), key: NEW_KEY });
+  });
+
+  it('does not unregister the old token when only the keys changed (TMA matches devices by endpoint)', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_1, KEY);
+    const oldKeys = `{"endpoint":"${ENDPOINT_1}","keys":{"p256dh":"${NEW_KEY}","auth":"${AUTH}"}}`;
+    localStorage.setItem(LIVE.push, JSON.stringify({ token: oldKeys, key: KEY, at: new Date().toISOString() }));
+    const api = fakeApi('live');
+    await refreshPushRegistration(api, KEY);
+    expect(tokensOf(api.calls)).toEqual([['push.register', tokenFor(ENDPOINT_1)]]);
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
+  });
+
+  it('re-registers an unchanged subscription after a week', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_1, KEY);
+    storeLiveRecord(ENDPOINT_1, { at: new Date(Date.now() - 8 * 86_400_000).toISOString() });
+    const api = fakeApi('live');
+    await refreshPushRegistration(api, KEY);
+    expect(tokensOf(api.calls)).toEqual([['push.register', tokenFor(ENDPOINT_1)]]);
+  });
+
+  it('never turns push back on by itself, and does nothing in the demo, signed out, or without a key', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    const api = fakeApi('live');
+    await refreshPushRegistration(api, KEY); // permission granted but the parent turned push off (no record)
+
+    storeLiveRecord(ENDPOINT_1);
+    await refreshPushRegistration(fakeApi('demo'), KEY);
+    await refreshPushRegistration(api, '');
     await refreshPushRegistration(api);
+    const signedOut = { ...fakeApi('live'), getToken: () => null };
+    await refreshPushRegistration(signedOut, KEY);
+    FakeNotification.permission = 'denied';
+    await refreshPushRegistration(api, KEY);
+
     expect(api.calls).toEqual([]);
+    expect(signedOut.calls).toEqual([]);
+    expect(pushManager.getSubscription).not.toHaveBeenCalled();
   });
 
-  it('re-registers an unchanged token after a week', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-1234567890-abcdefghij');
-    localStorage.setItem(`${PUSH_TOKEN_KEY}.at`, new Date(Date.now() - 8 * 86_400_000).toISOString());
+  it('shows "Turn on" again when the subscription is gone and a new one cannot be made', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.subscribeError = new DOMException('no', 'AbortError');
+    storeLiveRecord(ENDPOINT_1);
     const api = fakeApi('live');
-    await refreshPushRegistration(api);
-    expect(api.calls.map((c) => c.action)).toEqual(['push.register']);
+    await expect(refreshPushRegistration(api, KEY)).resolves.toBeUndefined();
+    expect(tokensOf(api.calls)).toEqual([['push.unregister', tokenFor(ENDPOINT_1)]]);
+    expect(liveRecord()).toBeNull();
+    expect(await getPushSupport({ mode: 'live', publicKey: KEY })).toBe('ready');
   });
 
-  it('never turns push back on by itself, and is a no-op in demo mode', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    const api = fakeApi('live');
-    await refreshPushRegistration(api); // permission granted but the parent turned push off (no token)
-    localStorage.setItem(PUSH_TOKEN_KEY, 'demo-abc');
-    await refreshPushRegistration(fakeApi('demo'));
-    expect(api.calls).toEqual([]);
-    expect(fb.getToken).not.toHaveBeenCalled();
+  it('swallows other failures and keeps the registration', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    await expect(refreshPushRegistration(fakeApi('live', new ApiError('INTERNAL', 'offline')), KEY)).resolves.toBeUndefined();
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_1));
   });
 
-  it('swallows failures', async () => {
-    liveEnv();
-    pushCapableBrowser({ permission: 'granted' });
-    localStorage.setItem(PUSH_TOKEN_KEY, 'fcm-token-old-1234567890');
-    fb.getToken.mockRejectedValue(new Error('offline'));
-    await expect(refreshPushRegistration(fakeApi('live'))).resolves.toBeUndefined();
+  it('does not undo "Turn off" pressed while it was registering', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    let release!: () => void;
+    const calls: Call[] = [];
+    const api: ApiClient = {
+      mode: 'live',
+      getToken: () => 'session-token',
+      setToken: () => undefined,
+      async call<A extends ApiAction>(action: A, params: ApiParams<A>) {
+        calls.push({ action, params });
+        if (action === 'push.register') await new Promise<void>((resolve) => (release = resolve));
+        return { devices: 1 } as never;
+      },
+    };
+
+    const refreshing = refreshPushRegistration(api, KEY);
+    await vi.waitFor(() => expect(calls).toHaveLength(1)); // push.register is in flight
+    await disablePush(api);
+    release();
+    await refreshing;
+
+    expect(tokensOf(calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_2)],
+      ['push.unregister', tokenFor(ENDPOINT_1)], // Turn off
+      ['push.unregister', tokenFor(ENDPOINT_2)], // the refresh takes its registration back out
+    ]);
+    expect(liveRecord()).toBeNull();
+  });
+
+  it('leaves the registration to a newer refresh that took over', async () => {
+    const pushManager = pushCapableBrowser({ permission: 'granted' });
+    pushManager.existing(ENDPOINT_2, KEY);
+    storeLiveRecord(ENDPOINT_1);
+    let release!: () => void;
+    const calls: Call[] = [];
+    const api: ApiClient = {
+      mode: 'live',
+      getToken: () => 'session-token',
+      setToken: () => undefined,
+      async call<A extends ApiAction>(action: A, params: ApiParams<A>) {
+        calls.push({ action, params });
+        if (action === 'push.register' && calls.length === 1) await new Promise<void>((resolve) => (release = resolve));
+        return { devices: 1 } as never;
+      },
+    };
+
+    const first = refreshPushRegistration(api, KEY);
+    await vi.waitFor(() => expect(calls).toHaveLength(1)); // the first refresh is registering
+    await refreshPushRegistration(api, KEY); // e.g. 'pushsubscriptionchange' meanwhile
+    release();
+    await first;
+
+    expect(tokensOf(calls)).toEqual([
+      ['push.register', tokenFor(ENDPOINT_2)],
+      ['push.register', tokenFor(ENDPOINT_2)],
+      ['push.unregister', tokenFor(ENDPOINT_1)],
+    ]);
+    expect(liveRecord()?.token).toBe(tokenFor(ENDPOINT_2));
   });
 });

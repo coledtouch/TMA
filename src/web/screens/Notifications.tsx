@@ -180,15 +180,16 @@ export function Notifications() {
 }
 
 function PushSection() {
-  const { api, refresh } = useApp();
+  const { api, data, refresh } = useApp();
   const toast = useToast();
   const [support, setSupport] = useState<PushSupport | null>(null);
   const [busy, setBusy] = useState<null | 'enable' | 'disable' | 'test'>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const publicKey = data.settings.pushPublicKey ?? '';
 
   const check = async () => {
     try {
-      setSupport(await getPushSupport({ mode: api.mode }));
+      setSupport(await getPushSupport({ mode: api.mode, publicKey }));
     } catch {
       setSupport('unsupported');
     }
@@ -196,19 +197,19 @@ function PushSection() {
 
   useEffect(() => {
     let alive = true;
-    getPushSupport({ mode: api.mode })
+    getPushSupport({ mode: api.mode, publicKey })
       .then((s) => alive && setSupport(s))
       .catch(() => alive && setSupport('unsupported'));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [api.mode, publicKey]);
 
   async function enable() {
     setBusy('enable');
     setProblem(null);
     try {
-      const res = await enablePush(api);
+      const res = await enablePush(api, publicKey);
       if (res.ok) {
         toast("Notifications are on. We'll keep you posted.");
         void refresh({ force: true });

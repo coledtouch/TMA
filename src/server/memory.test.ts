@@ -98,9 +98,18 @@ describe('memory services', () => {
   });
 
   it('delegates to a custom push sender but still records the outbox', () => {
-    const s = createMemoryServices({ push: { enabled: () => true, send: (tokens) => tokens.map(() => 'error' as const) } });
+    const s = createMemoryServices({
+      push: { enabled: () => false, publicKey: () => 'custom-key', send: (tokens) => tokens.map(() => 'error' as const) },
+    });
     expect(s.push.send(['x'], { title: 't', body: 'b', topic: 'test' })).toEqual(['error']);
     expect(s.outbox.push).toHaveLength(1);
+    expect(s.push.enabled()).toBe(false);
+    expect(s.push.publicKey()).toBe('custom-key');
+  });
+
+  it('reports no push public key unless one is given', () => {
+    expect(createMemoryServices().push.publicKey()).toBe('');
+    expect(createMemoryServices({ pushPublicKey: 'BKey' }).push.publicKey()).toBe('BKey');
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, TREASURER } from './test-helpers';
+import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, storedToken, testSubscription, TREASURER } from './test-helpers';
 
 describe('admin.overview', () => {
   it('summarizes stats, pending requests, pending households with match candidates, and the log', () => {
@@ -150,7 +150,8 @@ describe('admin.announce', () => {
     const h = harness();
     // A signed-in parent without a household gets "everything" (no interests).
     const newbie = h.signIn('newbie@example.org');
-    h.ok('push.register', { token: 'newbie-device-token-0001' }, newbie);
+    const newbieDevice = testSubscription('newbie');
+    h.ok('push.register', { token: JSON.stringify(newbieDevice) }, newbie);
     // Casey turned email off; Priya turned announcements off.
     h.ok('prefs.save', { prefs: { channels: { push: true, email: false, sms: false } } }, h.signIn(PARENT2));
     h.ok('prefs.save', { prefs: { topics: { balance: true, payments: true, reminders: true, announcements: false } } }, h.signIn(NGUYEN));
@@ -182,7 +183,7 @@ describe('admin.announce', () => {
     const mailTo = h.services.outbox.mail.map((m) => m.to).sort();
     expect(mailTo).toEqual([PARENT, 'newbie@example.org'].sort());
     const pushedTokens = h.services.outbox.push.flatMap((p) => p.tokens).sort();
-    expect(pushedTokens).toEqual(['demo-device-parent', 'newbie-device-token-0001']);
+    expect(pushedTokens).toEqual(['demo-device-parent', storedToken(newbieDevice)].sort());
     expect(delivered).toEqual({ push: 2, email: 2, sms: 0 });
 
     const email = h.services.outbox.mail[0];

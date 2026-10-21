@@ -26,6 +26,7 @@ const SETTINGS: PublicSettings = {
   donateUrl: '',
   privacyNote: '',
   smsEnabled: false,
+  pushPublicKey: '',
 };
 
 const ORDER: PayPalOrder = { studentId: 'S0001', activityId: 'FL27', amountCents: 25000, coverFee: true };

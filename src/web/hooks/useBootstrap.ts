@@ -1,5 +1,6 @@
 /**
- * Loads `me.bootstrap` with a localStorage cache (`tma.cache.<email>`) for a
+ * Loads `me.bootstrap` with a localStorage cache (`tma.cache.<email>`, or
+ * `tma.demo.cache.<email>` in demo mode) for a
  * fast first paint and offline viewing (ARCHITECTURE.md §10 UX rules):
  * render the cache immediately, then refresh; refresh on focus/visibility at
  * most once per 60 s; refresh after every mutation (force).
@@ -7,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Bootstrap, IsoDateTime } from '../../shared/types';
 import { errorMessage, isApiError, type ApiClient } from '../api/client';
-import { readJson, removeItem, STORAGE_KEYS, writeJson } from '../lib/storage';
+import { readJson, removeItem, storageKeys, writeJson, type StorageMode } from '../lib/storage';
 
 export const REFRESH_MIN_INTERVAL_MS = 60_000;
 
@@ -16,13 +17,13 @@ export interface CachedBootstrap {
   data: Bootstrap;
 }
 
-export function cacheKey(email: string): string {
-  return STORAGE_KEYS.cachePrefix + email.trim().toLowerCase();
+export function cacheKey(email: string, mode: StorageMode): string {
+  return storageKeys(mode).cachePrefix + email.trim().toLowerCase();
 }
 
-export function readCachedBootstrap(email: string | null): CachedBootstrap | null {
+export function readCachedBootstrap(email: string | null, mode: StorageMode): CachedBootstrap | null {
   if (!email) return null;
-  const cached = readJson<CachedBootstrap>(cacheKey(email));
+  const cached = readJson<CachedBootstrap>(cacheKey(email, mode));
   // Only trust a cache entry that is well-formed and belongs to this email.
   if (
     !cached ||
@@ -39,12 +40,12 @@ export function readCachedBootstrap(email: string | null): CachedBootstrap | nul
   return cached;
 }
 
-export function writeCachedBootstrap(data: Bootstrap, savedAt: IsoDateTime): void {
-  writeJson(cacheKey(data.me.email), { savedAt, data } satisfies CachedBootstrap);
+export function writeCachedBootstrap(data: Bootstrap, savedAt: IsoDateTime, mode: StorageMode): void {
+  writeJson(cacheKey(data.me.email, mode), { savedAt, data } satisfies CachedBootstrap);
 }
 
-export function clearCachedBootstrap(email: string | null): void {
-  if (email) removeItem(cacheKey(email));
+export function clearCachedBootstrap(email: string | null, mode: StorageMode): void {
+  if (email) removeItem(cacheKey(email, mode));
 }
 
 export interface BootstrapState {
@@ -67,7 +68,7 @@ export interface BootstrapApi extends BootstrapState {
 
 export function useBootstrap(api: ApiClient, email: string | null, onUnauthorized: () => void): BootstrapApi {
   const [state, setState] = useState<BootstrapState>(() => {
-    const cached = readCachedBootstrap(email);
+    const cached = readCachedBootstrap(email, api.mode);
     return {
       data: cached?.data ?? null,
       savedAt: cached?.savedAt ?? null,
@@ -123,8 +124,8 @@ export function useBootstrap(api: ApiClient, email: string | null, onUnauthorize
 
   // Persist whatever we show (only this device, only this email's own data).
   useEffect(() => {
-    if (state.data && state.savedAt) writeCachedBootstrap(state.data, state.savedAt);
-  }, [state.data, state.savedAt]);
+    if (state.data && state.savedAt) writeCachedBootstrap(state.data, state.savedAt, api.mode);
+  }, [state.data, state.savedAt, api.mode]);
 
   // Initial load, and stop applying results after unmount (e.g. sign-out).
   useEffect(() => {

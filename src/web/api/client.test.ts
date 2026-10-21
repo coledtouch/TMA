@@ -86,10 +86,13 @@ describe('createLiveClient', () => {
       jsonResponse({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Please sign in again.' } }),
     );
     const api = createLiveClient(URL, { fetch: fetchMock as unknown as typeof fetch });
+    localStorage.setItem('tma.demo.session', 'demo-session');
     api.setToken('old');
     await expect(api.call('me.bootstrap', {})).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
     expect(api.getToken()).toBeNull();
     expect(localStorage.getItem('tma.session')).toBeNull();
+    // The demo's sign-in in this browser is a separate thing.
+    expect(localStorage.getItem('tma.demo.session')).toBe('demo-session');
   });
 
   it('does not clear a newer token when an older request comes back UNAUTHORIZED', async () => {
@@ -175,14 +178,14 @@ describe('createLiveClient', () => {
 });
 
 function fakeDemoClient(): DemoApiClient {
-  let token: string | null = localStorage.getItem('tma.session');
+  let token: string | null = localStorage.getItem('tma.demo.session');
   return {
     mode: 'demo',
     getToken: () => token,
     setToken: (t) => {
       token = t;
-      if (t) localStorage.setItem('tma.session', t);
-      else localStorage.removeItem('tma.session');
+      if (t) localStorage.setItem('tma.demo.session', t);
+      else localStorage.removeItem('tma.demo.session');
     },
     call: vi.fn(async () => ({ sent: true, devCode: '123456' })) as unknown as ApiClient['call'],
     demo: {
@@ -214,15 +217,18 @@ describe('createLazyDemoClient', () => {
     expect(await api.loadDemo()).toBe(real.demo);
   });
 
-  it('uses localStorage for the token before the module loads', async () => {
-    localStorage.setItem('tma.session', 'stored');
+  it("uses the demo's own localStorage key for the token before the module loads", async () => {
+    localStorage.setItem('tma.session', 'live-token');
+    localStorage.setItem('tma.demo.session', 'stored');
     const api = createLazyDemoClient(async () => ({ createDemoClient: fakeDemoClient }));
     expect(api.getToken()).toBe('stored');
     api.setToken(null);
-    expect(localStorage.getItem('tma.session')).toBeNull();
+    expect(localStorage.getItem('tma.demo.session')).toBeNull();
+    expect(localStorage.getItem('tma.session')).toBe('live-token');
     api.setToken('next');
     await api.loadDemo();
     expect(api.getToken()).toBe('next');
+    expect(localStorage.getItem('tma.session')).toBe('live-token');
   });
 
   it('reports a load failure as an ApiError and retries next time', async () => {
@@ -238,6 +244,7 @@ describe('createLazyDemoClient', () => {
 });
 
 describe('createApiClient', () => {
+  beforeEach(() => localStorage.clear());
   afterEach(() => vi.unstubAllEnvs());
 
   it('uses the live client when VITE_API_URL is set', () => {
@@ -248,6 +255,24 @@ describe('createApiClient', () => {
   it('falls back to the demo when VITE_API_URL is empty', () => {
     vi.stubEnv('VITE_API_URL', '');
     expect(createApiClient().mode).toBe('demo');
+    expect(createApiClient('live').mode).toBe('demo'); // nothing to talk to
+  });
+
+  it('runs the demo on a live build when this browser chose it', () => {
+    vi.stubEnv('VITE_API_URL', URL);
+    localStorage.setItem('tma.mode', 'demo');
+    expect(createApiClient().mode).toBe('demo');
+    expect(createApiClient('live').mode).toBe('live');
+  });
+
+  it('keeps the live and demo sign-ins apart', () => {
+    vi.stubEnv('VITE_API_URL', URL);
+    localStorage.setItem('tma.session', 'live-token');
+    localStorage.setItem('tma.demo.session', 'demo-token');
+    expect(createApiClient('live').getToken()).toBe('live-token');
+    expect(createApiClient('demo').getToken()).toBe('demo-token');
+    createApiClient('demo').setToken(null);
+    expect(localStorage.getItem('tma.session')).toBe('live-token');
   });
 });
 

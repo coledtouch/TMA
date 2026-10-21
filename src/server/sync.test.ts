@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SIGN_IN_EMAIL_RESERVE } from './notify';
 import type { PushSender } from './services';
-import { harness, NGUYEN, PARENT, PARENT2, TEST_NOW } from './test-helpers';
+import { harness, NGUYEN, PARENT, PARENT2, storedToken, TEST_NOW, testSubscription } from './test-helpers';
 
 const credit = (studentId: string, amount: number, description = 'Fall Fruit sale') => ({
   Date: '2026-10-21',
@@ -90,14 +90,21 @@ describe('syncTick: balance changes', () => {
   });
 
   it('removes device tokens the push service reports as invalid', () => {
-    const h = harness();
+    const gone: PushSender = {
+      enabled: () => true,
+      publicKey: () => '',
+      send: (tokens) => tokens.map((t) => (t.includes('device-expired') ? 'invalid' : 'ok')),
+    };
+    const h = harness({ push: gone });
     const token = h.signIn(PARENT);
-    h.ok('push.register', { token: 'bad-expired-token-000001' }, token);
+    const expired = testSubscription('expired');
+    h.ok('push.register', { token: JSON.stringify(expired) }, token);
     h.services.db.tables.Ledger?.push(credit('S0001', 5));
     const report = h.app.syncTick();
     expect(report.notifications.push).toBe(1);
-    expect(h.services.outbox.push[0].tokens.sort()).toEqual(['bad-expired-token-000001', 'demo-device-parent']);
+    expect(h.services.outbox.push[0].tokens.sort()).toEqual(['demo-device-parent', storedToken(expired)].sort());
     expect(h.ok('me.bootstrap', {}, token).pushTokens).toBe(1);
+    expect(h.rows('Devices').some((r) => r.Token === storedToken(expired))).toBe(false);
   });
 
   it('skips email (with a log) when the daily quota is used up', () => {
@@ -122,8 +129,9 @@ describe('syncTick: balance changes', () => {
   it('keeps going when the push service throws', () => {
     const broken: PushSender = {
       enabled: () => true,
+      publicKey: () => '',
       send: () => {
-        throw new Error('FCM down');
+        throw new Error('push Worker down');
       },
     };
     const h = harness({ push: broken });

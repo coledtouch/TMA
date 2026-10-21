@@ -3,7 +3,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { enablePush, getPushSupport } from '../lib/push';
-import { fakeApi, makeBootstrap, makeStudent } from '../test/fixtures';
+import { fakeApi, makeBootstrap, makeStudent, TEST_PUSH_PUBLIC_KEY } from '../test/fixtures';
 import { renderScreen } from '../test/render';
 import { Home } from './Home';
 
@@ -106,7 +106,8 @@ describe('Home', () => {
     const user = userEvent.setup();
 
     await user.click(await screen.findByRole('button', { name: 'Turn on notifications' }));
-    expect(enablePush).toHaveBeenCalledWith(api);
+    expect(getPushSupport).toHaveBeenCalledWith({ mode: 'live', publicKey: TEST_PUSH_PUBLIC_KEY });
+    expect(enablePush).toHaveBeenCalledWith(api, TEST_PUSH_PUBLIC_KEY);
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Turn on notifications' })).not.toBeInTheDocument());
     expect(screen.getByText(/Notifications are on/)).toBeInTheDocument();
     expect(harness.refresh).toHaveBeenCalledWith({ force: true });
@@ -120,5 +121,16 @@ describe('Home', () => {
     await user.click(screen.getByRole('button', { name: 'Not now' }));
     expect(screen.queryByRole('button', { name: 'Turn on notifications' })).not.toBeInTheDocument();
     expect(localStorage.getItem('tma.dismissed.push')).not.toBeNull();
+    expect(localStorage.getItem('tma.demo.dismissed.push')).toBeNull();
+  });
+
+  it('keeps "Not now" in the demo separate from the live app', async () => {
+    vi.mocked(getPushSupport).mockResolvedValue('ready');
+    localStorage.setItem('tma.dismissed.push', '2026-10-01T00:00:00.000Z'); // dismissed in the live app
+    renderScreen(<Home />, { api: fakeApi({}, 'demo') });
+    const user = userEvent.setup();
+    await screen.findByRole('button', { name: 'Turn on notifications' });
+    await user.click(screen.getByRole('button', { name: 'Not now' }));
+    expect(localStorage.getItem('tma.demo.dismissed.push')).not.toBeNull();
   });
 });

@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { encodeBase64UrlBytes } from './push-subscription';
+import type { PushSender } from './services';
 import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, TREASURER } from './test-helpers';
 
 describe('me.bootstrap for a verified family', () => {
@@ -103,6 +105,28 @@ describe('me.bootstrap for a verified family', () => {
     expect(b.activities.map((a) => a.id)).toEqual(['FL27', 'CAMP27', 'LESSONS']);
     expect(b.pushTokens).toBe(1);
     expect(b.serverTime).toBe('2026-10-21T14:00:00.000Z');
+  });
+
+  it('publishes the push public key only when push works and the key is a P-256 point', () => {
+    const key = encodeBase64UrlBytes([0x04, ...new Array<number>(64).fill(9)]);
+    const settingsWith = (opts: Parameters<typeof harness>[0]) => {
+      const h = harness(opts);
+      return { h, settings: h.ok('me.bootstrap', {}, h.signIn(PARENT)).settings };
+    };
+    expect(settingsWith({}).settings.pushPublicKey).toBe('');
+    expect(settingsWith({ pushPublicKey: key }).settings.pushPublicKey).toBe(key);
+    const sender = (over: Partial<PushSender>): PushSender => ({ enabled: () => true, publicKey: () => key, send: (t) => t.map(() => 'ok'), ...over });
+    expect(settingsWith({ push: sender({ enabled: () => false }) }).settings.pushPublicKey).toBe('');
+    expect(settingsWith({ push: sender({ publicKey: () => 'not-a-key' }) }).settings.pushPublicKey).toBe('');
+    const { h, settings } = settingsWith({
+      push: sender({
+        publicKey: () => {
+          throw new Error('Worker down');
+        },
+      }),
+    });
+    expect(settings.pushPublicKey).toBe('');
+    expect(h.services.logs.some((l) => l.level === 'error' && /public key/.test(l.message))).toBe(true);
   });
 
   it('turns online payments off unless ONLINE_PAYMENTS, PAYPAL_CLIENT_ID and the gateway are all set', () => {

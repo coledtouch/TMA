@@ -56,7 +56,7 @@ export function sendSelfTest(services: GasServices, rawEmail: string): SelfTestR
   if (tokens.length === 0) {
     report.notes.push(`No phones are registered for ${email}. Sign in to the app with this email and turn on notifications (More → Notifications).`);
   } else if (!services.push.enabled()) {
-    report.notes.push('Push is not set up: add the FCM_SERVICE_ACCOUNT script property (see docs/SETUP.md).');
+    report.notes.push('Push is not set up: run TMA App → Set up / repair tabs to link this sheet to the push Worker (see docs/SETUP.md).');
   } else {
     const results = services.push.send(tokens, TEST_MESSAGE);
     report.push = results.filter((r) => r === 'ok').length;

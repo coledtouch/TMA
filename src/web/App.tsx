@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { withAuthGuard, type ApiClient } from './api/client';
 import { AppShell } from './components/AppShell';
+import { DemoStrip } from './components/DemoStrip';
 import { Icon } from './components/Icon';
 import { PushBanner } from './components/PushBanner';
 import { ErrorState, SkeletonCards } from './components/States';
@@ -89,19 +90,25 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
   const onUnauthorized = useCallback(() => {
     if (endedRef.current) return;
     endedRef.current = true;
-    clearCachedBootstrap(session.email);
+    clearCachedBootstrap(session.email, api.mode);
     clearToasts();
     session.end();
     toast('Your sign-in expired. Please sign in again.', 'info');
-  }, [session, toast, clearToasts]);
+  }, [api.mode, session, toast, clearToasts]);
 
   const boot = useBootstrap(api, session.email, onUnauthorized);
   const guardedApi = useMemo(() => withAuthGuard(api, onUnauthorized), [api, onUnauthorized]);
 
-  // Keep this device's push token current (no-op unless notifications are on).
+  // Keep this device's push subscription current (no-op unless notifications are on here):
+  // on start, when the server's push key changes, and when the browser replaces the subscription.
+  const pushPublicKey = boot.data ? (boot.data.settings.pushPublicKey ?? '') : null;
   useEffect(() => {
-    void refreshPushRegistration(api).catch(() => undefined);
-  }, [api]);
+    if (pushPublicKey === null) return;
+    const refreshPush = () => void refreshPushRegistration(api, pushPublicKey).catch(() => undefined);
+    refreshPush();
+    window.addEventListener('tma:pushsubscriptionchange', refreshPush);
+    return () => window.removeEventListener('tma:pushsubscriptionchange', refreshPush);
+  }, [api, pushPublicKey]);
 
   const signOut = useCallback(async () => {
     // Stop this device getting the household's notifications, without blocking sign-out on the network.
@@ -114,8 +121,8 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
       // best effort
     }
     endedRef.current = true;
-    clearCachedBootstrap(session.email);
-    if (boot.data && boot.data.me.email !== session.email) clearCachedBootstrap(boot.data.me.email);
+    clearCachedBootstrap(session.email, api.mode);
+    if (boot.data && boot.data.me.email !== session.email) clearCachedBootstrap(boot.data.me.email, api.mode);
     clearToasts(); // they can name this household's students
     session.end();
     navigate('home');
@@ -132,6 +139,7 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
 
   const banners = (
     <>
+      <DemoStrip mode={api.mode} />
       <PushBanner onReceive={() => void refresh({ force: true })} />
       {boot.stale && boot.savedAt ? (
         <div className="offline-banner" role="status">

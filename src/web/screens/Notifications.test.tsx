@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NotificationPrefs } from '../../shared/types';
 import { disablePush, enablePush, getPushSupport } from '../lib/push';
-import { fakeApi, makeBootstrap, makeSettings } from '../test/fixtures';
+import { fakeApi, makeBootstrap, makeSettings, TEST_PUSH_PUBLIC_KEY } from '../test/fixtures';
 import { renderScreen } from '../test/render';
 import { Notifications } from './Notifications';
 
@@ -33,7 +33,8 @@ describe('Notifications', () => {
     vi.mocked(getPushSupport).mockResolvedValue('enabled');
     await user.click(button);
 
-    expect(enablePush).toHaveBeenCalledWith(api);
+    expect(getPushSupport).toHaveBeenCalledWith({ mode: 'live', publicKey: TEST_PUSH_PUBLIC_KEY });
+    expect(enablePush).toHaveBeenCalledWith(api, TEST_PUSH_PUBLIC_KEY);
     expect(await screen.findByText('Notifications are on for this device.')).toBeInTheDocument();
     expect(harness.refresh).toHaveBeenCalledWith({ force: true });
     expect(screen.getByRole('button', { name: 'Send a test notification' })).toBeInTheDocument();
@@ -79,8 +80,10 @@ describe('Notifications', () => {
     unmount();
 
     vi.mocked(getPushSupport).mockResolvedValue('not-configured');
-    renderScreen(<Notifications />, { api: fakeApi() });
+    const data = makeBootstrap({ settings: makeSettings({ pushPublicKey: '' }) });
+    renderScreen(<Notifications />, { api: fakeApi(), data });
     expect(await screen.findByText(/aren't set up for TMA yet/)).toBeInTheDocument();
+    expect(getPushSupport).toHaveBeenLastCalledWith({ mode: 'live', publicKey: '' });
   });
 
   it('saves channel, topic and interest choices', async () => {

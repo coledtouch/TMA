@@ -5,6 +5,7 @@
 import { dollarsToCents } from '../shared/money';
 import { SETTING_DEFAULTS, type SettingKey } from '../shared/schema';
 import type { PublicSettings } from '../shared/types';
+import { canonicalP256Key } from './push-subscription';
 import type { Services, StoredRow } from './services';
 import { isEmail, normEmail, parseBool, safeUrl, splitList, str, unique, uniqueBy } from './util';
 
@@ -43,6 +44,7 @@ export const SETTING_NOTES: Readonly<Record<SettingKey, string>> = {
   REMINDER_DAYS: 'Send payment reminders this many days before a due date (comma-separated).',
   EMAIL_ENABLED: 'TRUE sends email notifications to families who chose email.',
   SMS_ENABLED: 'TRUE sends text messages to families who chose texts (needs Twilio; about 1 cent per text).',
+  PUSH_RELAY_URL: 'Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.',
   TOKEN_VERSION: 'Change this number to sign everyone out of the app.',
   SESSION_DAYS: 'How many days a sign-in lasts.',
 };
@@ -87,6 +89,16 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
       return false;
     }
   };
+  /** The push sender's VAPID public key when push works, else ''. Never throws. */
+  const pushPublicKey = (): string => {
+    if (!safely(() => services.push.enabled())) return '';
+    try {
+      return canonicalP256Key(services.push.publicKey()) ?? '';
+    } catch (err) {
+      services.logger.error('Push public key lookup failed', err);
+      return '';
+    }
+  };
 
   const paypalClientId = get('PAYPAL_CLIENT_ID').trim();
   const onlinePaymentsSetting = bool('ONLINE_PAYMENTS');
@@ -112,6 +124,7 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
     donateUrl: safeUrl(get('DONATE_URL')) ?? '',
     privacyNote: get('PRIVACY_NOTE'),
     smsEnabled: smsSetting && safely(() => services.sms.enabled()),
+    pushPublicKey: pushPublicKey(),
   };
 
   const reminderDays = unique(

@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/client';
 import { ToastProvider } from '../hooks/toast';
+import { enterDemo, exitDemo } from '../lib/mode';
 import { fakeApi } from '../test/fixtures';
 import { SignIn } from './SignIn';
+
+vi.mock('../lib/mode', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/mode')>()),
+  enterDemo: vi.fn(),
+  exitDemo: vi.fn(),
+}));
+
+const API_URL = 'https://script.google.com/macros/s/abc/exec';
 
 function renderSignIn(api: ReturnType<typeof fakeApi>) {
   const onSignedIn = vi.fn();
@@ -18,6 +27,8 @@ function renderSignIn(api: ReturnType<typeof fakeApi>) {
 }
 
 describe('SignIn', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   it('signs in with email then code, auto-filling the demo code', async () => {
     const api = fakeApi(
       {
@@ -135,5 +146,30 @@ describe('SignIn', () => {
     const { onSignedIn, user } = renderSignIn(api);
     await user.click(screen.getByRole('button', { name: 'Try as a new family' }));
     expect(onSignedIn).toHaveBeenCalledWith(expect.stringMatching(/^new\.family\d{4}@example\.com$/), 'tok-n');
+  });
+
+  it('offers the demo from the live sign-in screen', async () => {
+    vi.stubEnv('VITE_API_URL', API_URL);
+    const { user } = renderSignIn(fakeApi({}, 'live', null));
+    expect(screen.queryByRole('button', { name: 'Exit demo' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'See a demo with sample data' }));
+    expect(enterDemo).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a live build leave the demo', async () => {
+    vi.stubEnv('VITE_API_URL', API_URL);
+    const { user } = renderSignIn(fakeApi({}, 'demo', null));
+    expect(screen.getByRole('button', { name: 'Try as a parent' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /See a demo/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Exit demo' }));
+    expect(exitDemo).toHaveBeenCalledTimes(1);
+  });
+
+  it('has no way out of a demo-only build (there is no live app)', () => {
+    vi.stubEnv('VITE_API_URL', '');
+    renderSignIn(fakeApi({}, 'demo', null));
+    expect(screen.getByRole('button', { name: 'Try as a parent' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Exit demo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /See a demo/ })).not.toBeInTheDocument();
   });
 });

@@ -6,6 +6,7 @@ import type { TableName } from '../shared/schema';
 import type { ApiAction, ApiParams, ApiResponse, ApiResult } from '../shared/types';
 import { createApp } from './app';
 import { createMemoryServices, type MemoryServices, type MemoryServicesOptions } from './memory';
+import { encodeBase64UrlBytes } from './push-subscription';
 import { sampleData } from './sample-data';
 import type { App, RowData } from './services';
 
@@ -18,6 +19,50 @@ export const PARENT2 = 'casey.thompson@example.com';
 export const NGUYEN = 'nguyen.family@example.com';
 export const ORTIZ = 'ortiz@example.com';
 export const TREASURER = 'treasurer@example.com';
+
+/** Deterministic bytes for fixtures. */
+function fixtureBytes(seed: string, length: number): number[] {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) h = Math.imul(h ^ seed.charCodeAt(i), 16777619) >>> 0;
+  const out: number[] = [];
+  for (let i = 0; i < length; i++) {
+    h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0;
+    h = (h + 0x9e3779b9) >>> 0;
+    out.push(h & 0xff);
+  }
+  return out;
+}
+
+export interface TestSubscription {
+  endpoint: string;
+  expirationTime: null;
+  keys: { p256dh: string; auth: string };
+}
+
+/**
+ * A browser PushSubscription.toJSON() for tests: a Chrome-style endpoint
+ * named after `id`, and well-formed keys (65-byte point starting 0x04, 16-byte
+ * auth) derived from `keySeed` (default `id`).
+ */
+export function testSubscription(
+  id: string | number,
+  opts: { keySeed?: string | number; host?: string } = {},
+): TestSubscription {
+  const seed = String(opts.keySeed ?? id);
+  return {
+    endpoint: `https://${opts.host ?? 'fcm.googleapis.com'}/fcm/send/device-${id}:APA91bH`,
+    expirationTime: null,
+    keys: {
+      p256dh: encodeBase64UrlBytes([0x04, ...fixtureBytes(`p256dh:${seed}`, 64)]),
+      auth: encodeBase64UrlBytes(fixtureBytes(`auth:${seed}`, 16)),
+    },
+  };
+}
+
+/** What the app stores in Devices.Token for a subscription. */
+export function storedToken(sub: TestSubscription): string {
+  return JSON.stringify({ endpoint: sub.endpoint, keys: sub.keys });
+}
 
 export interface HarnessOptions extends Omit<MemoryServicesOptions, 'db'> {
   /** Start from sampleData(now, {demoSettings: true}) (default true). */

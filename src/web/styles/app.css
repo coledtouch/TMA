@@ -361,6 +361,29 @@ button {
   color: var(--warning);
 }
 
+/* Shown while a live build runs the demo (components/DemoStrip.tsx). */
+.demo-strip {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--gutter);
+  font-size: var(--text-sm);
+  background: var(--brand-tint);
+  color: var(--brand-tint-ink);
+}
+
+.demo-strip-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.demo-strip .btn-link {
+  flex: none;
+  color: inherit;
+}
+
 .update-banner {
   position: sticky;
   top: 0;
@@ -1980,6 +2003,14 @@ ul.callout {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.demo-exit {
+  align-self: center;
+}
+
+.signin-demo-link {
+  align-self: center;
 }
 
 /* ---------------------------------------------------------------- more / admin */

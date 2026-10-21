@@ -3,20 +3,23 @@
  * keys, create TOKEN_SECRET, and optionally seed the sample data into an
  * empty sheet. Safe to run any number of times.
  */
-import { SETTING_DEFAULTS, TABLE_ORDER, type SettingKey, type TableName } from '../shared/schema';
+import { SETTING_DEFAULTS, TABLE_ORDER, type SecretName, type SettingKey, type TableName } from '../shared/schema';
 import type { SetupReport } from '../shared/types';
 import type { Ctx } from './context';
 import { sampleData } from './sample-data';
-import type { SetupOptions } from './services';
+import type { Crypto, SetupOptions } from './services';
 import { SETTING_NOTES, settingKey } from './settings';
 
 const SEED_GUARD: readonly TableName[] = ['Families', 'Students', 'Ledger'];
 
-/** 64 hex chars from the platform's random UUIDs and digits, mixed through HMAC-SHA256. */
-function newTokenSecret(ctx: Ctx): string {
-  const c = ctx.s.crypto;
+/**
+ * A new secret: 64 hex chars from the platform's random UUIDs and digits,
+ * mixed through HMAC-SHA256. Used for TOKEN_SECRET here and for the push
+ * Worker's PUSH_RELAY_SECRET by the Apps Script setup.
+ */
+export function generateSecret(c: Crypto, name: SecretName): string {
   const secret = c.hmacSha256Hex(c.uuid(), `${c.uuid()}${c.uuid()}${c.randomDigits(32)}`);
-  if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error('Could not generate TOKEN_SECRET');
+  if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error(`Could not generate ${name}`);
   return secret;
 }
 
@@ -36,7 +39,7 @@ export function runSetup(ctx: Ctx, options: SetupOptions = {}): SetupReport {
   ctx.db.append('Settings', missing);
 
   if (!ctx.s.secrets.get('TOKEN_SECRET')) {
-    ctx.s.secrets.set('TOKEN_SECRET', newTokenSecret(ctx));
+    ctx.s.secrets.set('TOKEN_SECRET', generateSecret(ctx.s.crypto, 'TOKEN_SECRET'));
     report.secretsInitialized.push('TOKEN_SECRET');
   }
 

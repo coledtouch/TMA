@@ -18,6 +18,10 @@ export function daysFromNow(days: number): string {
   return toIsoDate(d);
 }
 
+/** A VAPID public key shaped like the push Worker's (base64url of a 65-byte P-256 point). */
+export const TEST_PUSH_PUBLIC_KEY =
+  'BIeCLnOS97NnYj0RLVAmSyNq0kf9FdqRZDBYrjHNSolsjMrbO_ZNFGlion9tcR_EDhXoz0tUEw6MpU-GFVht8Z8';
+
 export function makeSettings(overrides: Partial<PublicSettings> = {}): PublicSettings {
   return {
     orgName: 'Timberlane Music Association',
@@ -36,6 +40,7 @@ export function makeSettings(overrides: Partial<PublicSettings> = {}): PublicSet
     donateUrl: 'https://example.org/donate',
     privacyNote: 'TMA only stores what it needs to run the program.',
     smsEnabled: false,
+    pushPublicKey: TEST_PUSH_PUBLIC_KEY,
     ...overrides,
   };
 }

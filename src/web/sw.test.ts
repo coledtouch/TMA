@@ -139,12 +139,15 @@ describe('caching', () => {
 });
 
 describe('push', () => {
-  it('shows an FCM data message and tells open windows', async () => {
+  it("shows the push Worker's payload and tells this app's open windows only", async () => {
     const win = fakeClient(`${SCOPE}#/`);
-    const { self, fire } = await loadWorker([win]);
+    // Another site under the same GitHub Pages origin must not see a family's message.
+    const otherSite = fakeClient('https://example.github.io/other-site/');
+    const { self, fire } = await loadWorker([win, otherSite]);
     const data = { title: '+$50.00 for Avery', body: '$50.00 was added…', url: '#/funds', tag: 'bal-S0001', topic: 'balance' };
 
-    expect(await fire('push', pushData({ data, from: '1234', fcmMessageId: 'x' }))).toBe(1);
+    // The Worker sends exactly this: JSON.stringify(PushMessage), read with event.data.text().
+    expect(await fire('push', pushData(JSON.stringify(data)))).toBe(1);
 
     expect(self.registration.showNotification).toHaveBeenCalledWith('+$50.00 for Avery', {
       body: '$50.00 was added…',
@@ -155,23 +158,28 @@ describe('push', () => {
       lang: 'en',
     });
     expect(win.postMessage).toHaveBeenCalledWith({ type: 'push', message: data });
+    expect(otherSite.postMessage).not.toHaveBeenCalled();
   });
 
-  it('accepts a plain PushMessage and an FCM notification message', async () => {
+  it('fills in what a payload leaves out and trims what is too long', async () => {
     const { self, fire } = await loadWorker();
     await fire('push', pushData({ title: 'Test notification ✅', body: 'Working.', topic: 'test' }));
-    await fire('push', pushData({ notification: { title: 'Tomorrow: Jazz Night', body: '7:00 PM' }, data: { url: '#/news' } }));
-    const calls = self.registration.showNotification.mock.calls as unknown as Array<[string, { body: string; data: unknown }]>;
+    await fire('push', pushData({ title: 'x'.repeat(500), body: 'y'.repeat(5000), tag: 't'.repeat(100), topic: 'nope' }));
+    const calls = self.registration.showNotification.mock.calls as unknown as Array<
+      [string, { body: string; tag?: string; data: unknown }]
+    >;
     expect(calls[0][0]).toBe('Test notification ✅');
-    expect(calls[1][0]).toBe('Tomorrow: Jazz Night');
-    expect(calls[1][1]).toMatchObject({ body: '7:00 PM', data: { url: '#/news' } });
+    expect(calls[0][1]).toMatchObject({ body: 'Working.', tag: undefined, data: { url: '#/' } });
+    expect(calls[1][0]).toHaveLength(120);
+    expect(calls[1][1].body).toHaveLength(1000);
+    expect(calls[1][1].tag).toHaveLength(64);
   });
 
   it('always shows something, even for empty or malformed pushes', async () => {
     const { self, fire } = await loadWorker();
     await fire('push', { data: null });
     await fire('push', pushData('Concert moved to 7:30'));
-    await fire('push', pushData({ data: { title: 42, body: ['x'] } }));
+    await fire('push', pushData({ title: 42, body: ['x'] }));
     await fire('push', { data: { text: () => { throw new Error('bad'); } } });
     const calls = self.registration.showNotification.mock.calls as unknown as Array<[string, { body: string }]>;
     expect(calls.map((c) => [c[0], c[1].body])).toEqual([
@@ -184,8 +192,8 @@ describe('push', () => {
 
   it('never lets a payload point outside the app', async () => {
     const { self, fire } = await loadWorker();
-    await fire('push', pushData({ data: { title: 'Hi', body: 'x', url: 'https://evil.example/' } }));
-    await fire('push', pushData({ data: { title: 'Hi', body: 'x', url: 'javascript:alert(1)' } }));
+    await fire('push', pushData({ title: 'Hi', body: 'x', url: 'https://evil.example/' }));
+    await fire('push', pushData({ title: 'Hi', body: 'x', url: 'javascript:alert(1)' }));
     const calls = self.registration.showNotification.mock.calls as unknown as Array<[string, { data: unknown }]>;
     expect(calls.map((c) => c[1].data)).toEqual([{ url: '#/' }, { url: '#/' }]);
   });
@@ -198,6 +206,26 @@ describe('push', () => {
     const { self, fire } = await loadWorker([win]);
     await fire('push', pushData({ title: 'Hi', body: 'There', topic: 'test' }));
     expect(self.registration.showNotification).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pushsubscriptionchange', () => {
+  it("tells this app's open windows so the signed-in app registers the new subscription", async () => {
+    const win = fakeClient(`${SCOPE}#/more`);
+    const otherSite = fakeClient('https://example.github.io/other-site/');
+    const { fire } = await loadWorker([win, otherSite]);
+    expect(await fire('pushsubscriptionchange', { oldSubscription: null, newSubscription: null })).toBe(1);
+    expect(win.postMessage).toHaveBeenCalledWith({ type: 'pushsubscriptionchange' });
+    expect(otherSite.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('copes with no open window and with a window that cannot be messaged', async () => {
+    const win = fakeClient(`${SCOPE}#/`);
+    win.postMessage.mockImplementation(() => {
+      throw new Error('gone');
+    });
+    expect(await (await loadWorker([])).fire('pushsubscriptionchange', {})).toBe(1);
+    expect(await (await loadWorker([win])).fire('pushsubscriptionchange', {})).toBe(1);
   });
 });
 

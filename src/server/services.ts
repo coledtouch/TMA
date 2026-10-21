@@ -92,7 +92,16 @@ export type PushResult = 'ok' | 'invalid' | 'error';
 
 export interface PushSender {
   enabled(): boolean;
-  /** Returns one result per token, same order. 'invalid' => the token should be deleted. */
+  /**
+   * VAPID public key browsers subscribe with (base64url), '' when unknown.
+   * Exposed to the app as PublicSettings.pushPublicKey.
+   */
+  publicKey(): string;
+  /**
+   * Tokens are JSON-serialized PushSubscriptions ({endpoint, keys:{p256dh, auth}})
+   * or, in demo mode, "demo-…" strings. Returns one result per token, same
+   * order. 'invalid' => the token should be deleted.
+   */
   send(tokens: string[], message: PushMessage): PushResult[];
 }
 

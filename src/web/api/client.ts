@@ -4,7 +4,8 @@
  * Live mode POSTs `ApiRequest` JSON to the Apps Script web app as text/plain
  * (no CORS preflight, which Apps Script cannot answer). Demo mode runs the
  * same backend core in the browser; it lives in src/demo and is loaded lazily
- * so it never weighs down the live bundle.
+ * so it never weighs down the live app. Which one a page uses is decided by
+ * lib/mode.ts; each keeps its session token under its own key.
  */
 import type {
   ApiAction,
@@ -14,7 +15,8 @@ import type {
   ApiRequest,
 } from '../../shared/types';
 import type { DemoControls } from '../../demo';
-import { getItem, removeItem, setItem, STORAGE_KEYS } from '../lib/storage';
+import { currentAppMode, liveApiUrl, type AppMode } from '../lib/mode';
+import { getItem, removeItem, setItem, storageKeys } from '../lib/storage';
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
@@ -29,7 +31,7 @@ export class ApiError extends Error {
 export interface ApiClient {
   readonly mode: 'demo' | 'live';
   getToken(): string | null;
-  /** Persists to localStorage 'tma.session' (null clears it). */
+  /** Persists to localStorage (storageKeys(mode).session: 'tma.session' live, 'tma.demo.session' demo); null clears it. */
   setToken(token: string | null): void;
   /** Throws ApiError. */
   call<A extends ApiAction>(action: A, params: ApiParams<A>): Promise<ApiResult<A>>;
@@ -66,14 +68,17 @@ export function isApiError(err: unknown, code?: ApiErrorCode): err is ApiError {
   return err instanceof ApiError && (code === undefined || err.code === code);
 }
 
-function readStoredToken(): string | null {
-  const t = getItem(STORAGE_KEYS.session);
+/** The session token stored for a mode (null when none). */
+export function readStoredToken(mode: AppMode): string | null {
+  const t = getItem(storageKeys(mode).session);
   return t && t.trim() ? t : null;
 }
 
-function persistToken(token: string | null): void {
-  if (token) setItem(STORAGE_KEYS.session, token);
-  else removeItem(STORAGE_KEYS.session);
+/** Store (or, with null, forget) the session token of one mode only. */
+export function persistToken(mode: AppMode, token: string | null): void {
+  const key = storageKeys(mode).session;
+  if (token) setItem(key, token);
+  else removeItem(key);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -104,14 +109,14 @@ export interface LiveClientOptions {
 export function createLiveClient(apiUrl: string, options: LiveClientOptions = {}): ApiClient {
   const url = apiUrl.trim();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  let token = readStoredToken();
+  let token = readStoredToken('live');
 
   const client: ApiClient = {
     mode: 'live',
     getToken: () => token,
     setToken(next) {
       token = next && next.trim() ? next : null;
-      persistToken(token);
+      persistToken('live', token);
     },
     async call<A extends ApiAction>(action: A, params: ApiParams<A>): Promise<ApiResult<A>> {
       const sentToken = token;
@@ -165,8 +170,8 @@ export type LazyDemoClient = ApiClient & { loadDemo(): Promise<DemoControls> };
 
 /**
  * Demo-mode client that loads src/demo on first use. Token reads/writes before
- * the module loads go straight to localStorage ('tma.session'), which is where
- * the demo client keeps its token too.
+ * the module loads go straight to localStorage ('tma.demo.session'), which is
+ * where the demo client keeps its token too.
  */
 export function createLazyDemoClient(
   load: () => Promise<DemoModule> = () => import('../../demo'),
@@ -187,10 +192,10 @@ export function createLazyDemoClient(
 
   return {
     mode: 'demo',
-    getToken: () => (real ? real.getToken() : readStoredToken()),
+    getToken: () => (real ? real.getToken() : readStoredToken('demo')),
     setToken(token) {
       if (real) real.setToken(token);
-      else persistToken(token && token.trim() ? token : null);
+      else persistToken('demo', token && token.trim() ? token : null);
     },
     async call<A extends ApiAction>(action: A, params: ApiParams<A>): Promise<ApiResult<A>> {
       // The demo client clears its own token on UNAUTHORIZED.
@@ -202,10 +207,13 @@ export function createLazyDemoClient(
   };
 }
 
-/** VITE_API_URL set → live Apps Script backend; empty → in-browser demo. */
-export function createApiClient(): ApiClient {
-  const url = (import.meta.env.VITE_API_URL ?? '').trim();
-  return url ? createLiveClient(url) : createLazyDemoClient();
+/**
+ * The client for this page's mode (lib/mode.ts): the live Apps Script backend,
+ * or the in-browser demo (always when VITE_API_URL is empty).
+ */
+export function createApiClient(mode: AppMode = currentAppMode()): ApiClient {
+  const url = liveApiUrl();
+  return mode === 'live' && url ? createLiveClient(url) : createLazyDemoClient();
 }
 
 /**

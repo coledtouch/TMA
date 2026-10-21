@@ -5,7 +5,7 @@
  *
  * Token format (ARCHITECTURE.md §4): base64url(JSON{e, v, x}) + "." + hmacHex.
  */
-import { getItem, removeItem, setItem, STORAGE_KEYS } from './storage';
+import { getItem, removeItem, setItem, storageKeys, type StorageMode } from './storage';
 
 function decodeBase64Url(input: string): string | null {
   try {
@@ -33,13 +33,17 @@ export function emailFromToken(token: string | null | undefined): string | null 
   }
 }
 
-/** Best guess at who is signed in on this device: token payload, else the last email used to sign in. */
-export function sessionEmail(token: string | null): string | null {
+/**
+ * Best guess at who is signed in on this device in this mode: token payload,
+ * else the last email used to sign in.
+ */
+export function sessionEmail(token: string | null, mode: StorageMode): string | null {
   if (!token) return null;
-  return emailFromToken(token) ?? getItem(STORAGE_KEYS.email);
+  return emailFromToken(token) ?? getItem(storageKeys(mode).email);
 }
 
-export function rememberEmail(email: string | null): void {
-  if (email) setItem(STORAGE_KEYS.email, email);
-  else removeItem(STORAGE_KEYS.email);
+export function rememberEmail(email: string | null, mode: StorageMode): void {
+  const key = storageKeys(mode).email;
+  if (email) setItem(key, email);
+  else removeItem(key);
 }

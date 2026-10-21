@@ -1,12 +1,16 @@
 /**
  * Passwordless sign-in: email → 6-digit code (ARCHITECTURE.md §4, §10).
  * New families sign in the same way and set up their household afterwards.
+ *
+ * Live builds also offer the demo ("See a demo with sample data"); while a
+ * live build runs the demo, its banner has "Exit demo" (lib/mode.ts).
  */
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { errorMessage, type ApiClient } from '../api/client';
 import { TextField } from '../components/Field';
 import { Icon } from '../components/Icon';
 import { useToast } from '../hooks/toast';
+import { canExitDemo, enterDemo, exitDemo } from '../lib/mode';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -31,6 +35,7 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
   const [busy, setBusy] = useState(false);
   const codeRef = useRef<HTMLInputElement>(null);
   const demo = api.mode === 'demo';
+  const exitable = canExitDemo(api.mode);
 
   useEffect(() => {
     if (step.kind === 'code') codeRef.current?.focus();
@@ -150,6 +155,11 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
                 Try as a new family
               </button>
             </div>
+            {exitable ? (
+              <button type="button" className="btn btn-link demo-exit" disabled={busy} onClick={() => exitDemo()}>
+                Exit demo
+              </button>
+            ) : null}
           </section>
         ) : null}
 
@@ -236,6 +246,12 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
             </form>
           )}
         </section>
+
+        {!demo ? (
+          <button type="button" className="btn btn-link signin-demo-link" disabled={busy} onClick={() => enterDemo()}>
+            <Icon name="sparkle" size={16} /> See a demo with sample data
+          </button>
+        ) : null}
       </div>
     </div>
   );

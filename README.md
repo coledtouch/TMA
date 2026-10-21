@@ -45,7 +45,14 @@ balances straight and notifies families when something changes.
 The demo runs entirely in your browser with made-up families. No emails, payments or real
 notifications are sent, and nothing leaves your computer.
 
-You need [Node.js](https://nodejs.org/) 20 or newer.
+**Online, nothing to install:** add `?demo` to the app's address, for example
+**https://coledtouch.github.io/TMA/?demo**. This works even after the site is connected to TMA's
+real spreadsheet: that browser shows the demo, with a strip at the top saying so, until you tap
+**Exit demo**. The demo's sign-ins and data are kept apart from the real app's. The real app's
+sign-in screen also has a *See a demo with sample data* link. Until the site is connected (see
+[Hosting](docs/SETUP.md#7-host-the-app-on-github-pages)), the whole site is the demo.
+
+**On your own computer** you need [Node.js](https://nodejs.org/) 20 or newer:
 
 ```bash
 npm install
@@ -53,7 +60,7 @@ npm run dev
 ```
 
 Open the address it prints (usually http://localhost:5173/). With no backend address configured,
-the app starts in **demo mode**:
+the app starts in **demo mode**. Either way, the demo works like this:
 
 * **Try as a parent** signs in as `parent@example.com` (Jordan Thompson, with students Avery and Liam).
 * **Try as the treasurer** signs in as `treasurer@example.com`, who sees *More → Board tools* with a
@@ -66,9 +73,6 @@ the app starts in **demo mode**:
   the demo "sent" and has a **Reset demo data** button.
 
 Demo data is saved in your browser, so you can come back to it later.
-
-The GitHub Pages site (see [Hosting](docs/SETUP.md#7-host-the-app-on-github-pages)) is also the demo
-until it is connected to TMA's backend, so it can be shared with the board as a prototype link.
 
 ## Screenshots
 
@@ -84,12 +88,12 @@ The screenshots are taken from the demo by the end-to-end test.
 
 ## What it costs
 
-Everything runs on free services inside TMA's own accounts.
+Everything runs on free services: TMA's own Google account, GitHub Pages and Cloudflare's free Workers plan.
 
 | Piece | Cost | Notes |
 | --- | --- | --- |
 | Google Sheet, Apps Script (the app's server) and Gmail | **$0** | A free Gmail account can email about 100 recipients a day, including sign-in codes. Free [Google Workspace for Nonprofits](https://www.google.com/nonprofits/) raises that to about 1,500. |
-| Push notifications (Firebase Cloud Messaging) | **$0** | Free "Spark" plan. No charge per message. |
+| Push notifications (TMA's push Worker on Cloudflare) | **$0** | Cloudflare Workers free plan (100,000 requests a day; one request carries up to 5 notifications). No charge per message, no credit card. |
 | Hosting the app (GitHub Pages) | **$0** | Free for public repositories. |
 | Using activity funds for a trip | **$0** | An internal ledger entry. No payment processor is involved. |
 | Checks and cash | **$0** | |
@@ -106,8 +110,15 @@ Everything runs on free services inside TMA's own accounts.
 │ (push + offline)       │         │  sends ▶ Gmail, every 15 min sync   │
 └──────────▲─────────────┘         └──────┬───────────────┬──────────────┘
            │ push                         │               │
-   Firebase Cloud Messaging ◀─────────────┘           PayPal REST
+   phone's push service ◀── push Worker ◀─┘          PayPal REST
+                        (Cloudflare, free)
 ```
+
+The app talks to a script inside TMA's Google account, which reads and writes the treasurer's
+Google Sheet. Phone notifications go through a tiny **push Worker** on Cloudflare's free plan
+([workers/push](workers/push/README.md)). It only encrypts each notification and hands it to Apple,
+Google, Mozilla or Microsoft for delivery. It stores no family information: the phones' notification
+addresses stay in TMA's sheet.
 
 The full design, including every API action, notification message and scheduled job, is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -122,6 +133,7 @@ The full design, including every API action, notification message and scheduled 
 | [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md) | Board | Privacy, security, liability, costs, and what happens if the volunteer developer leaves. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Developers | Behavior spec and contracts. |
 | [apps-script/README.md](apps-script/README.md) | Whoever sets it up | The two files that go into Apps Script. |
+| [workers/push/README.md](workers/push/README.md) | Developers | The push Worker on Cloudflare: its API, deployment, free-plan limits and key rotation. |
 
 ## Privacy in short
 
@@ -130,7 +142,8 @@ The full design, including every API action, notification message and scheduled 
 * **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
   student emails or phone numbers, or any school records.
 * **Where it lives:** in TMA's own Google Sheet, in TMA's Google account. There is no separate
-  database. Card payments are handled entirely by PayPal, so TMA never sees card numbers.
+  database. The push Worker on Cloudflare keeps no family information. Card payments are handled
+  entirely by PayPal, so TMA never sees card numbers.
 * **Who sees what:** a parent sees only their own household. Balances and trips appear only after
   the treasurer verifies the household. Board members listed in the sheet's Settings tab see what
   they need to approve requests and sign-ups.
@@ -151,23 +164,30 @@ More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
 | `npm run e2e` | Playwright test of the demo at phone size; it also takes the screenshots. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
 | `npm run icons` | Regenerate the app icons (and the notification badge) from `public/brand/timberlane-shield-source.webp`. |
 
-The app connects to a real backend through three build-time variables (`VITE_API_URL`,
-`VITE_FIREBASE_CONFIG`, `VITE_FIREBASE_VAPID_KEY`). With none set, it is the demo.
+The app connects to a real backend through one build-time variable, `VITE_API_URL` (the Apps Script
+`/exec` URL). Without it, the build is only the demo; with it, `?demo` still opens the demo. Push
+needs no build setting: the app gets the push Worker's public key from Apps Script.
+
+| Worker command (from the repo root) | What it does |
+| --- | --- |
+| `npx vitest run --config workers/push/vitest.config.ts` | Tests of the push Worker (not part of `npm test`). |
+| `npx tsc -p workers/push/tsconfig.json` | Typecheck of the push Worker. |
 
 ### Project layout
 
 ```
 src/shared/    types, sheet layout (schema.ts) and money helpers shared by everything
 src/server/    backend logic (plain TypeScript; runs in Apps Script and in the demo)
-src/gas/       Apps Script adapters: Sheet, Gmail, PayPal, Firebase, Twilio, menu, triggers
+src/gas/       Apps Script adapters: Sheet, Gmail, PayPal, push Worker, Twilio, menu, triggers
 src/demo/      the in-browser demo backend with sample data
 src/web/       the React app, service worker, push and PayPal UI
 apps-script/   Code.js (generated, committed) and appsscript.json, to paste into Apps Script
+workers/push/  the Cloudflare Worker that delivers push notifications (deployed by GitHub Actions)
 scripts/       build-gas.mjs, make-icons.mjs
 public/        logos and app icons
 docs/          setup, sheet, payments, board FAQ, architecture
 e2e/           Playwright smoke test of the demo
-.github/       CI and the GitHub Pages deployment
+.github/       CI, the GitHub Pages deployment and the push Worker deployment
 ```
 
 Money is always handled as whole cents in code. The sheet stores dollars.

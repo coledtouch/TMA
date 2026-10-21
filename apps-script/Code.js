@@ -30,6 +30,7 @@ var TMA = (() => {
     doPost: () => doPost,
     installTriggers: () => installTriggers,
     landingPage: () => landingPage,
+    linkPushWorker: () => linkPushWorker,
     onOpen: () => onOpen,
     parseApiRequest: () => parseApiRequest,
     sendTestPushToMe: () => sendTestPushToMe,
@@ -248,6 +249,7 @@ var TMA = (() => {
     REMINDER_DAYS: "14, 7, 1",
     EMAIL_ENABLED: "TRUE",
     SMS_ENABLED: "FALSE",
+    PUSH_RELAY_URL: "https://tma-push.coleciprari.workers.dev",
     TOKEN_VERSION: "1",
     SESSION_DAYS: "120"
   };
@@ -869,6 +871,140 @@ var TMA = (() => {
     return new Books(input);
   }
 
+  // src/server/push-subscription.ts
+  var PUSH_SERVICE_HOSTS = [
+    "fcm.googleapis.com",
+    // Chrome, Edge (Chromium) and Android
+    "updates.push.services.mozilla.com",
+    // Firefox
+    "web.push.apple.com"
+    // Safari and iPhone/iPad Home Screen apps
+  ];
+  var PUSH_SERVICE_HOST_SUFFIXES = [".push.apple.com", ".notify.windows.com"];
+  var MAX_ENDPOINT_CHARS = 2048;
+  var MAX_P256DH_CHARS = 88;
+  var MAX_AUTH_CHARS = 24;
+  var P256_POINT_BYTES = 65;
+  var AUTH_SECRET_BYTES = 16;
+  var MAX_SUBSCRIPTION_JSON_CHARS = 4096;
+  var ENDPOINT_RE = /^https:\/\/([A-Za-z0-9.-]+)([/?#][\x21-\x5b\x5d-\x7e]*)?$/;
+  var HOST_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
+  var B64URL2 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  function b64Value(code) {
+    if (code >= 65 && code <= 90) return code - 65;
+    if (code >= 97 && code <= 122) return code - 71;
+    if (code >= 48 && code <= 57) return code + 4;
+    if (code === 45 || code === 43) return 62;
+    if (code === 47 || code === 95) return 63;
+    return -1;
+  }
+  function decodeBase64UrlBytes(input) {
+    let end = input.length;
+    while (end > 0 && input.length - end < 2 && input.charCodeAt(end - 1) === 61) end--;
+    if (end % 4 === 1) return null;
+    const out = [];
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < end; i++) {
+      const v = b64Value(input.charCodeAt(i));
+      if (v < 0) return null;
+      buffer = (buffer << 6 | v) & 16777215;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out.push(buffer >> bits & 255);
+      }
+    }
+    return out;
+  }
+  function encodeBase64UrlBytes(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0 = bytes[i] & 255;
+      const b1 = i + 1 < bytes.length ? bytes[i + 1] & 255 : 0;
+      const b2 = i + 2 < bytes.length ? bytes[i + 2] & 255 : 0;
+      const n = b0 << 16 | b1 << 8 | b2;
+      out += B64URL2[n >> 18 & 63] + B64URL2[n >> 12 & 63];
+      if (i + 1 < bytes.length) out += B64URL2[n >> 6 & 63];
+      if (i + 2 < bytes.length) out += B64URL2[n & 63];
+    }
+    return out;
+  }
+  function canonicalP256Key(value) {
+    if (typeof value !== "string") return null;
+    const text2 = value.trim();
+    if (text2.length === 0 || text2.length > MAX_P256DH_CHARS) return null;
+    const bytes = decodeBase64UrlBytes(text2);
+    if (!bytes || bytes.length !== P256_POINT_BYTES || bytes[0] !== 4) return null;
+    return encodeBase64UrlBytes(bytes);
+  }
+  function canonicalAuthSecret(value) {
+    if (typeof value !== "string") return null;
+    const text2 = value.trim();
+    if (text2.length === 0 || text2.length > MAX_AUTH_CHARS) return null;
+    const bytes = decodeBase64UrlBytes(text2);
+    if (!bytes || bytes.length !== AUTH_SECRET_BYTES) return null;
+    return encodeBase64UrlBytes(bytes);
+  }
+  function isPushServiceHost(host) {
+    const h = host.toLowerCase();
+    if (!HOST_RE.test(h)) return false;
+    return PUSH_SERVICE_HOSTS.includes(h) || PUSH_SERVICE_HOST_SUFFIXES.some((suffix) => h.endsWith(suffix));
+  }
+  function checkEndpoint(value) {
+    var _a;
+    if (typeof value !== "string") return { ok: false, problem: "endpoint" };
+    const text2 = value.trim();
+    if (text2.length > MAX_ENDPOINT_CHARS) return { ok: false, problem: "endpoint" };
+    const m = ENDPOINT_RE.exec(text2);
+    if (!m) return { ok: false, problem: "endpoint" };
+    const host = m[1].toLowerCase();
+    if (!isPushServiceHost(host)) return { ok: false, problem: "push_service" };
+    return { ok: true, endpoint: `https://${host}${(_a = m[2]) != null ? _a : ""}` };
+  }
+  function canonicalEndpoint(value) {
+    const result = checkEndpoint(value);
+    return result.ok ? result.endpoint : null;
+  }
+  function parseJsonObject(value) {
+    if (isRecord(value)) return value;
+    if (typeof value !== "string") return null;
+    const text2 = value.trim();
+    if (!text2.startsWith("{") || text2.length > MAX_SUBSCRIPTION_JSON_CHARS) return null;
+    try {
+      const parsed = JSON.parse(text2);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function parseSubscription(value) {
+    const data = parseJsonObject(value);
+    if (!data) return { ok: false, problem: "format" };
+    const endpoint = checkEndpoint(data.endpoint);
+    if (!endpoint.ok) return { ok: false, problem: endpoint.problem };
+    const keys = data.keys;
+    if (!isRecord(keys)) return { ok: false, problem: "keys" };
+    const p256dh = canonicalP256Key(keys.p256dh);
+    const auth = canonicalAuthSecret(keys.auth);
+    if (!p256dh || !auth) return { ok: false, problem: "keys" };
+    return { ok: true, subscription: { endpoint: endpoint.endpoint, keys: { p256dh, auth } } };
+  }
+  function toSubscription(value) {
+    const result = parseSubscription(value);
+    return result.ok ? result.subscription : null;
+  }
+  function subscriptionToken(subscription) {
+    return JSON.stringify({
+      endpoint: subscription.endpoint,
+      keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }
+    });
+  }
+  function subscriptionEndpoint(value) {
+    const data = parseJsonObject(value);
+    return data ? canonicalEndpoint(data.endpoint) : null;
+  }
+
   // src/server/settings.ts
   var SETTING_NOTES = {
     ORG_NAME: "Shown in the app, in emails and on PayPal checkout.",
@@ -890,6 +1026,7 @@ var TMA = (() => {
     REMINDER_DAYS: "Send payment reminders this many days before a due date (comma-separated).",
     EMAIL_ENABLED: "TRUE sends email notifications to families who chose email.",
     SMS_ENABLED: "TRUE sends text messages to families who chose texts (needs Twilio; about 1 cent per text).",
+    PUSH_RELAY_URL: "Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.",
     TOKEN_VERSION: "Change this number to sign everyone out of the app.",
     SESSION_DAYS: "How many days a sign-in lasts."
   };
@@ -927,6 +1064,16 @@ var TMA = (() => {
         return false;
       }
     };
+    const pushPublicKey = () => {
+      var _a2;
+      if (!safely3(() => services.push.enabled())) return "";
+      try {
+        return (_a2 = canonicalP256Key(services.push.publicKey())) != null ? _a2 : "";
+      } catch (err) {
+        services.logger.error("Push public key lookup failed", err);
+        return "";
+      }
+    };
     const paypalClientId = get("PAYPAL_CLIENT_ID").trim();
     const onlinePaymentsSetting = bool2("ONLINE_PAYMENTS");
     const smsSetting = bool2("SMS_ENABLED");
@@ -948,7 +1095,8 @@ var TMA = (() => {
       otherPaymentInstructions: get("OTHER_PAYMENT_INSTRUCTIONS"),
       donateUrl: (_b = safeUrl(get("DONATE_URL"))) != null ? _b : "",
       privacyNote: get("PRIVACY_NOTE"),
-      smsEnabled: smsSetting && safely3(() => services.sms.enabled())
+      smsEnabled: smsSetting && safely3(() => services.sms.enabled()),
+      pushPublicKey: pushPublicKey()
     };
     const reminderDays = unique(
       splitList(get("REMINDER_DAYS"), /[,;\s]+/).map((s) => Number(s)).filter((n) => Number.isInteger(n) && n >= 0 && n <= 365).map(String)
@@ -2890,7 +3038,6 @@ var TMA = (() => {
 
   // src/server/me.ts
   var MAX_DEVICES_PER_EMAIL = 10;
-  var TOKEN_RE = /^[A-Za-z0-9_:.\-]{20,4096}$/;
   var DEVICE_COLUMNS2 = TABLES.Devices.headers;
   function savePrefs(ctx, email2, params) {
     if (!isRecord(params.prefs)) badRequest("Preferences are missing.");
@@ -2914,11 +3061,41 @@ var TMA = (() => {
     else ctx.db.append("Preferences", [row]);
     return { prefs: prefsFor(ctx, email2) };
   }
-  function parseToken(value) {
-    if (typeof value !== "string") return badRequest("Device token is missing.");
-    const token = value.trim();
-    if (!TOKEN_RE.test(token)) badRequest("Device token is invalid.");
-    return token;
+  var DEMO_TOKEN_RE = /^demo-[A-Za-z0-9_.:-]{8,200}$/;
+  function tokenText(value) {
+    if (typeof value !== "string" || value.trim() === "") return badRequest("Device token is missing.");
+    if (value.length > LIMITS.token) badRequest("Device token is invalid.");
+    return value.trim();
+  }
+  function demoKey(ctx, text2) {
+    return ctx.s.mode === "demo" && DEMO_TOKEN_RE.test(text2) ? { token: text2, endpoint: null } : null;
+  }
+  function registrationKey(ctx, value) {
+    const text2 = tokenText(value);
+    const demo = demoKey(ctx, text2);
+    if (demo) return demo;
+    const parsed = parseSubscription(text2);
+    if (!parsed.ok) {
+      if (parsed.problem === "push_service") {
+        badRequest("This browser's push service isn't supported. Try Chrome, Safari, Firefox or Edge.");
+      }
+      badRequest("Device token is invalid.");
+    }
+    const { subscription } = parsed;
+    return { token: subscriptionToken(subscription), endpoint: subscription.endpoint };
+  }
+  function unregistrationKey(ctx, value) {
+    const text2 = tokenText(value);
+    const demo = demoKey(ctx, text2);
+    if (demo) return demo;
+    const endpoint = subscriptionEndpoint(text2);
+    if (!endpoint) badRequest("Device token is invalid.");
+    return { token: text2, endpoint };
+  }
+  function sameDevice(key) {
+    if (key.endpoint === null) return (d) => d.token === key.token;
+    const endpoint = key.endpoint;
+    return (d) => subscriptionEndpoint(d.token) === endpoint;
   }
   function lastSeenMs(d) {
     var _a, _b;
@@ -2926,35 +3103,39 @@ var TMA = (() => {
     return Number.isNaN(t) ? 0 : t;
   }
   function registerDevice(ctx, email2, params) {
-    const token = parseToken(params.token);
+    const key = registrationKey(ctx, params.token);
     const userAgent = typeof params.userAgent === "string" ? cleanText(params.userAgent).slice(0, LIMITS.userAgent) : "";
     rateLimit(ctx, `push-rl:${email2}`, 30, 3600, "Too many device registrations. Please try again later.");
     const family = ctx.m.familyForEmail(email2);
     const familyId = family && family.status !== "Inactive" ? family.id : "";
-    const matches = ctx.m.devices().filter((d) => d.token === token);
+    const isThisDevice = sameDevice(key);
+    const matches = ctx.m.devices().filter(isThisDevice);
     if (matches.length > 0) {
       const [first, ...duplicates] = matches;
-      ctx.db.update("Devices", first.row, { Email: email2, FamilyID: familyId, "User Agent": userAgent, "Last Seen": ctx.now });
+      ctx.db.update("Devices", first.row, {
+        Email: email2,
+        FamilyID: familyId,
+        Token: key.token,
+        "User Agent": userAgent,
+        "Last Seen": ctx.now
+      });
       for (const d of duplicates) ctx.db.clear("Devices", d.row, DEVICE_COLUMNS2);
     } else {
       ctx.db.append("Devices", [
-        { Email: email2, FamilyID: familyId, Token: token, "User Agent": userAgent, Created: ctx.now, "Last Seen": ctx.now }
+        { Email: email2, FamilyID: familyId, Token: key.token, "User Agent": userAgent, Created: ctx.now, "Last Seen": ctx.now }
       ]);
     }
     const mine = ctx.m.devicesFor(email2);
     if (mine.length > MAX_DEVICES_PER_EMAIL) {
-      const oldest = mine.filter((d) => d.token !== token).sort((a, b) => lastSeenMs(a) - lastSeenMs(b) || a.row - b.row).slice(0, mine.length - MAX_DEVICES_PER_EMAIL);
+      const oldest = mine.filter((d) => !isThisDevice(d)).sort((a, b) => lastSeenMs(a) - lastSeenMs(b) || a.row - b.row).slice(0, mine.length - MAX_DEVICES_PER_EMAIL);
       for (const d of oldest) ctx.db.clear("Devices", d.row, DEVICE_COLUMNS2);
     }
     return { devices: ctx.m.devicesFor(email2).length };
   }
   function unregisterDevice(ctx, email2, params) {
-    if (typeof params.token !== "string" || params.token.trim() === "" || params.token.length > LIMITS.token) {
-      badRequest("Device token is missing.");
-    }
-    const token = params.token.trim();
+    const isThisDevice = sameDevice(unregistrationKey(ctx, params.token));
     for (const d of ctx.m.devicesFor(email2)) {
-      if (d.token === token) ctx.db.clear("Devices", d.row, DEVICE_COLUMNS2);
+      if (isThisDevice(d)) ctx.db.clear("Devices", d.row, DEVICE_COLUMNS2);
     }
     return { devices: ctx.m.devicesFor(email2).length };
   }
@@ -3601,10 +3782,9 @@ var TMA = (() => {
 
   // src/server/setup.ts
   var SEED_GUARD = ["Families", "Students", "Ledger"];
-  function newTokenSecret(ctx) {
-    const c = ctx.s.crypto;
+  function generateSecret(c, name) {
     const secret = c.hmacSha256Hex(c.uuid(), `${c.uuid()}${c.uuid()}${c.randomDigits(32)}`);
-    if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error("Could not generate TOKEN_SECRET");
+    if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error(`Could not generate ${name}`);
     return secret;
   }
   function runSetup(ctx, options = {}) {
@@ -3618,7 +3798,7 @@ var TMA = (() => {
     const missing = Object.keys(SETTING_DEFAULTS).filter((key) => !present.has(key)).map((key) => ({ Key: key, Value: SETTING_DEFAULTS[key], Notes: SETTING_NOTES[key] }));
     ctx.db.append("Settings", missing);
     if (!ctx.s.secrets.get("TOKEN_SECRET")) {
-      ctx.s.secrets.set("TOKEN_SECRET", newTokenSecret(ctx));
+      ctx.s.secrets.set("TOKEN_SECRET", generateSecret(ctx.s.crypto, "TOKEN_SECRET"));
       report.secretsInitialized.push("TOKEN_SECRET");
     }
     if (options.seedSampleData && SEED_GUARD.every((t) => ctx.db.rows(t).length === 0)) {
@@ -3906,10 +4086,6 @@ var TMA = (() => {
     for (const b of bytes) hex += ((b & 255) + 256).toString(16).slice(1);
     return hex;
   }
-  function base64UrlEncode2(data) {
-    const bytes = typeof data === "string" ? Utilities.newBlob(data).getBytes() : [...data];
-    return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/, "");
-  }
   function parseJson(text2) {
     try {
       return JSON.parse(text2);
@@ -4172,7 +4348,7 @@ var TMA = (() => {
     if (tokens.length === 0) {
       report.notes.push(`No phones are registered for ${email2}. Sign in to the app with this email and turn on notifications (More → Notifications).`);
     } else if (!services.push.enabled()) {
-      report.notes.push("Push is not set up: add the FCM_SERVICE_ACCOUNT script property (see docs/SETUP.md).");
+      report.notes.push("Push is not set up: run TMA App → Set up / repair tabs to link this sheet to the push Worker (see docs/SETUP.md).");
     } else {
       const results = services.push.send(tokens, TEST_MESSAGE);
       report.push = results.filter((r) => r === "ok").length;
@@ -4227,153 +4403,302 @@ Email from the TMA app is working.
     ].join("");
   }
 
-  // src/gas/fcm.ts
-  var GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-  var FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
-  var TOKEN_TTL_SECONDS = 50 * 60;
-  var BATCH_SIZE = 100;
-  var MAX_DEVICE_TOKEN = 4096;
-  var DEAD_TOKEN_CODES = ["UNREGISTERED", "INVALID_ARGUMENT", "SENDER_ID_MISMATCH"];
-  function parseServiceAccount(json2) {
-    if (!json2) return null;
-    const data = parseJson(json2);
-    if (!isRecord2(data)) return null;
-    const { project_id, client_email, private_key, private_key_id } = data;
-    if (typeof project_id !== "string" || typeof client_email !== "string" || typeof private_key !== "string") return null;
-    if (!project_id || !client_email || !private_key.includes("PRIVATE KEY")) return null;
-    return {
-      project_id,
-      client_email,
-      // Tolerate JSON that was pasted with its "\n" escapes doubled.
-      private_key: private_key.replace(/\\n/g, "\n"),
-      ...typeof private_key_id === "string" && private_key_id ? { private_key_id } : {}
-    };
+  // src/gas/push-relay.ts
+  var MESSAGES_PER_REQUEST = 5;
+  var REQUESTS_PER_FETCH_ALL = 20;
+  var MAX_PAYLOAD_BYTES = 3e3;
+  var PUSH_TTL_SECONDS = 86400;
+  var MIN_SECRET_CHARS = 32;
+  var MAX_SECRET_CHARS = 256;
+  var PUBLIC_KEY_RETRY_SECONDS = 300;
+  var PUBLIC_KEY_FAILED_CACHE_KEY = "push-relay:public-key-failed";
+  var TOPIC_MAX_CHARS = 32;
+  var ALREADY_REGISTERED_MESSAGE = "The push Worker is already linked to a different Apps Script secret. See workers/push/README.md (rotate keys).";
+  function normalizeRelayUrl(value) {
+    const url = String(value != null ? value : "").trim().replace(/\/+$/, "");
+    return /^https:\/\/[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?(?:\/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*)?$/.test(url) ? url : null;
   }
-  function createServiceAccountJwt(account, nowSeconds) {
-    const header = { alg: "RS256", typ: "JWT" };
-    if (account.private_key_id) header.kid = account.private_key_id;
-    const claims = {
-      iss: account.client_email,
-      scope: FCM_SCOPE,
-      aud: GOOGLE_TOKEN_URL,
-      iat: nowSeconds,
-      exp: nowSeconds + 3600
-    };
-    const signingInput = `${base64UrlEncode2(JSON.stringify(header))}.${base64UrlEncode2(JSON.stringify(claims))}`;
-    const signature = Utilities.computeRsaSha256Signature(signingInput, account.private_key);
-    return `${signingInput}.${base64UrlEncode2(signature)}`;
+  function utf8Length(text2) {
+    let bytes = 0;
+    for (let i = 0; i < text2.length; i += 1) {
+      const c = text2.charCodeAt(i);
+      if (c < 128) bytes += 1;
+      else if (c < 2048) bytes += 2;
+      else if (c >= 55296 && c <= 56319 && i + 1 < text2.length && (text2.charCodeAt(i + 1) & 64512) === 56320) {
+        bytes += 4;
+        i += 1;
+      } else bytes += 3;
+    }
+    return bytes;
   }
-  function buildFcmMessage(token, message) {
+  function cut(text2, n) {
+    const head = text2.slice(0, n);
+    const last = head.charCodeAt(head.length - 1);
+    return last >= 55296 && last <= 56319 ? head.slice(0, -1) : head;
+  }
+  function buildPayload(message) {
     var _a, _b, _c;
-    const data = {
-      title: clip(String((_a = message.title) != null ? _a : ""), 200),
-      body: clip(String((_b = message.body) != null ? _b : ""), 1e3),
-      topic: String((_c = message.topic) != null ? _c : "")
+    const fields = {
+      title: clip(String((_a = message.title) != null ? _a : ""), 120),
+      url: message.url ? clip(String(message.url), 200) : void 0,
+      tag: message.tag ? clip(String(message.tag), 64) : void 0,
+      topic: clip(String((_b = message.topic) != null ? _b : ""), 32)
     };
-    if (message.url) data.url = clip(String(message.url), 500);
-    if (message.tag) data.tag = clip(String(message.tag), 100);
-    return { token, data, webpush: { headers: { Urgency: "high", TTL: "86400" } } };
-  }
-  function classifyFcmResponse(code, bodyText) {
-    if (code >= 200 && code < 300) return "ok";
-    if (code === 404) return "invalid";
-    const error = pick(parseJson(bodyText), "error");
-    const codes = [pick(error, "status")];
-    const details = pick(error, "details");
-    if (Array.isArray(details)) for (const d of details) codes.push(pick(d, "errorCode"));
-    return codes.some((c) => typeof c === "string" && DEAD_TOKEN_CODES.includes(c)) ? "invalid" : "error";
-  }
-  function createFcmSender(deps) {
-    const { secrets, cache, clock, logger } = deps;
-    const account = () => parseServiceAccount(secrets.get("FCM_SERVICE_ACCOUNT"));
-    const tokenKey = (sa) => `fcm-token:${sa.client_email}`;
-    function accessToken(sa) {
-      var _a;
-      const cached = cache.get(tokenKey(sa));
-      if (cached) return cached;
-      const jwt = createServiceAccountJwt(sa, Math.floor(clock.now().getTime() / 1e3));
-      const res = UrlFetchApp.fetch(GOOGLE_TOKEN_URL, {
-        method: "post",
-        contentType: "application/x-www-form-urlencoded",
-        payload: formEncode({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt }),
-        muteHttpExceptions: true
-      });
-      const body = parseJson(res.getContentText());
-      const token = pick(body, "access_token");
-      if (res.getResponseCode() !== 200 || typeof token !== "string" || !token) {
-        throw new Error(`Firebase authentication failed (HTTP ${res.getResponseCode()} ${String((_a = pick(body, "error")) != null ? _a : "")})`.trim());
-      }
-      const expiresIn = Number(pick(body, "expires_in")) || 3600;
-      cache.put(tokenKey(sa), token, clamp(Math.floor(expiresIn - 300), 60, TOKEN_TTL_SECONDS));
-      return token;
+    const render = (body2) => JSON.stringify({ title: fields.title, body: body2, url: fields.url, tag: fields.tag, topic: fields.topic });
+    const body = String((_c = message.body) != null ? _c : "");
+    const full = render(body);
+    if (utf8Length(full) <= MAX_PAYLOAD_BYTES) return full;
+    let lo = 0;
+    let hi = body.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (utf8Length(render(`${cut(body, mid)}…`)) <= MAX_PAYLOAD_BYTES) lo = mid;
+      else hi = mid - 1;
     }
-    function deliver2(sa, bearer, payloads, indexes) {
-      const url = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(sa.project_id)}/messages:send`;
-      const out = /* @__PURE__ */ new Map();
-      for (let start = 0; start < indexes.length; start += BATCH_SIZE) {
-        const chunk = indexes.slice(start, start + BATCH_SIZE);
-        const responses = UrlFetchApp.fetchAll(
-          chunk.map((i) => ({
-            url,
-            method: "post",
-            contentType: "application/json",
-            headers: { Authorization: `Bearer ${bearer}` },
-            payload: payloads[i],
-            muteHttpExceptions: true
-          }))
-        );
-        chunk.forEach((i, k) => out.set(i, { code: responses[k].getResponseCode(), text: responses[k].getContentText() }));
+    return render(lo > 0 ? `${cut(body, lo)}…` : "");
+  }
+  function pushTopic(tag) {
+    if (!tag) return void 0;
+    const topic = String(tag).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, TOPIC_MAX_CHARS);
+    return topic === "" ? void 0 : topic;
+  }
+  function pushUrgency(topic) {
+    return topic === "reminders" || topic === "announcements" ? "normal" : "high";
+  }
+  function readSendResponse(code, text2, size) {
+    const body = parseJson(text2);
+    if (code === 401) return { kind: "unauthorized" };
+    if (code === 503 && pick(body, "error") === "no_keys") return { kind: "no_keys" };
+    if (code !== 200) return { kind: "failed", httpCode: code };
+    const entries = pick(body, "results");
+    if (!Array.isArray(entries) || entries.length !== size) return { kind: "failed", httpCode: code };
+    const reasons = entries.map((e) => {
+      const reason = pick(e, "reason");
+      return typeof reason === "string" ? clip(reason.replace(/[^a-z0-9_]/gi, ""), 40) : "";
+    });
+    if (size > 0 && reasons.every((r) => r === "no_keys")) return { kind: "no_keys" };
+    const results = entries.map((e) => {
+      const status = isRecord2(e) ? e.status : void 0;
+      return status === "ok" ? "ok" : status === "invalid" ? "invalid" : "error";
+    });
+    return { kind: "results", results, reasons };
+  }
+  function errorText(error, secret) {
+    const text2 = clip(error instanceof Error ? error.message : String(error), 200);
+    return secret ? text2.split(secret).join("[secret]") : text2;
+  }
+  function createPushRelaySender(deps) {
+    const { secrets, cache, logger } = deps;
+    let secretMemo = null;
+    let publicKeyMemo = null;
+    let reRegistered = false;
+    let keysRequested = false;
+    const baseUrl = () => normalizeRelayUrl(deps.relayUrl());
+    function relaySecret() {
+      if (secretMemo === null) {
+        const value = secrets.get("PUSH_RELAY_SECRET");
+        if (value && value.length >= MIN_SECRET_CHARS && value.length <= MAX_SECRET_CHARS && !/[\u0000-\u001f\u007f]/.test(value)) {
+          secretMemo = value;
+        }
       }
-      return out;
+      return secretMemo;
+    }
+    function requireBase() {
+      const base = baseUrl();
+      if (!base) throw new Error("Settings PUSH_RELAY_URL is not an https:// address.");
+      return base;
+    }
+    function fetchOrExplain(url, params) {
+      try {
+        return UrlFetchApp.fetch(url, { ...params, muteHttpExceptions: true });
+      } catch (error) {
+        throw new Error(`Could not reach the push Worker (${errorText(error, secretMemo)}).`);
+      }
+    }
+    function register() {
+      const base = requireBase();
+      const secret = relaySecret();
+      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
+      const res = fetchOrExplain(`${base}/register`, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({ secret })
+      });
+      const code = res.getResponseCode();
+      const body = parseJson(res.getContentText());
+      if (code === 200 && pick(body, "registered") === true) return { first: pick(body, "first") === true };
+      if (code === 409) throw new Error(ALREADY_REGISTERED_MESSAGE);
+      throw new Error(`The push Worker answered HTTP ${code} when linking this sheet.`);
+    }
+    function refreshPublicKey() {
+      const base = requireBase();
+      const res = fetchOrExplain(`${base}/vapid-public-key`, { method: "get", headers: { Accept: "application/json" } });
+      const code = res.getResponseCode();
+      if (code !== 200) throw new Error(`The push Worker answered HTTP ${code} for its public key.`);
+      const key = canonicalP256Key(pick(parseJson(res.getContentText()), "publicKey"));
+      if (!key) throw new Error("The push Worker sent a public key that is not a P-256 key.");
+      secrets.set("PUSH_PUBLIC_KEY", key);
+      publicKeyMemo = key;
+      cache.remove(PUBLIC_KEY_FAILED_CACHE_KEY);
+      return key;
+    }
+    function publicKey() {
+      if (publicKeyMemo) return publicKeyMemo;
+      const stored = canonicalP256Key(secrets.get("PUSH_PUBLIC_KEY"));
+      if (stored) {
+        publicKeyMemo = stored;
+        return stored;
+      }
+      if (!baseUrl() || cache.get(PUBLIC_KEY_FAILED_CACHE_KEY)) return "";
+      try {
+        return refreshPublicKey();
+      } catch (error) {
+        cache.put(PUBLIC_KEY_FAILED_CACHE_KEY, "1", PUBLIC_KEY_RETRY_SECONDS);
+        logger.error("Could not get the push public key", { message: errorText(error, secretMemo) });
+        return "";
+      }
+    }
+    function health() {
+      const down = { reachable: false, registered: false, hasKeys: false };
+      const base = baseUrl();
+      if (!base) return { ...down, error: "PUSH_RELAY_URL is not an https:// address" };
+      try {
+        const res = UrlFetchApp.fetch(`${base}/health`, { method: "get", muteHttpExceptions: true });
+        const code = res.getResponseCode();
+        const body = parseJson(res.getContentText());
+        if (code !== 200 || pick(body, "ok") !== true) return { ...down, httpCode: code };
+        return { reachable: true, registered: pick(body, "registered") === true, hasKeys: pick(body, "hasKeys") === true };
+      } catch (error) {
+        return { ...down, error: errorText(error, secretMemo) };
+      }
+    }
+    function post(base, secret, chunks) {
+      const outcomes = [];
+      for (let start = 0; start < chunks.length; start += REQUESTS_PER_FETCH_ALL) {
+        const group = chunks.slice(start, start + REQUESTS_PER_FETCH_ALL);
+        try {
+          const responses = UrlFetchApp.fetchAll(
+            group.map((chunk) => ({
+              url: `${base}/send`,
+              method: "post",
+              contentType: "application/json",
+              headers: { Authorization: `Bearer ${secret}` },
+              payload: JSON.stringify({ messages: chunk.map((p) => p.message) }),
+              muteHttpExceptions: true
+            }))
+          );
+          group.forEach((chunk, i) => {
+            const res = responses[i];
+            outcomes.push(res ? readSendResponse(res.getResponseCode(), res.getContentText(), chunk.length) : { kind: "failed", httpCode: 0 });
+          });
+        } catch (error) {
+          logger.error("Push Worker unreachable", { message: errorText(error, secret) });
+          for (let i = 0; i < group.length; i += 1) outcomes.push({ kind: "failed", httpCode: 0 });
+        }
+      }
+      return outcomes;
+    }
+    function send(tokens, message) {
+      const results = tokens.map(() => "error");
+      if (tokens.length === 0) return results;
+      const base = baseUrl();
+      const secret = relaySecret();
+      if (!base || !secret) return results;
+      const payload = buildPayload(message);
+      const topic = pushTopic(message.tag);
+      const urgency = pushUrgency(message.topic);
+      const queue = [];
+      tokens.forEach((token, index) => {
+        const subscription = typeof token === "string" ? toSubscription(token) : null;
+        if (!subscription) {
+          results[index] = "invalid";
+          return;
+        }
+        const msg = { subscription, payload, ttl: PUSH_TTL_SECONDS, urgency };
+        if (topic) msg.topic = topic;
+        queue.push({ index, message: msg });
+      });
+      if (queue.length === 0) return results;
+      const chunks = [];
+      for (let i = 0; i < queue.length; i += MESSAGES_PER_REQUEST) chunks.push(queue.slice(i, i + MESSAGES_PER_REQUEST));
+      const httpCodes = [];
+      const reasons = [];
+      const apply = (batch, outcomes) => {
+        const retry = { unauthorized: [], noKeys: [] };
+        batch.forEach((chunk, i) => {
+          const outcome = outcomes[i];
+          if (outcome.kind === "results") {
+            chunk.forEach((p, k) => {
+              results[p.index] = outcome.results[k];
+              if (outcome.results[k] === "error" && outcome.reasons[k]) reasons.push(outcome.reasons[k]);
+            });
+          } else if (outcome.kind === "unauthorized") {
+            retry.unauthorized.push(chunk);
+          } else if (outcome.kind === "no_keys") {
+            retry.noKeys.push(chunk);
+          } else {
+            httpCodes.push(outcome.httpCode);
+          }
+        });
+        return retry;
+      };
+      const first = apply(chunks, post(base, secret, chunks));
+      const noKeys = first.noKeys;
+      if (first.unauthorized.length > 0) {
+        if (reRegistered) {
+          httpCodes.push(401);
+        } else {
+          reRegistered = true;
+          try {
+            register();
+            const again = apply(first.unauthorized, post(base, secret, first.unauthorized));
+            if (again.unauthorized.length > 0) httpCodes.push(401);
+            noKeys.push(...again.noKeys);
+          } catch (error) {
+            httpCodes.push(401);
+            logger.error("Push Worker rejected this sheet and linking again failed", { message: errorText(error, secret) });
+          }
+        }
+      }
+      if (noKeys.length > 0) {
+        if (keysRequested) {
+          reasons.push("no_keys");
+        } else {
+          keysRequested = true;
+          try {
+            refreshPublicKey();
+            const again = apply(noKeys, post(base, secret, noKeys));
+            if (again.noKeys.length > 0) reasons.push("no_keys");
+            if (again.unauthorized.length > 0) httpCodes.push(401);
+          } catch (error) {
+            reasons.push("no_keys");
+            logger.error("Push Worker has no keys and creating them failed", { message: errorText(error, secret) });
+          }
+        }
+      }
+      const failed = results.filter((r) => r === "error").length;
+      if (failed > 0) {
+        logger.error("Push delivery errors", {
+          failed,
+          total: tokens.length,
+          httpCodes: unique2(httpCodes.map(String)).slice(0, 5),
+          reasons: unique2(reasons).slice(0, 5)
+        });
+      }
+      return results;
     }
     return {
-      enabled: () => account() !== null,
-      send(tokens, message) {
-        const results = tokens.map(() => "error");
-        if (tokens.length === 0) return results;
-        const sa = account();
-        if (!sa) return results;
-        const payloads = [];
-        const pending = [];
-        tokens.forEach((raw, i) => {
-          const token = typeof raw === "string" ? raw.trim() : "";
-          if (!token || token.length > MAX_DEVICE_TOKEN || /\s/.test(token)) {
-            results[i] = "invalid";
-            payloads.push("");
-            return;
-          }
-          payloads.push(JSON.stringify({ message: buildFcmMessage(token, message) }));
-          pending.push(i);
-        });
-        if (pending.length === 0) return results;
-        let responses;
-        try {
-          responses = deliver2(sa, accessToken(sa), payloads, pending);
-          const unauthorized = pending.filter((i) => {
-            var _a;
-            return ((_a = responses.get(i)) == null ? void 0 : _a.code) === 401;
-          });
-          if (unauthorized.length > 0) {
-            cache.remove(tokenKey(sa));
-            const retried = deliver2(sa, accessToken(sa), payloads, unauthorized);
-            retried.forEach((res, i) => responses.set(i, res));
-          }
-        } catch (error) {
-          logger.error("FCM send failed", { message: error instanceof Error ? error.message : String(error) });
-          return results;
-        }
-        const errorCodes = [];
-        for (const i of pending) {
-          const res = responses.get(i);
-          results[i] = res ? classifyFcmResponse(res.code, res.text) : "error";
-          if (results[i] === "error") errorCodes.push(res ? res.code : 0);
-        }
-        if (errorCodes.length > 0) {
-          logger.error("FCM send errors", { failed: errorCodes.length, total: tokens.length, httpCodes: errorCodes.slice(0, 5) });
-        }
-        return results;
-      }
+      enabled: () => baseUrl() !== null && relaySecret() !== null,
+      publicKey,
+      send,
+      baseUrl,
+      register,
+      refreshPublicKey,
+      health
     };
+  }
+  function unique2(items) {
+    return items.filter((item, i) => items.indexOf(item) === i);
   }
 
   // src/gas/settings.ts
@@ -4409,6 +4734,8 @@ Email from the TMA app is working.
   var MAX_CELL_CHARS = 5e4;
   var FORMULA_START = /^[=+\-@']/;
   var NUMERIC_TEXT = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+  var WALL_CLOCK_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS";
+  var WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/;
   function createSheetStore(spreadsheet, options = {}) {
     var _a;
     return new SpreadsheetStore(spreadsheet, (_a = options.withLock) != null ? _a : ((fn) => fn()));
@@ -4436,9 +4763,9 @@ Email from the TMA app is working.
     }
     return columns;
   }
-  function toSheetValue(value) {
+  function toSheetValue(value, toSheetDate = (d) => d) {
     if (value === null || value === void 0) return "";
-    if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : toSheetDate(value);
     if (typeof value === "number") return Number.isFinite(value) ? value : "";
     if (typeof value === "boolean") return value;
     const text2 = String(value);
@@ -4450,6 +4777,65 @@ Email from the TMA app is working.
   function isBlank2(value) {
     return value === null || value === void 0 || typeof value === "string" && value.trim() === "";
   }
+  function pad(n, width) {
+    return String(n).padStart(width, "0");
+  }
+  function localDate(year, month, day, hour, minute, second, ms) {
+    const d = new Date(2e3, 0, 1, 0, 0, 0, 0);
+    d.setFullYear(year, month - 1, day);
+    d.setHours(hour, minute, second, ms);
+    return d;
+  }
+  var SheetTimeZone = class {
+    constructor(spreadsheet) {
+      this.spreadsheet = spreadsheet;
+      /** The spreadsheet's zone when it differs from the script's, else null; undefined until looked up. */
+      __publicField(this, "zone");
+      __publicField(this, "readMemo", /* @__PURE__ */ new Map());
+    }
+    /** The spreadsheet zone, or null when no conversion is needed. */
+    sheetZone() {
+      if (this.zone === void 0) this.zone = this.lookUp();
+      return this.zone;
+    }
+    /** A Date read from the sheet -> the same wall-clock time in the script zone. */
+    fromSheet(value) {
+      const zone = this.sheetZone();
+      const t = value.getTime();
+      if (zone === null || Number.isNaN(t)) return value;
+      let local = this.readMemo.get(t);
+      if (local === void 0) {
+        const m = WALL_CLOCK_RE.exec(Utilities.formatDate(value, zone, WALL_CLOCK_FORMAT));
+        local = m ? localDate(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], +m[7]).getTime() : t;
+        this.readMemo.set(t, local);
+      }
+      return new Date(local);
+    }
+    /** A Date from the core -> a Date the sheet shows with the script zone's wall-clock time. */
+    toSheet(value) {
+      const zone = this.sheetZone();
+      if (zone === null || Number.isNaN(value.getTime()) || value.getFullYear() < 0 || value.getFullYear() > 9999) return value;
+      const wallClock = `${pad(value.getFullYear(), 4)}-${pad(value.getMonth() + 1, 2)}-${pad(value.getDate(), 2)}T${pad(value.getHours(), 2)}:${pad(value.getMinutes(), 2)}:${pad(value.getSeconds(), 2)}.${pad(value.getMilliseconds(), 3)}`;
+      const converted = Utilities.parseDate(wallClock, zone, WALL_CLOCK_FORMAT);
+      return converted instanceof Date && !Number.isNaN(converted.getTime()) ? converted : value;
+    }
+    lookUp() {
+      var _a;
+      let sheetZone = "";
+      try {
+        sheetZone = String((_a = this.spreadsheet.getSpreadsheetTimeZone()) != null ? _a : "").trim();
+      } catch {
+        return null;
+      }
+      if (!sheetZone) return null;
+      let scriptZone = "";
+      try {
+        scriptZone = Session.getScriptTimeZone();
+      } catch {
+      }
+      return sheetZone === scriptZone ? null : sheetZone;
+    }
+  };
   var SpreadsheetStore = class {
     constructor(spreadsheet, withLock) {
       this.spreadsheet = spreadsheet;
@@ -4458,6 +4844,10 @@ Email from the TMA app is working.
       __publicField(this, "layouts", /* @__PURE__ */ new Map());
       /** Data rows; dropped on every write to the tab. */
       __publicField(this, "rowCache", /* @__PURE__ */ new Map());
+      __publicField(this, "timeZone");
+      __publicField(this, "toSheetDate");
+      this.timeZone = new SheetTimeZone(spreadsheet);
+      this.toSheetDate = (d) => this.timeZone.toSheet(d);
     }
     invalidate(table) {
       if (table) {
@@ -4520,7 +4910,7 @@ Email from the TMA app is working.
       const cells = [];
       for (const [key, value] of Object.entries(patch)) {
         const column = layout.columns.get(key);
-        if (column !== void 0 && value !== void 0) cells.push({ column, value: toSheetValue(value) });
+        if (column !== void 0 && value !== void 0) cells.push({ column, value: toSheetValue(value, this.toSheetDate) });
       }
       cells.sort((a, b) => a.column - b.column);
       let i = 0;
@@ -4583,7 +4973,8 @@ Email from the TMA app is working.
         const data = {};
         let blank = true;
         for (const [header, column] of columns) {
-          const value = line[column - 1];
+          const raw = line[column - 1];
+          const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
           data[header] = value;
           if (!isBlank2(value)) blank = false;
         }
@@ -4640,7 +5031,7 @@ Email from the TMA app is working.
         const line = [];
         for (let c = first; c <= last; c += 1) {
           const header = byColumn.get(c);
-          line.push(header === void 0 ? "" : toSheetValue(row[header]));
+          line.push(header === void 0 ? "" : toSheetValue(row[header], this.toSheetDate));
         }
         return line;
       });
@@ -4731,7 +5122,7 @@ Email from the TMA app is working.
       secrets,
       mailer: createMailAppMailer(() => setting("ORG_NAME")),
       sms: createTwilioSender({ secrets, logger }),
-      push: createFcmSender({ secrets, cache, clock, logger }),
+      push: createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting("PUSH_RELAY_URL") }),
       payments: createPayPalGateway({
         cache,
         logger,
@@ -4858,7 +5249,7 @@ Email from the TMA app is working.
   var SECRET_NAMES = [
     "TOKEN_SECRET",
     "PAYPAL_SECRET",
-    "FCM_SERVICE_ACCOUNT",
+    "PUSH_RELAY_SECRET",
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_FROM"
@@ -4959,19 +5350,45 @@ Email from the TMA app is working.
   }
   function runSetup2(seedSampleData) {
     const { services, app } = boot();
-    const report = services.withLock(() => app.setup({ seedSampleData }));
-    services.logger.info("setup", report);
+    const report = services.withLock(() => {
+      const result = app.setup({ seedSampleData });
+      if (services.secrets.get("PUSH_RELAY_SECRET")) return result;
+      services.secrets.set("PUSH_RELAY_SECRET", generateSecret(services.crypto, "PUSH_RELAY_SECRET"));
+      return { ...result, secretsInitialized: [...result.secretsInitialized, "PUSH_RELAY_SECRET"] };
+    });
+    const push = linkPushWorker(services);
+    services.logger.info("setup", { ...report, push });
     const lines = [
       report.createdTables.length ? `Created tabs: ${report.createdTables.join(", ")}` : "All tabs were already there.",
       report.addedColumns.length ? `Added columns: ${report.addedColumns.map((c) => `${c.table} › ${c.column}`).join(", ")}` : "No columns were missing.",
       report.seeded ? "Filled the empty tabs with sample (fictional) data." : "",
-      report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(", ")}` : ""
+      report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(", ")}` : "",
+      ...push
     ].filter(Boolean);
     const next = "Next: Deploy → New deployment → Web app, then TMA App → Install schedules.";
     alert("TMA App set up", `${lines.join("\n")}
 
 ${next}`);
     return report;
+  }
+  function linkPushWorker(services) {
+    const push = services.push;
+    const base = push.baseUrl();
+    if (!base) return ["⚠ Push notifications are off: Settings PUSH_RELAY_URL is not an https:// address."];
+    const lines = [];
+    try {
+      const { first } = push.register();
+      lines.push(first ? `Push: linked this sheet to the push Worker (${base}).` : `Push: this sheet is linked to the push Worker (${base}).`);
+    } catch (error) {
+      return [`⚠ Push: ${errorMessage2(error)} Phones won't get notifications until Set up links the push Worker; run it again later.`];
+    }
+    try {
+      push.refreshPublicKey();
+      lines.push("Push: saved the Worker's public key (Script Property PUSH_PUBLIC_KEY).");
+    } catch (error) {
+      lines.push(`⚠ Push: could not get the Worker's public key. ${errorMessage2(error)} Run Set up again later.`);
+    }
+    return lines;
   }
   function installTriggers() {
     let removed = 0;
@@ -5011,7 +5428,7 @@ ${next}`);
       `Secrets set: ${present.join(", ") || "none"}`,
       `Secrets not set: ${missing.join(", ") || "none"}`,
       `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting("PAYPAL_ENV"))})` : "not configured"}; online payments ${yes(services.flag("ONLINE_PAYMENTS"))}`,
-      `Push notifications (Firebase): ${services.push.enabled() ? "configured" : "not configured"}`,
+      ...pushStatus(services),
       `Text messages (Twilio): ${services.sms.enabled() ? "configured" : "not configured"}; SMS setting ${yes(services.flag("SMS_ENABLED"))}`,
       `Email: ${yes(services.flag("EMAIL_ENABLED"))}; ${safely2(() => services.mailer.remainingQuota(), 0)} emails left today`,
       `Version: ${VERSION}`
@@ -5020,6 +5437,24 @@ ${next}`);
     const text2 = lines.join("\n");
     alert("TMA App status", text2);
     return text2;
+  }
+  function pushStatus(services) {
+    const push = services.push;
+    const base = push.baseUrl();
+    if (!base) return ["Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off"];
+    const health = push.health();
+    const setUp = " (TMA App → Set up / repair tabs)";
+    const healthLine = health.reachable ? `Push Worker health: reachable ✓, linked to a sheet ${health.registered ? "✓" : `✗${setUp}`}, keys ${health.hasKeys ? "✓" : `✗${setUp}`}` : `Push Worker health: unreachable (${health.httpCode ? `HTTP ${health.httpCode}` : health.error || "no answer"})`;
+    const keySaved = canonicalP256Key(services.secrets.get("PUSH_PUBLIC_KEY")) !== null;
+    return [
+      `Push Worker: ${base}`,
+      healthLine,
+      `Push public key (PUSH_PUBLIC_KEY): ${keySaved ? "saved ✓" : `not saved yet${setUp}`}`,
+      `Push notifications: ${push.enabled() ? "configured" : `not configured${setUp}`}`
+    ];
+  }
+  function errorMessage2(error) {
+    return error instanceof Error ? error.message : String(error);
   }
   function summarizeTick(report) {
     const n = report.notifications;

@@ -1,8 +1,10 @@
 # tma-push: the push notification Worker
 
 A small [Cloudflare Worker](https://developers.cloudflare.com/workers/) that
-sends the TMA Family App's push notifications. It speaks standard Web Push
-directly to the browsers' push services (Google FCM for Chrome and Android,
+sends the TMA Family App's push notifications. It is live at
+**https://tma-push.coleciprari.workers.dev** (the default of the TMA
+spreadsheet's Settings key `PUSH_RELAY_URL`). It speaks standard Web Push
+directly to the browsers' push services (Google for Chrome, Edge and Android,
 Mozilla for Firefox, Apple for Safari and iPhone home-screen apps, Microsoft
 for old Edge):
 
@@ -12,12 +14,14 @@ for old Edge):
 * [RFC 8291](https://www.rfc-editor.org/rfc/rfc8291) `aes128gcm` payload
   encryption (only the subscribed browser can read a notification).
 
-It uses only WebCrypto, no libraries and no Firebase project.
+It uses only WebCrypto: no libraries, no Google Cloud project and no
+service-account key.
 
 The Worker is **stateless** as far as families are concerned: it does not
 know who is subscribed. Apps Script keeps the push subscriptions in the Google
-Sheet and hands the Worker up to 10 messages at a time. The only things the
-Worker stores (in the `TMA_PUSH` KV namespace) are:
+Sheet (the hidden Devices tab) and hands the Worker 5 messages per request
+(it accepts up to 10). The only things the Worker stores (in the `TMA_PUSH`
+KV namespace) are:
 
 | KV key                | Value                                                                 |
 | --------------------- | --------------------------------------------------------------------- |
@@ -107,8 +111,9 @@ Header `Authorization: Bearer <secret>`, body:
   (`payload` is not a string), `bad_message` (not an object), `internal`
   (an unexpected failure in the Worker), `no_keys` (no VAPID key pair is
   stored yet, or KV briefly reads it as missing: every message in the batch
-  gets this and nothing is sent; run **TMA App → Set up**, then retry. Never
-  delete subscriptions for it).
+  gets this and nothing is sent. Apps Script then calls `GET
+  /vapid-public-key`, which creates the pair, and retries once. Never delete
+  subscriptions for it).
 
 Request bodies are read as a stream and abandoned as soon as they pass the
 cap (4 KB for `/register`, 256 KB for `/send`), with or without a
@@ -130,21 +135,52 @@ Per message:
   request being made.
 
 Each message is encrypted with a fresh ephemeral ECDH key and random salt,
-and the 10 are sent concurrently.
+and all the messages of one request are sent concurrently.
 
 ## How Apps Script uses it
 
-1. **TMA App → Set up** calls `GET /health`, then `POST /register` with a
-   long random secret that Apps Script keeps in its Script Properties (see
-   [docs/SETUP.md](../../docs/SETUP.md)). The first caller wins; that is why
-   the endpoint is safe to leave open.
-2. It reads `GET /vapid-public-key` and gives the key to the web app, which
-   subscribes with it and saves the subscription (endpoint and keys) to the
-   sheet through Apps Script.
-3. To notify families, Apps Script reads the subscriptions from the sheet and
-   calls `POST /send` in batches of up to 10, with the secret as a bearer
-   token. It deletes subscriptions whose result is `invalid` and may retry
-   `error` ones later.
+The Apps Script side is `src/gas/push-relay.ts` (the sender) and
+`linkPushWorker` in `src/gas/entry.ts` (setup). It finds the Worker at the
+spreadsheet's Settings key `PUSH_RELAY_URL` (blank means the default above;
+anything that isn't an `https://` address turns push off) and keeps two
+Script Properties:
+
+| Script Property     | What it is                                                              |
+| ------------------- | ----------------------------------------------------------------------- |
+| `PUSH_RELAY_SECRET` | The shared secret: 64 random hex characters, created by Set up          |
+| `PUSH_PUBLIC_KEY`   | The Worker's VAPID public key, saved by Set up (not secret)             |
+
+1. **Set up** (`setupTma`, or **TMA App → Set up / repair tabs**) creates
+   `PUSH_RELAY_SECRET` if it is missing, then calls `POST /register` with it
+   (the first caller wins, which is why the endpoint is safe to leave open)
+   and `GET /vapid-public-key`, and saves the key as `PUSH_PUBLIC_KEY`. A
+   `409`, an unreachable Worker or a bad `PUSH_RELAY_URL` only adds a ⚠ line
+   to the setup message; setup itself never fails because of the Worker.
+2. `me.bootstrap` gives the saved key to the web app as
+   `settings.pushPublicKey`. The browser subscribes with it and sends the
+   subscription to Apps Script (`push.register`), which checks it the same
+   way the Worker does (same endpoint allowlist and key sizes) and stores
+   `{"endpoint", "keys": {"p256dh", "auth"}}` in the Devices tab.
+3. To notify families, Apps Script reads the subscriptions and calls
+   `POST /send` with **5 messages per request** and up to 20 requests in
+   parallel (`UrlFetchApp.fetchAll`), with the secret as a bearer token. The
+   payload is the JSON `{title, body, url, tag, topic}`, kept under 3000
+   bytes; `ttl` is 86400; `urgency` is `normal` for reminders and
+   announcements and `high` otherwise; `topic` is the notification's tag
+   reduced to `[A-Za-z0-9_-]{1,32}`. It
+   deletes the Devices rows whose result is `invalid` and keeps `error` ones
+   (the next notification tries them again).
+4. Self-repair, at most once per Apps Script execution: a `401` makes it
+   `POST /register` again and retry (the Worker forgot the secret, e.g. its
+   KV was cleared); `no_keys` makes it `GET /vapid-public-key`, save the key
+   and retry.
+5. **TMA App → Status** shows `GET /health` (reachable, `registered`,
+   `hasKeys`), whether `PUSH_PUBLIC_KEY` is saved and whether push is
+   configured. `registered` only means *some* secret is registered, not
+   necessarily this sheet's.
+
+Apps Script logs carry counts, HTTP codes and these reason codes only, never
+the secret, payloads or endpoints.
 
 ## Deployment
 
@@ -155,8 +191,8 @@ or by hand from the Actions tab. It runs the tests and typecheck, then
 prints the Worker URL (`https://tma-push.<subdomain>.workers.dev`) in the run
 summary.
 
-One-time setup, in the GitHub repo under *Settings → Secrets and variables →
-Actions → Secrets*:
+One-time setup (**already done for TMA**), in the GitHub repo under
+*Settings → Secrets and variables → Actions → Secrets*:
 
 * `CLOUDFLARE_API_TOKEN`: a token made from Cloudflare's *Edit Cloudflare
   Workers* template (*My Profile → API Tokens → Create Token*).
@@ -169,23 +205,32 @@ KV namespace already exists; its id is in [wrangler.toml](wrangler.toml).
 To deploy from a computer instead: `cd workers/push && npm ci && npx wrangler
 login && npx wrangler deploy`.
 
+Deploying new code keeps the KV contents, so the link with Apps Script and the
+key pair survive every deploy. To move the Worker to another Cloudflare
+account (new KV namespace id in `wrangler.toml`, new repository secrets,
+`PUSH_RELAY_URL`, then Set up), follow
+[docs/SETUP.md, step 5F](../../docs/SETUP.md#f-moving-the-worker-to-another-cloudflare-account).
+
 ## Free plan
 
 Everything fits Cloudflare's free Workers plan:
 
-* **10 ms CPU per request**: at most 10 messages per `/send`. Encrypting one
-  message takes a fraction of a millisecond of WebCrypto work. The VAPID
+* **10 ms CPU per request**: at most 10 messages per `/send`, and Apps Script
+  sends 5, to stay well inside the budget. Encrypting one message takes a
+  fraction of a millisecond of WebCrypto work. The VAPID
   private key is imported once per isolate, and the signed VAPID JWT is cached
   per push service for 12 hours (renewed with under an hour left), so most
   requests sign nothing. A batch that misses the cache signs once per push
   service, not once per message. Subscription keys longer than their padded
   base64 form are rejected before decoding, so one bad row in the sheet cannot
   use up a batch's CPU.
-* **50 subrequests per request**: 10 messages are 10 fetches.
+* **50 subrequests per request**: 10 messages are at most 10 fetches.
 * **KV: 100,000 reads and 1,000 writes a day**: each isolate caches what it
   read for 5 minutes (a missing key for 10 seconds), so a busy day costs a
   few hundred reads. Writes happen only on first setup.
-* **100,000 requests a day**: one `/send` carries 10 notifications.
+* **100,000 requests a day**: each `/send` from Apps Script carries up to 5
+  notifications. A notification to every device of ~300 families takes a few
+  hundred requests at most.
 
 The logs show only the push service host and status (`push
 fcm.googleapis.com 201`), never payloads, secrets or full endpoints.
@@ -193,23 +238,36 @@ fcm.googleapis.com 201`), never payloads, secrets or full endpoints.
 ## Rotating the keys
 
 To replace the VAPID key pair and the shared secret (for example if the
-Apps Script project was copied or the secret leaked):
+Apps Script project was copied, the secret leaked, or another spreadsheet
+should send the notifications, such as the real one after the test copy):
 
-1. In the Cloudflare dashboard, open *Storage & Databases → KV →* the
+1. In **every** Apps Script project that is linked now (*Project Settings →
+   Script Properties*), delete `PUSH_RELAY_SECRET` and `PUSH_PUBLIC_KEY`.
+   Do this first: Apps Script re-registers its secret by itself when `/send`
+   answers `401`, so a project that keeps the old secret would link it again
+   with its next notification.
+2. In the Cloudflare dashboard, open *Storage & Databases → KV →* the
    `TMA_PUSH` namespace and delete the keys `vapid:v1` and
    `relay:secret-sha256`.
-2. Wait about 5 minutes. Running Worker instances cache the old values for
+3. Wait about 5 minutes. Running Worker instances cache the old values for
    that long, and KV itself takes up to a minute to forget a deleted key
    everywhere.
-3. In the spreadsheet run **TMA App → Set up** again. It registers a secret
-   and reads the new public key, which creates the new pair. Until then,
-   `/send` answers `401` (no secret) or `error` / `no_keys` per message
-   (no key pair). It never creates a key pair itself.
+4. In the spreadsheet that should send notifications run **TMA App → Set up
+   / repair tabs**. It creates a new secret, registers it, and reads the new
+   public key, which creates the new pair. Until then, `/send` answers `401`
+   (no secret) or `error` / `no_keys` per message (no key pair). It never
+   creates a key pair itself. Check with **TMA App → Status**, or
+   `GET /health` (`"registered": true, "hasKeys": true`).
 
 Every existing subscription was made with the old public key, so push
 services now answer `403` for them (`invalid`, `vapid_rejected`) and Apps
-Script drops them. Families get notifications again once the app has
-subscribed them again with the new key.
+Script drops them. Each phone that had notifications on subscribes again with
+the new key the next time the app is opened (the app compares its
+subscription with `settings.pushPublicKey`); if it can't, the app offers
+*Turn on notifications* again.
+
+After changing `PUSH_RELAY_URL` (a different Worker), delete
+`PUSH_PUBLIC_KEY` and run Set up again: the saved key is not tied to the URL.
 
 ## Development
 

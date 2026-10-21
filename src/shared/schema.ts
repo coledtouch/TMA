@@ -225,6 +225,7 @@ export const SETTING_DEFAULTS = {
   REMINDER_DAYS: '14, 7, 1',
   EMAIL_ENABLED: 'TRUE',
   SMS_ENABLED: 'FALSE',
+  PUSH_RELAY_URL: 'https://tma-push.coleciprari.workers.dev',
   TOKEN_VERSION: '1',
   SESSION_DAYS: '120',
 } as const;
@@ -235,7 +236,10 @@ export type SettingKey = keyof typeof SETTING_DEFAULTS;
 export type SecretName =
   | 'TOKEN_SECRET'
   | 'PAYPAL_SECRET'
-  | 'FCM_SERVICE_ACCOUNT'
+  /** Shared secret Apps Script uses with the push Worker (created by setup). */
+  | 'PUSH_RELAY_SECRET'
+  /** Cached VAPID public key fetched from the push Worker (not secret). */
+  | 'PUSH_PUBLIC_KEY'
   | 'TWILIO_ACCOUNT_SID'
   | 'TWILIO_AUTH_TOKEN'
   | 'TWILIO_FROM';

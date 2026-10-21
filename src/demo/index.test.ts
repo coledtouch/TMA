@@ -1,11 +1,20 @@
 // @vitest-environment jsdom
 import type { Bootstrap, StudentSummary } from '../shared/types';
 import { ApiError } from '../web/api/client';
-import { enablePush, PUSH_TOKEN_KEY } from '../web/lib/push';
+import { enablePush } from '../web/lib/push';
+import { storageKeys } from '../web/lib/storage';
 import { createDemoClient, DEMO_DB_KEY, type DemoClient, type DemoPushDetail } from './index';
 
 const PARENT = 'parent@example.com';
 const TREASURER = 'treasurer@example.com';
+const DEMO = storageKeys('demo');
+const LIVE = storageKeys('live');
+
+/** The demo push token this browser registered (null when none). */
+function storedDemoPushToken(): string | null {
+  const raw = localStorage.getItem(DEMO.push);
+  return raw ? (JSON.parse(raw) as { token: string }).token : null;
+}
 
 function newClient(): DemoClient {
   return createDemoClient({ latencyMs: [0, 0] });
@@ -48,7 +57,8 @@ describe('demo client', () => {
     expect(client.mode).toBe('demo');
     const token = await signIn(client, PARENT);
     expect(client.getToken()).toBe(token);
-    expect(localStorage.getItem('tma.session')).toBe(token);
+    expect(localStorage.getItem(DEMO.session)).toBe(token);
+    expect(localStorage.getItem(LIVE.session)).toBeNull();
 
     const data = await client.call('me.bootstrap', {});
     expect(data.me).toMatchObject({ email: PARENT, familyId: 'F0001', familyStatus: 'Active', isAdmin: false });
@@ -69,12 +79,24 @@ describe('demo client', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).code).toBe('UNAUTHORIZED');
     expect(client.getToken()).toBeNull();
-    expect(localStorage.getItem('tma.session')).toBeNull();
+    expect(localStorage.getItem(DEMO.session)).toBeNull();
 
     await signIn(client, PARENT);
     const forbidden = await client.call('admin.overview', {}).catch((e: unknown) => e);
     expect((forbidden as ApiError).code).toBe('FORBIDDEN');
     expect(client.getToken()).not.toBeNull();
+  });
+
+  it("never reads or clears the live app's sign-in", async () => {
+    localStorage.setItem(LIVE.session, 'live-token');
+    const client = newClient();
+    expect(client.getToken()).toBeNull();
+    client.setToken('not-a-real-token');
+    await client.call('me.bootstrap', {}).catch(() => undefined); // UNAUTHORIZED
+    expect(client.getToken()).toBeNull();
+    expect(localStorage.getItem(LIVE.session)).toBe('live-token');
+    await signIn(client, PARENT);
+    expect(localStorage.getItem(LIVE.session)).toBe('live-token');
   });
 
   it('never shares objects with the caller (JSON round trip like the live transport)', async () => {
@@ -155,7 +177,8 @@ describe('demo client', () => {
     const client = newClient();
     await signIn(client, TREASURER);
     expect(await enablePush(client)).toEqual({ ok: true });
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toMatch(/^demo-/);
+    expect(storedDemoPushToken()).toMatch(/^demo-/);
+    expect(localStorage.getItem(LIVE.push)).toBeNull();
 
     const pushes = capturePushes();
     await client.call('push.test', {});
@@ -212,7 +235,7 @@ describe('demo client', () => {
     client.demo.reset();
 
     expect(client.demo.outbox()).toEqual([]);
-    expect(localStorage.getItem(PUSH_TOKEN_KEY)).toBeNull();
+    expect(storedDemoPushToken()).toBeNull();
     const data = await client.call('me.bootstrap', {});
     expect(student(data, 'S0001').balanceCents).toBe(64000);
     expect(data.pushTokens).toBe(1); // the sample "parent's phone" only

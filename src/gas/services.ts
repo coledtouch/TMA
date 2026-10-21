@@ -4,8 +4,8 @@
  */
 import type { SecretName, SettingKey } from '../shared/schema';
 import type { Cache, Crypto, Logger, Mailer, Secrets, Services } from '../server/services';
-import { createFcmSender } from './fcm';
 import { createPayPalGateway } from './paypal';
+import { createPushRelaySender, type PushRelaySender } from './push-relay';
 import { readFlag, readSetting } from './settings';
 import { createSheetStore, type SheetStore } from './sheet-store';
 import { createTwilioSender } from './twilio';
@@ -18,6 +18,8 @@ const LOCK_TIMEOUT_MS = 20000;
 
 export interface GasServices extends Services {
   store: SheetStore;
+  /** Push over the TMA push Worker (also used by setup and the status dialog). */
+  push: PushRelaySender;
   /** A Settings-tab value (or its default) as text. */
   setting(key: SettingKey): string;
   /** A yes/no Settings-tab value (or its default). */
@@ -51,7 +53,7 @@ export function createGasServices(): GasServices {
     secrets,
     mailer: createMailAppMailer(() => setting('ORG_NAME')),
     sms: createTwilioSender({ secrets, logger }),
-    push: createFcmSender({ secrets, cache, clock, logger }),
+    push: createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting('PUSH_RELAY_URL') }),
     payments: createPayPalGateway({
       cache,
       logger,

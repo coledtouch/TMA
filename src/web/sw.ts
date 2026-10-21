@@ -6,10 +6,15 @@
  *   navigation is answered with the precached index.html (hash routing).
  * - Caches same-origin images (stale-while-revalidate). API calls are never
  *   cached: they are POSTs to Apps Script on another origin.
- * - Shows push notifications (FCM data messages, FCM notification messages or
- *   a plain PushMessage) and tells open app windows, so the in-app banner and
- *   data refresh can react too.
+ * - Shows push notifications. Apps Script sends, through TMA's push Worker,
+ *   the JSON of a PushMessage ({title, body, url, tag, topic}); plain text
+ *   becomes the body. Open app windows are told too, so the in-app banner and
+ *   data refresh can react.
  * - Tapping a notification focuses the app (or opens it) at the message's route.
+ * - When the browser replaces or drops the push subscription
+ *   ('pushsubscriptionchange'), open app windows are told so the signed-in app
+ *   subscribes again and re-registers with TMA (the worker can't: it has no
+ *   sign-in).
  *
  * Note: this file must not export anything. It is bundled as an ES "library"
  * and registered as a classic worker, where `export` is a syntax error.
@@ -96,41 +101,39 @@ function readPayload(data: PushMessageData | null): unknown {
   }
 }
 
-/**
- * Accepts an FCM data message `{data:{title,body,url,tag,topic}}`, an FCM
- * notification message `{notification:{title,body}, data?}`, a plain
- * PushMessage, or plain text. Never throws.
- */
+/** Accepts a PushMessage-shaped object ({title, body, url, tag, topic}) or plain text. Never throws. */
 function toPushMessage(payload: unknown): PushMessage {
   if (typeof payload === 'string') {
     return { title: FALLBACK_TITLE, body: text(payload, 1000), url: DEFAULT_ROUTE, topic: 'announcements' };
   }
   const root = isRecord(payload) ? payload : {};
-  const data = isRecord(root.data) ? root.data : {};
-  const notification = isRecord(root.notification) ? root.notification : {};
-  const pick = (key: string): unknown => data[key] ?? notification[key] ?? root[key];
-
-  const topic = pick('topic');
-  const tag = text(pick('tag'), 64);
+  const topic = root.topic;
+  const tag = text(root.tag, 64);
   return {
-    title: text(pick('title'), 120) || FALLBACK_TITLE,
-    body: text(pick('body'), 1000),
-    url: safeRoute(pick('url')),
+    title: text(root.title, 120) || FALLBACK_TITLE,
+    body: text(root.body, 1000),
+    url: safeRoute(root.url),
     ...(tag ? { tag } : {}),
     topic: TOPICS.includes(topic as PushMessage['topic']) ? (topic as PushMessage['topic']) : 'announcements',
   };
 }
 
+/**
+ * Open windows of this app. Only those inside the app's scope: on GitHub Pages
+ * other sites of the same owner share the origin, and must not see families' messages.
+ */
 async function windowClients(): Promise<readonly WindowClient[]> {
-  return self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const scope = self.registration.scope;
+  const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  return all.filter((c) => c.url.startsWith(scope));
 }
 
-async function tellWindows(message: PushMessage): Promise<void> {
+async function tellWindows(data: { type: 'push'; message: PushMessage } | { type: 'pushsubscriptionchange' }): Promise<void> {
   for (const client of await windowClients()) {
     try {
-      client.postMessage({ type: 'push', message });
+      client.postMessage(data);
     } catch {
-      // A closing window can't receive messages; the notification still shows.
+      // A closing window can't receive messages (a notification still shows).
     }
   }
 }
@@ -151,7 +154,14 @@ self.addEventListener('push', (event) => {
     data: { url: message.url },
     lang: 'en',
   });
-  event.waitUntil(Promise.allSettled([shown, tellWindows(message)]).then(() => undefined));
+  event.waitUntil(Promise.allSettled([shown, tellWindows({ type: 'push', message })]).then(() => undefined));
+});
+
+// Firefox (mostly) fires this when the push service expires or replaces the subscription.
+// Subscribing again needs the server's key and registering needs the parent's sign-in,
+// so an open app window does both (src/web/lib/push.ts refreshPushRegistration).
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(tellWindows({ type: 'pushsubscriptionchange' }).catch(() => undefined));
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -163,7 +173,7 @@ self.addEventListener('notificationclick', (event) => {
 
 async function openApp(route: string): Promise<void> {
   const scope = self.registration.scope;
-  const clients = (await windowClients()).filter((c) => c.url.startsWith(scope));
+  const clients = await windowClients();
   const client = clients.find((c) => c.focused) ?? clients.find((c) => c.visibilityState === 'visible') ?? clients[0];
   if (client) {
     try {

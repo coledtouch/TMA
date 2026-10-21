@@ -4,13 +4,13 @@
 #   Settings → Pages → Source: GitHub Actions
 #   Settings → Secrets and variables → Actions → Variables:
 #     VITE_API_URL             Apps Script web app URL (ends in /exec)
-#     VITE_FIREBASE_CONFIG     Firebase web config as one-line JSON
-#     VITE_FIREBASE_VAPID_KEY  Firebase Web Push certificate (public key)
-# These values are public (they end up in the site's JavaScript), so they are
-# variables, not secrets.
+# This value is public (it ends up in the site's JavaScript), so it is a
+# variable, not a secret. Push needs no variable: the app gets the push
+# Worker's public key from Apps Script.
 #
-# With no variables set, the site is the DEMO: sample families, simulated
-# PayPal and push. That is the prototype link for the board.
+# With no variable set, the site is the DEMO: sample families, simulated
+# PayPal and push. With it set, the site is the real app, and
+# https://<owner>.github.io/<repo>/?demo is the demo link for the board.
 name: Deploy to GitHub Pages
 
 on:
@@ -52,8 +52,6 @@ jobs:
         run: npm run build:web
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
-          VITE_FIREBASE_CONFIG: ${{ vars.VITE_FIREBASE_CONFIG }}
-          VITE_FIREBASE_VAPID_KEY: ${{ vars.VITE_FIREBASE_VAPID_KEY }}
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

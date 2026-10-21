@@ -47,6 +47,8 @@ export interface MemoryServicesOptions {
   mailQuota?: number;
   /** Replaces the default push sender (pushes are still recorded in the outbox). */
   push?: PushSender;
+  /** VAPID public key the push sender reports (default: the custom sender's, else ''). */
+  pushPublicKey?: string;
   payments?: PaymentGateway;
   /** Called after every store mutation (the demo persists `db` here). */
   onChange?: (db: MemoryDb) => void;
@@ -324,6 +326,7 @@ export function createMemoryServices(opts: MemoryServicesOptions = {}): MemorySe
   const custom = opts.push;
   const push: PushSender = {
     enabled: () => (custom ? custom.enabled() : true),
+    publicKey: () => opts.pushPublicKey ?? (custom ? custom.publicKey() : ''),
     send(tokens, message): PushResult[] {
       outbox.push.push({ tokens: tokens.slice(), message: { ...message } });
       if (custom) return custom.send(tokens, message);

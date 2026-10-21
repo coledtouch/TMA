@@ -86,6 +86,32 @@ describe('handleServiceWorkerMessage', () => {
     window.removeEventListener('tma:push', onPush);
     expect(seen).toEqual([{ message }]);
   });
+
+  it('announces a replaced push subscription as tma:pushsubscriptionchange', async () => {
+    const { handleServiceWorkerMessage } = await load();
+    const onChange = vi.fn();
+    window.addEventListener('tma:pushsubscriptionchange', onChange);
+    expect(handleServiceWorkerMessage({ type: 'pushsubscriptionchange' })).toBe(true);
+    window.removeEventListener('tma:pushsubscriptionchange', onChange);
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps real pushes out of the demo (they belong to the live app), but still follows taps', async () => {
+    const { handleServiceWorkerMessage } = await load();
+    const onPush = vi.fn();
+    const onChange = vi.fn();
+    window.addEventListener('tma:push', onPush);
+    window.addEventListener('tma:pushsubscriptionchange', onChange);
+    const message = { title: 'Payment received', body: '$250.00 toward Florida 2027.', url: '#/trips', topic: 'payments' };
+    expect(handleServiceWorkerMessage({ type: 'push', message }, 'demo')).toBe(false);
+    expect(handleServiceWorkerMessage({ type: 'pushsubscriptionchange' }, 'demo')).toBe(false);
+    expect(handleServiceWorkerMessage({ type: 'navigate', url: '#/trips' }, 'demo')).toBe(true);
+    window.removeEventListener('tma:push', onPush);
+    window.removeEventListener('tma:pushsubscriptionchange', onChange);
+    expect(onPush).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/trips');
+  });
 });
 
 describe('registerServiceWorker', () => {
@@ -116,6 +142,18 @@ describe('registerServiceWorker', () => {
     expect(window.location.hash).toBe('#/trips');
     sw.post({ type: 'navigate', url: 'https://evil.example/' });
     expect(window.location.hash).toBe('#/trips');
+  });
+
+  it("passes the page's mode on to the message handling", async () => {
+    vi.stubEnv('DEV', false);
+    const sw = fakeServiceWorkerContainer();
+    const { registerServiceWorker } = await load();
+    registerServiceWorker('demo');
+    const onPush = vi.fn();
+    window.addEventListener('tma:push', onPush);
+    sw.post({ type: 'push', message: { title: 'Hi', body: 'There', topic: 'test' } });
+    window.removeEventListener('tma:push', onPush);
+    expect(onPush).not.toHaveBeenCalled();
   });
 
   it('does nothing without service worker support', async () => {

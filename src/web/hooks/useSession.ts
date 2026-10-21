@@ -1,6 +1,6 @@
 /**
- * Signed-in state. The token lives in the ApiClient (localStorage
- * 'tma.session'); React mirrors it so screens re-render on sign-in/out.
+ * Signed-in state. The token lives in the ApiClient (localStorage, per mode);
+ * React mirrors it so screens re-render on sign-in/out.
  */
 import { useCallback, useMemo, useState } from 'react';
 import type { ApiClient } from '../api/client';
@@ -17,14 +17,14 @@ export interface Session {
 
 export function useSession(api: ApiClient): Session {
   const [token, setToken] = useState<string | null>(() => api.getToken());
-  const [knownEmail, setKnownEmail] = useState<string | null>(() => sessionEmail(api.getToken()));
+  const [knownEmail, setKnownEmail] = useState<string | null>(() => sessionEmail(api.getToken(), api.mode));
 
   const signIn = useCallback(
     (email: string, nextToken: string) => {
       const normalized = email.trim().toLowerCase();
       api.setToken(nextToken);
-      rememberEmail(normalized);
-      setKnownEmail(sessionEmail(nextToken) ?? normalized);
+      rememberEmail(normalized, api.mode);
+      setKnownEmail(sessionEmail(nextToken, api.mode) ?? normalized);
       setToken(nextToken);
     },
     [api],
@@ -32,7 +32,7 @@ export function useSession(api: ApiClient): Session {
 
   const end = useCallback(() => {
     api.setToken(null);
-    rememberEmail(null);
+    rememberEmail(null, api.mode);
     setToken(null);
     setKnownEmail(null);
   }, [api]);

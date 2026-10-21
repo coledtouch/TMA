@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@paypal/paypal-js": "11.3.0",
-    "firebase": "12.19.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "workbox-core": "7.4.1",

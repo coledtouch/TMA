@@ -68,6 +68,11 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
     );
     // The test-only in-memory services must never ship.
     expect(code).not.toContain('createMemoryServices');
+    // Push goes through the TMA push Worker: nothing of the old Firebase sender may remain. The one
+    // allowed mention is fcm.googleapis.com, Chrome's Web Push host, on the subscription allowlist.
+    expect(code.replace(/\bfcm\.googleapis\.com\b/g, '')).not.toMatch(/firebase|fcm/i);
+    expect(code).not.toMatch(/oauth2\.googleapis\.com|messages:send|computeRsaSha256Signature/);
+    expect(code).toContain('tma-push.coleciprari.workers.dev');
     // Literal U+2028/U+2029 would end a line inside a string or regex in older parsers.
     expect(code).not.toMatch(new RegExp(`[${String.fromCharCode(0x2028, 0x2029)}]`));
     new vm.Script(code, { filename: 'Code.js' }); // parses
@@ -86,6 +91,11 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
 
   describe('against the Apps Script fakes', () => {
     let gas: GasFakes;
+    const WORKER = 'https://tma-push.coleciprari.workers.dev';
+    const VAPID_KEY = Buffer.from([0x04, ...nodeCrypto.randomBytes(64)]).toString('base64url');
+    let workerSecret = '';
+    let parentToken = '';
+    const pushed: Array<{ subscription: { endpoint: string }; payload: string }> = [];
     const g = globalThis as unknown as Record<string, (e?: unknown) => unknown>;
 
     beforeAll(() => {
@@ -103,11 +113,29 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
       return JSON.parse(out.getContent());
     };
 
-    it('sets up the sheet with sample data and answers the health check', () => {
+    it('sets up the sheet with sample data, links the push Worker and answers the health check', () => {
+      gas.fetch.handler = (r) => {
+        if (r.url === `${WORKER}/register`) {
+          workerSecret = (JSON.parse(String(r.payload)) as { secret: string }).secret;
+          return { code: 200, body: { registered: true, first: true } };
+        }
+        if (r.url === `${WORKER}/vapid-public-key`) return { code: 200, body: { publicKey: VAPID_KEY } };
+        if (r.url === `${WORKER}/send`) {
+          if (r.headers.Authorization !== `Bearer ${workerSecret}`) return { code: 401, body: { error: 'unauthorized' } };
+          const { messages } = JSON.parse(String(r.payload)) as { messages: Array<{ subscription: { endpoint: string }; payload: string }> };
+          pushed.push(...messages);
+          return { code: 200, body: { results: messages.map(() => ({ status: 'ok' })) } };
+        }
+        return { code: 404, body: { error: 'not_found' } };
+      };
       g.setupTmaWithSampleData();
       const tabs = gas.spreadsheet.getSheets().map((s) => s.getName());
       expect(tabs).toEqual(expect.arrayContaining(['Settings', 'Families', 'Students', 'Ledger', 'Payments', 'Redemptions']));
       expect(gas.properties.getProperty('TOKEN_SECRET')).toMatch(/^[0-9a-f]{64}$/);
+      expect(gas.properties.getProperty('PUSH_RELAY_SECRET')).toMatch(/^[0-9a-f]{64}$/);
+      expect(workerSecret).toBe(gas.properties.getProperty('PUSH_RELAY_SECRET'));
+      expect(gas.properties.getProperty('PUSH_PUBLIC_KEY')).toBe(VAPID_KEY);
+      expect(gas.ui.alerts.at(-1)?.message).toContain('Push: linked this sheet to the push Worker');
       expect(gas.spreadsheet.getSheetByName('_Snapshot')?.isSheetHidden()).toBe(true);
 
       const health = JSON.parse((g.doGet({ parameter: { action: 'health' } }) as FakeOutput).getContent());
@@ -148,8 +176,26 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
       expect(home.data.me).toMatchObject({ email: 'parent@example.com', familyId: 'F0001', familyStatus: 'Active' });
       const avery = home.data.students.find((s: { student: { id: string } }) => s.student.id === 'S0001');
       expect(avery).toMatchObject({ balanceCents: 64_000, availableCents: 44_000 });
-      // PayPal isn't configured in a fresh production sheet.
+      // PayPal isn't configured in a fresh production sheet; push is (through the Worker).
       expect(home.data.settings.onlinePaymentsEnabled).toBe(false);
+      expect(home.data.settings.pushPublicKey).toBe(VAPID_KEY);
+      parentToken = token;
+    });
+
+    it('registers a browser subscription and pushes a credit to it through the Worker', () => {
+      const sub = {
+        endpoint: 'https://web.push.apple.com/QGuQyavXutnMH-test-device',
+        expirationTime: null,
+        keys: {
+          p256dh: Buffer.from([0x04, ...nodeCrypto.randomBytes(64)]).toString('base64url'),
+          auth: nodeCrypto.randomBytes(16).toString('base64url'),
+        },
+      };
+      const registered = post({ action: 'push.register', params: { token: JSON.stringify(sub), userAgent: 'iPhone' }, token: parentToken });
+      expect(registered).toEqual({ ok: true, data: { devices: 1 } });
+      const devices = gas.spreadsheet.getSheetByName('Devices')!.dump();
+      expect(devices.map((row) => row[2])).toContain(JSON.stringify({ endpoint: sub.endpoint, keys: sub.keys }));
+      expect(post({ action: 'push.register', params: { token: 'demo-0123456789abcdef' }, token: parentToken }).error?.code).toBe('BAD_REQUEST');
     });
 
     it('notices a credit the treasurer typed into the Ledger tab and emails the family', () => {
@@ -169,9 +215,13 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
       });
 
       const before = gas.mail.sent.length;
+      pushed.length = 0;
       g.syncTick();
       const alerts = gas.mail.sent.slice(before).filter((m) => m.subject === '+$50.00 for Avery');
       expect(alerts.map((m) => m.to).sort()).toEqual(['casey.thompson@example.com', 'parent@example.com']);
+      // And the parent's phone got it through the push Worker.
+      expect(pushed.map((m) => m.subscription.endpoint)).toEqual(['https://web.push.apple.com/QGuQyavXutnMH-test-device']);
+      expect(JSON.parse(pushed[0].payload)).toMatchObject({ title: '+$50.00 for Avery', url: '#/funds', topic: 'balance' });
     });
   });
 });

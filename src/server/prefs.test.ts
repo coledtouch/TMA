@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { audienceMatches } from './prefs';
-import { harness, NGUYEN, PARENT } from './test-helpers';
+import { encodeBase64UrlBytes } from './push-subscription';
+import { harness, NGUYEN, PARENT, storedToken, testSubscription } from './test-helpers';
 
 describe('audienceMatches (§6)', () => {
   const hs = ['High School'];
@@ -72,25 +73,132 @@ describe('prefs.save', () => {
 });
 
 describe('push devices', () => {
-  it('registers, upserts by token, counts per email and unregisters only own tokens', () => {
+  const tokensOf = (h: ReturnType<typeof harness>, email: string) =>
+    h.rows('Devices').filter((r) => r.Email === email).map((r) => r.Token);
+
+  it('registers a browser subscription in canonical form, upserts by endpoint and moves it between parents', () => {
     const h = harness();
     const parent = h.signIn(PARENT);
-    const token = 'fcm-token-abcdefghijklmnop:APA91b';
-    expect(h.ok('push.register', { token, userAgent: 'iPhone Safari' }, parent)).toEqual({ devices: 2 });
-    expect(h.ok('push.register', { token }, parent)).toEqual({ devices: 2 });
-    expect(h.rows('Devices').filter((r) => r.Token === token)).toHaveLength(1);
+    const phone = testSubscription('phone-1');
+    expect(h.ok('push.register', { token: JSON.stringify(phone), userAgent: 'iPhone Safari' }, parent)).toEqual({ devices: 2 });
+    // Only endpoint + keys are kept (no expirationTime), in a fixed order.
+    expect(tokensOf(h, PARENT)).toEqual(['demo-device-parent', storedToken(phone)]);
+    expect(h.rows('Devices').at(-1)).toMatchObject({ FamilyID: 'F0001', 'User Agent': 'iPhone Safari' });
 
-    // The same phone signs in as another parent: the token moves.
+    // Same endpoint again: same row. Same endpoint with new keys (browser re-subscribed): the row's keys change.
+    expect(h.ok('push.register', { token: JSON.stringify(phone) }, parent)).toEqual({ devices: 2 });
+    const rekeyed = testSubscription('phone-1', { keySeed: 'new-keys' });
+    expect(h.ok('push.register', { token: JSON.stringify(rekeyed) }, parent)).toEqual({ devices: 2 });
+    expect(tokensOf(h, PARENT)).toEqual(['demo-device-parent', storedToken(rekeyed)]);
+    expect(h.rows('Devices').filter((r) => String(r.Token).includes('device-phone-1'))).toHaveLength(1);
+
+    // The same phone signs in as another parent: the device moves.
     const nguyen = h.signIn(NGUYEN);
-    expect(h.ok('push.register', { token }, nguyen)).toEqual({ devices: 1 });
+    expect(h.ok('push.register', { token: JSON.stringify(rekeyed) }, nguyen)).toEqual({ devices: 1 });
     expect(h.ok('me.bootstrap', {}, parent).pushTokens).toBe(1);
+    expect(h.rows('Devices').find((r) => r.Token === storedToken(rekeyed))).toMatchObject({ Email: NGUYEN, FamilyID: 'F0002' });
+  });
+
+  it('accepts standard base64 keys with padding and an upper-case host, and stores them canonically', () => {
+    const h = harness();
+    const parent = h.signIn(PARENT);
+    const sub = testSubscription('b64', { host: 'web.push.apple.com' });
+    const toStd = (b64url: string) => {
+      const std = b64url.replace(/-/g, '+').replace(/_/g, '/');
+      return std + '='.repeat((4 - (std.length % 4)) % 4);
+    };
+    const messy = {
+      endpoint: ` ${sub.endpoint.replace('web.push.apple.com', 'Web.Push.Apple.COM')} `,
+      keys: { p256dh: toStd(sub.keys.p256dh), auth: toStd(sub.keys.auth) },
+    };
+    expect(messy.keys.auth.endsWith('==')).toBe(true);
+    h.ok('push.register', { token: JSON.stringify(messy) }, parent);
+    expect(tokensOf(h, PARENT)).toContain(storedToken(sub));
+  });
+
+  it('accepts every push service on the Worker allowlist', () => {
+    const h = harness();
+    const parent = h.signIn(PARENT);
+    for (const host of ['fcm.googleapis.com', 'updates.push.services.mozilla.com', 'web.push.apple.com', 'api.push.apple.com', 'wns2-by3p.notify.windows.com']) {
+      h.ok('push.register', { token: JSON.stringify(testSubscription(host, { host })) }, parent);
+    }
+    expect(tokensOf(h, PARENT)).toHaveLength(6);
+  });
+
+  it('rejects anything that is not a deliverable subscription', () => {
+    const h = harness();
+    const parent = h.signIn(PARENT);
+    const sub = testSubscription('x');
+    const with_ = (patch: Record<string, unknown>) => JSON.stringify({ ...sub, ...patch });
+    const keys = (patch: Record<string, unknown>) => with_({ keys: { ...sub.keys, ...patch } });
+    const point64 = encodeBase64UrlBytes([0x04, ...new Array<number>(63).fill(7)]);
+    const compressed = encodeBase64UrlBytes([0x02, ...new Array<number>(64).fill(7)]);
+    const cases: unknown[] = [
+      undefined,
+      '',
+      '   ',
+      42,
+      { ...sub }, // must be JSON text
+      'fcm-token-abcdefghijklmnop:APA91b', // an old Firebase token
+      'demo-0123456789abcdef', // demo tokens only in demo mode
+      'not json at all but long enough',
+      '[1,2,3]',
+      with_({ endpoint: 'http://fcm.googleapis.com/fcm/send/x' }),
+      with_({ endpoint: 'https://fcm.googleapis.com:8443/fcm/send/x' }),
+      with_({ endpoint: 'https://user:pw@fcm.googleapis.com/fcm/send/x' }),
+      with_({ endpoint: 'https://evil.example\\@fcm.googleapis.com/x' }),
+      with_({ endpoint: 'https://fcm.googleapis.com.evil.example/x' }),
+      with_({ endpoint: 'https://push.apple.com/x' }), // suffix needs a label in front
+      with_({ endpoint: 'https://[::1]/x' }),
+      with_({ endpoint: `https://fcm.googleapis.com/${'a'.repeat(2048)}` }),
+      with_({ endpoint: 'https://fcm.googleapis.com/fcm/send/has space' }),
+      with_({ keys: undefined }),
+      keys({ p256dh: point64 }), // 64 bytes
+      keys({ p256dh: compressed }), // not an uncompressed point
+      keys({ p256dh: `${sub.keys.p256dh}AAAA` }),
+      keys({ p256dh: 'not*base64' }),
+      keys({ auth: encodeBase64UrlBytes(new Array<number>(15).fill(1)) }),
+      keys({ auth: 12345 }),
+      `${JSON.stringify(sub)}${' '.repeat(4100)}`,
+    ];
+    for (const token of cases) {
+      expect(h.err('push.register', { token }, parent).code, JSON.stringify(token)?.slice(0, 80)).toBe('BAD_REQUEST');
+    }
+    expect(h.err('push.register', { token: with_({ endpoint: 'https://push.example.org/x' }) }, parent).message).toMatch(/push service isn't supported/);
+    expect(tokensOf(h, PARENT)).toEqual(['demo-device-parent']);
+  });
+
+  it('accepts demo- tokens in demo mode only', () => {
+    const h = harness({ mode: 'demo' });
+    const parent = h.signIn(PARENT);
+    expect(h.ok('push.register', { token: 'demo-5f0c3a52-4f7e-4c8e-9a51-0b8f6b8f3c11' }, parent)).toEqual({ devices: 2 });
+    expect(h.ok('push.unregister', { token: 'demo-5f0c3a52-4f7e-4c8e-9a51-0b8f6b8f3c11' }, parent)).toEqual({ devices: 1 });
+    expect(h.err('push.register', { token: 'demo-x' }, parent).code).toBe('BAD_REQUEST');
+    // Real subscriptions still work in the demo.
+    expect(h.ok('push.register', { token: JSON.stringify(testSubscription('d')) }, parent)).toEqual({ devices: 2 });
+  });
+
+  it('unregisters by endpoint (stored token or the browser JSON), only the caller’s own rows', () => {
+    const h = harness();
+    const parent = h.signIn(PARENT);
+    const nguyen = h.signIn(NGUYEN);
+    const mine = testSubscription('mine');
+    const theirs = testSubscription('theirs');
+    h.ok('push.register', { token: JSON.stringify(mine) }, parent);
+    h.ok('push.register', { token: JSON.stringify(theirs) }, nguyen);
 
     // Nobody can unregister someone else's device.
-    expect(h.ok('push.unregister', { token }, parent)).toEqual({ devices: 1 });
-    expect(h.ok('push.unregister', { token }, nguyen)).toEqual({ devices: 0 });
+    expect(h.ok('push.unregister', { token: JSON.stringify(theirs) }, parent)).toEqual({ devices: 2 });
+    expect(tokensOf(h, NGUYEN)).toEqual([storedToken(theirs)]);
 
-    expect(h.err('push.register', { token: 'short' }, parent).code).toBe('BAD_REQUEST');
-    expect(h.err('push.register', { token: 'has spaces in it but long enough' }, parent).code).toBe('BAD_REQUEST');
+    // The browser's raw JSON (with other keys and expirationTime) matches by endpoint.
+    const sameEndpoint = testSubscription('mine', { keySeed: 'rotated' });
+    expect(h.ok('push.unregister', { token: JSON.stringify(sameEndpoint) }, parent)).toEqual({ devices: 1 });
+    expect(h.ok('push.unregister', { token: storedToken(theirs) }, nguyen)).toEqual({ devices: 0 });
+
+    for (const token of [undefined, '', 'nope', 'demo-0123456789abcdef', JSON.stringify({ endpoint: 'https://evil.example/x' })]) {
+      expect(h.err('push.unregister', { token }, parent).code).toBe('BAD_REQUEST');
+    }
   });
 
   it('keeps at most 10 devices per email, dropping the least recently seen', () => {
@@ -98,12 +206,15 @@ describe('push devices', () => {
     const parent = h.signIn(PARENT);
     for (let i = 0; i < 11; i++) {
       h.services.setNow(new Date(Date.UTC(2026, 9, 21, 15, i)));
-      h.ok('push.register', { token: `device-token-number-${String(i).padStart(4, '0')}` }, parent);
+      h.ok('push.register', { token: JSON.stringify(testSubscription(`n${i}`)) }, parent);
     }
-    const tokens = h.rows('Devices').filter((r) => r.Email === PARENT).map((r) => r.Token);
+    const tokens = tokensOf(h, PARENT);
     expect(tokens).toHaveLength(10);
     expect(tokens).not.toContain('demo-device-parent');
-    expect(tokens).not.toContain('device-token-number-0000');
+    expect(tokens).not.toContain(storedToken(testSubscription('n0')));
+    expect(tokens).toContain(storedToken(testSubscription('n10')));
+    // Re-registering a kept device doesn't count as new.
+    expect(h.ok('push.register', { token: JSON.stringify(testSubscription('n1')) }, parent)).toEqual({ devices: 10 });
   });
 
   it('sends a test push to the caller’s devices only', () => {
