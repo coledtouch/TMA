@@ -123,7 +123,22 @@ export function normalizeGrade(value: unknown): string {
 // ---------------------------------------------------------------------------
 
 // Control characters, plus bidi overrides and zero-width characters that can disguise text.
-const INVISIBLE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F​-‏‪-‮  ⁦-⁩﻿]/g;
+const INVISIBLE_RANGES: ReadonlyArray<[number, number]> = [
+  [0x00, 0x08],
+  [0x0b, 0x0c],
+  [0x0e, 0x1f],
+  [0x7f, 0x7f],
+  [0x200b, 0x200f], // zero-width and directional marks
+  [0x202a, 0x202e], // bidi embedding/override
+  [0x2028, 0x2029], // line/paragraph separators
+  [0x2066, 0x2069], // bidi isolates
+  [0xfeff, 0xfeff], // BOM
+];
+const hex4 = (n: number) => n.toString(16).padStart(4, '0');
+const INVISIBLE = new RegExp(
+  `[${INVISIBLE_RANGES.map(([a, b]) => `\\u${hex4(a)}-\\u${hex4(b)}`).join('')}]`,
+  'g',
+);
 
 /** Clean user text: drop control/invisible characters, normalize whitespace, trim. */
 export function cleanText(value: string, multiline = false): string {
