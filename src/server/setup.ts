@@ -37,6 +37,7 @@ export function runSetup(ctx: Ctx, options: SetupOptions = {}): SetupReport {
     .filter((key) => !present.has(key))
     .map((key) => ({ Key: key, Value: SETTING_DEFAULTS[key], Notes: SETTING_NOTES[key] }));
   ctx.db.append('Settings', missing);
+  if (missing.length) report.addedSettings = missing.map((row) => row.Key);
 
   if (!ctx.s.secrets.get('TOKEN_SECRET')) {
     ctx.s.secrets.set('TOKEN_SECRET', generateSecret(ctx.s.crypto, 'TOKEN_SECRET'));

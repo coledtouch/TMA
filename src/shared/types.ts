@@ -375,6 +375,8 @@ export interface SetupReport {
   addedColumns: Array<{ table: string; column: string }>;
   seeded: boolean;
   secretsInitialized: string[];
+  /** Settings keys setup() added with their defaults (absent from older backends). */
+  addedSettings?: string[];
 }
 
 // ---------------------------------------------------------------------------

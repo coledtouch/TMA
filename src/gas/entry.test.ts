@@ -176,6 +176,25 @@ describe('sheet menu and schedules', () => {
     expect(gas.ui.alerts[0].message).toContain('Created secrets: TOKEN_SECRET, PUSH_RELAY_SECRET');
     // The second run keeps the relay secret it made the first time.
     expect(gas.ui.alerts[1].message).toContain('Created secrets: TOKEN_SECRET\n');
+    expect(gas.ui.alerts[0].message).toContain('Next: Deploy → New deployment → Web app');
+  });
+
+  it('on a sheet that is already running, lists the added settings and never says to make a new deployment', () => {
+    core.setup.mockReturnValue({
+      createdTables: [],
+      addedColumns: [],
+      seeded: false,
+      secretsInitialized: [],
+      addedSettings: ['EMAIL_VIA', 'NEW_SIGNUPS_PER_HOUR'],
+    });
+    gas.scriptApp.newTrigger('syncTick').timeBased().everyMinutes(15).create();
+    gas.scriptApp.newTrigger('dailyTick').timeBased().everyDays(1).create();
+    setupTma();
+    const message = gas.ui.alerts[0].message;
+    expect(message).toContain('Added settings (with their defaults): EMAIL_VIA, NEW_SIGNUPS_PER_HOUR');
+    expect(message).not.toContain('New deployment');
+    expect(message).toContain('Nothing else to do.');
+    expect(message).toContain('Manage deployments → pencil → New version');
   });
 
   it('setup still works without a UI (e.g. from the script editor log)', () => {

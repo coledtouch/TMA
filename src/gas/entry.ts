@@ -184,11 +184,17 @@ function runSetup(seedSampleData: boolean): SetupReport {
     report.addedColumns.length
       ? `Added columns: ${report.addedColumns.map((c) => `${c.table} › ${c.column}`).join(', ')}`
       : 'No columns were missing.',
+    report.addedSettings?.length ? `Added settings (with their defaults): ${report.addedSettings.join(', ')}` : '',
     report.seeded ? 'Filled the empty tabs with sample (fictional) data.' : '',
     report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(', ')}` : '',
     ...push,
   ].filter(Boolean);
-  const next = 'Next: Deploy → New deployment → Web app, then TMA App → Install schedules.';
+  // Installed schedules mean this sheet is already set up and deployed: a new deployment would get
+  // a new /exec URL the app doesn't use, so only point first-time setups there.
+  const handlers = safely(() => ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()), [] as string[]);
+  const next = SCHEDULED_HANDLERS.every((h) => handlers.includes(h))
+    ? 'Nothing else to do. (After pasting a new Code.js: Deploy → Manage deployments → pencil → New version, which keeps the same web app URL.)'
+    : 'Next: Deploy → New deployment → Web app, then TMA App → Install schedules.';
   alert('TMA App set up', `${lines.join('\n')}\n\n${next}`);
   return report;
 }

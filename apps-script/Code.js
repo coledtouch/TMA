@@ -4102,6 +4102,7 @@ var TMA = (() => {
     const present = new Set(ctx.db.rows("Settings").map((r) => settingKey(r.data.Key)));
     const missing = Object.keys(SETTING_DEFAULTS).filter((key) => !present.has(key)).map((key) => ({ Key: key, Value: SETTING_DEFAULTS[key], Notes: SETTING_NOTES[key] }));
     ctx.db.append("Settings", missing);
+    if (missing.length) report.addedSettings = missing.map((row) => row.Key);
     if (!ctx.s.secrets.get("TOKEN_SECRET")) {
       ctx.s.secrets.set("TOKEN_SECRET", generateSecret(ctx.s.crypto, "TOKEN_SECRET"));
       report.secretsInitialized.push("TOKEN_SECRET");
@@ -6211,6 +6212,7 @@ Email from the TMA app is working.
     return runSetup2(true);
   }
   function runSetup2(seedSampleData) {
+    var _a;
     const { services, app } = boot();
     const report = services.withLock(() => {
       const result = app.setup({ seedSampleData });
@@ -6223,11 +6225,13 @@ Email from the TMA app is working.
     const lines = [
       report.createdTables.length ? `Created tabs: ${report.createdTables.join(", ")}` : "All tabs were already there.",
       report.addedColumns.length ? `Added columns: ${report.addedColumns.map((c) => `${c.table} › ${c.column}`).join(", ")}` : "No columns were missing.",
+      ((_a = report.addedSettings) == null ? void 0 : _a.length) ? `Added settings (with their defaults): ${report.addedSettings.join(", ")}` : "",
       report.seeded ? "Filled the empty tabs with sample (fictional) data." : "",
       report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(", ")}` : "",
       ...push
     ].filter(Boolean);
-    const next = "Next: Deploy → New deployment → Web app, then TMA App → Install schedules.";
+    const handlers = safely2(() => ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()), []);
+    const next = SCHEDULED_HANDLERS.every((h) => handlers.includes(h)) ? "Nothing else to do. (After pasting a new Code.js: Deploy → Manage deployments → pencil → New version, which keeps the same web app URL.)" : "Next: Deploy → New deployment → Web app, then TMA App → Install schedules.";
     alert("TMA App set up", `${lines.join("\n")}
 
 ${next}`);

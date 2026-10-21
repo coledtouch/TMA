@@ -26,6 +26,7 @@ describe('setup()', () => {
 
     const secret = services.secrets.get('TOKEN_SECRET');
     const second = app.setup();
+    expect(first.addedSettings).toEqual(Object.keys(SETTING_DEFAULTS));
     expect(second).toEqual({ createdTables: [], addedColumns: [], seeded: false, secretsInitialized: [] });
     expect(services.secrets.get('TOKEN_SECRET')).toBe(secret);
     expect(services.db.tables.Settings).toHaveLength(Object.keys(SETTING_DEFAULTS).length);
