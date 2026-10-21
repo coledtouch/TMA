@@ -228,13 +228,19 @@ the Cloudflare account the Worker runs in.
 1. **In every spreadsheet that is linked now**: *Extensions → Apps Script → Project Settings (⚙) →
    Script Properties*, delete `PUSH_RELAY_SECRET` and `PUSH_PUBLIC_KEY`, and **Save script
    properties**. Do this first. A spreadsheet that still has the old password links itself again
-   automatically the next time it sends a notification.
+   automatically the next time it sends anything through the Worker: a notification **or any
+   email**, including a sign-in code that anyone can request from the app.
 2. **In Cloudflare** (dash.cloudflare.com): *Storage & Databases → KV* → the `TMA_PUSH` namespace →
    delete the two keys `relay:secret-sha256` and `vapid:v1`.
 3. **Wait about 5 minutes.** The Worker remembers the old values for that long.
 4. **In the spreadsheet that should send notifications**: **TMA App → Set up / repair tabs**. It makes
    a new password, links it, and the Worker makes a new key pair. Check with **TMA App → Status**
    (see B).
+5. **Email key.** In that spreadsheet's **TMA App → Status**, copy the *Email key for Cloudflare*.
+   In Cloudflare, replace the Worker secret `EMAIL_KEY` with it (see
+   [Email from noreply@mytma.org](#email-from-noreplymytmaorg), step D). Until you do, email goes
+   out with Gmail; the old spreadsheet's key keeps working for email until then, so do this right
+   away if the password may have leaked.
 
 Phones that had notifications on were set up with the old key, so the Worker now reports them as
 expired and the script removes them from the Devices tab. Each of those phones signs up again with the
@@ -262,7 +268,9 @@ this.
 7. In the spreadsheet's **Settings** tab, set `PUSH_RELAY_URL` to the new address.
 8. In Apps Script → *Project Settings → Script Properties*, delete `PUSH_RELAY_SECRET` and
    `PUSH_PUBLIC_KEY` (they belong to the old Worker). Then **TMA App → Set up / repair tabs**, and
-   check **TMA App → Status** shows the new address with ✓s.
+   check **TMA App → Status** shows the new address with ✓s. For email, the new account also needs
+   the Workers Paid plan, `mytma.org` onboarded and the `EMAIL_KEY` secret: follow
+   [Email from noreply@mytma.org](#email-from-noreplymytmaorg) A to E there.
 9. Phones follow the new key by themselves the next time the app is opened, as in E.
 10. Once everything works, delete the old Worker in the old account (*Workers & Pages → tma-push →
     Settings → Delete*).
@@ -274,10 +282,12 @@ Every email the app sends (sign-in codes, notifications, announcements and board
 **Email Sending** service (part of Cloudflare Email Service). When a family **replies**, the reply goes
 to the Settings key `SUPPORT_EMAIL` (default `timberlanemusictma@gmail.com`), not to `noreply@`.
 
-Nobody's personal Gmail address appears on the app's emails any more. Until this section is done,
-and whenever the Worker can't send a message for any reason, the script sends **that message with
-Gmail** instead, from the Google account that runs the script (with the same Reply-To). So sign-in
-codes always arrive.
+The one exception is the **Gmail fallback**: until this section is done, and whenever the Worker
+can't send a message for any reason, the script sends **that message with Gmail** instead, from the
+Google account that runs the script (with the same Reply-To). That way sign-in codes always arrive,
+but those emails show that account's address. So the script should run under **TMA's own Google
+account** (the board's shared one), not someone's personal account. **TMA App → Status** and the
+board's dashboard show how many emails the Gmail fallback can still send today.
 
 **What it costs.** Email Sending needs Cloudflare's **Workers Paid** plan on the Cloudflare account
 the push Worker runs in: **$5 a month**, which includes **3,000 emails a month**, then **$0.35 per
@@ -293,7 +303,8 @@ runs in): *Workers & Pages → Plans* → **Workers Paid** → add a payment met
 *Compute → Email Service → Email Sending → **Onboard Domain*** → choose `mytma.org` → follow the
 steps. Cloudflare lists the DNS records that prove the emails really come from `mytma.org` (SPF and
 DKIM); since it already runs the domain's DNS, accept its offer to add them. Wait until the domain
-shows as verified. This can take a few minutes.
+shows as verified. This can take a few minutes. Until A and B are both done, Cloudflare only sends
+to the account's verified Email Routing addresses, not to families.
 
 **C. Deploy the Worker** with its email setup (only needed once, if it hasn't run since this
 feature was added): GitHub → *Actions → Deploy push Worker (Cloudflare) → Run workflow*. The Worker's
@@ -302,10 +313,25 @@ feature was added): GitHub → *Actions → Deploy push Worker (Cloudflare) → 
 Sending, finish A and B first and run it again. Until it succeeds, the Worker that's running keeps
 sending push notifications, and email keeps going out with Gmail.
 
-**D. Check it.** In the spreadsheet: **TMA App → Status**. The Email line should read:
+**D. Give the Worker this spreadsheet's email key.** The Worker sends email only for the spreadsheet
+whose key it holds, so that nobody else can link themselves to the Worker and send email as
+`noreply@mytma.org`.
+
+1. In the spreadsheet: **TMA App → Status**. Copy the 64 letters and digits after *Email key for
+   Cloudflare (Worker secret EMAIL_KEY)*. (It is a scrambled form of the Worker password, not the
+   password itself.) If the line is missing, run **TMA App → Set up / repair tabs** first.
+2. In Cloudflare: *Workers & Pages → **tma-push** → Settings → Variables and Secrets → **Add***.
+   Type: **Secret**. Variable name: `EMAIL_KEY`. Value: the key you copied. **Deploy**.
+   (It must be type *Secret*: a plain variable would be removed by the next deploy from GitHub.)
+
+Do this again whenever the spreadsheet gets a new Worker password: after
+[5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys) (another spreadsheet, or rotating the
+keys) or [5F](#f-moving-the-worker-to-another-cloudflare-account) (another Cloudflare account).
+
+**E. Check it.** In the spreadsheet: **TMA App → Status**. The Email line should read:
 
 ```
-Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓); Reply-To timberlanemusictma@gmail.com; Gmail fallback: 100 emails left today
+Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓, email key ✓); Reply-To timberlanemusictma@gmail.com; Gmail fallback: 100 emails left today
 ```
 
 Then **TMA App → Send me a test notification**. The dialog says which way the test email went:
@@ -314,8 +340,15 @@ Then **TMA App → Send me a test notification**. The dialog says which way the 
 * *Email: sent with Gmail from this Google account instead of noreply@mytma.org, because …*: the
   reason says what's missing. For example *mytma.org isn't verified for Cloudflare Email Sending
   yet* (finish B, then wait 10 minutes: after that answer the script uses Gmail for 10 minutes
-  before asking the Worker again), *Cloudflare only sends to verified addresses* (finish A), or *the
-  push Worker has no Email Sending binding* (do C).
+  before asking the Worker again), *Cloudflare only sends to verified addresses* (finish A and B),
+  *the push Worker doesn't have its EMAIL_KEY secret yet* or *…isn't this sheet's email key* (do D),
+  or *the push Worker has no Email Sending binding* (do C).
+
+The test goes to your own Google address. If that address is one of the account's verified Email
+Routing destinations, Cloudflare delivers to it even before A and B are finished, so the test can
+pass while families still get Gmail. To be sure, also sign in to the app with an address that is
+**not** a verified destination (for example a family member's) and check that the sign-in code comes
+from `noreply@mytma.org`.
 
 Also check that the email arrived and didn't land in spam, and that **Reply** goes to `SUPPORT_EMAIL`.
 
@@ -326,9 +359,9 @@ Also check that the email arrived and didn't land in spam, and that **Reply** go
 | `cloudflare` (default) | Send as `noreply@mytma.org` through the push Worker. If the Worker can't send a message, that message goes out with Gmail instead. |
 | `gmail` | Always send from the Google account that runs the script (the way the app worked before). The Worker isn't asked. |
 
-The Worker uses the same password (`PUSH_RELAY_SECRET`) for email as for push, so linking a different
-spreadsheet or rotating the keys ([5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys)) moves
-email along with push. Only the linked spreadsheet can send email through the Worker.
+The Worker uses the same password (`PUSH_RELAY_SECRET`) for email as for push, plus the email key
+from D. Only the spreadsheet whose key is in `EMAIL_KEY` can send email through the Worker, even
+while the Worker is unlinked during [5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys).
 
 ## 6. Online payments (PayPal)
 
@@ -448,7 +481,7 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 - [ ] **TMA App → Status** shows: a web app URL, your `APP_URL`, both schedules ✓, `TOKEN_SECRET`
       and `PUSH_RELAY_SECRET` among the secrets set, the push Worker *reachable ✓, linked to a sheet ✓,
       keys ✓*, push *configured*, PayPal as intended, email *on* and *from noreply@mytma.org through
-      the push Worker (Cloudflare Email Sending ✓)* (see [Email](#email-from-noreplymytmaorg)).
+      the push Worker (Cloudflare Email Sending ✓, email key ✓)* (see [Email](#email-from-noreplymytmaorg)).
 - [ ] The push Worker is linked to **this** spreadsheet, not the test one (see
       [Test spreadsheet](#test-spreadsheet)): *Send me a test notification* reaches your phone.
 - [ ] Settings: `ADMIN_EMAILS`, `SUPPORT_EMAIL`, `OTHER_PAYMENT_INSTRUCTIONS` and `DONATE_URL` are
@@ -547,7 +580,7 @@ using the previously deployed version until step 3. If Google asks for permissio
   expire after 10 minutes, and each email can request at most 5 codes per hour.
 * **Emails come from the Google account instead of `noreply@mytma.org`.** Run **TMA App → Send me a
   test notification**: the Email line says why the Worker didn't send it. See
-  [Email from noreply@mytma.org](#email-from-noreplymytmaorg), step D. The **Log** and
+  [Email from noreply@mytma.org](#email-from-noreplymytmaorg), step E. The **Log** and
   **Executions** show *Worker email failed* with a reason code (never an address).
 * **Replies to app emails.** They go to `SUPPORT_EMAIL` (Settings). Check that address is one TMA reads.
 * **"TMA has reached today's email limit."** The daily Gmail quota is used up (see [Quotas](#quotas)).
@@ -658,7 +691,9 @@ only for emails that go out **with Gmail**: when email goes through the push Wor
 `noreply@mytma.org` ([Email](#email-from-noreplymytmaorg)), Google's email quota is just the fallback.
 Cloudflare's own limits apply instead (3,000 emails a month included, then $0.35 per 1,000; the
 sending rate grows with the account's history). If Cloudflare says *rate limited*, the script switches
-to Gmail for the rest of that run. Everything below about the Gmail quota applies when `EMAIL_VIA` is
+to Gmail for the rest of that run. Notification emails that fall back to Gmail still leave the day's
+last 20 Gmail emails for sign-in codes. The board's dashboard shows *Gmail backup emails left today*
+while the Worker sends. Everything below about the Gmail quota applies when `EMAIL_VIA` is
 `gmail`, before email from `noreply@mytma.org` is set up, or while the Worker can't send.
 
 | Limit (per day) | Free Gmail account | Google Workspace (e.g. for Nonprofits) |

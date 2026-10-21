@@ -233,34 +233,50 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
   `push.enabled()`); delete tokens that return `invalid` (the browser unsubscribed, or the
   subscription was made with an old Worker key). email → if `EMAIL_ENABLED` and `mailer.remainingQuota()` is above the 20 recipients
   kept back for sign-in codes (`SIGN_IN_EMAIL_RESERVE`; codes and notifications share one quota); skip
-  with a log otherwise. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
+  with a log otherwise. Sent with `mailer.sendMany` when the mailer has it (one call for the batch,
+  one result per recipient), else `send` one by one; a failed email doesn't use up quota, so the
+  next recipients may take its place. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
   Admin-chosen channels further restrict announcements.
 * Each delivery batch is logged in `Log` (kind `notify`, detail "topic: title → push n, email n, sms n").
 
 **Email delivery.** Every email (sign-in codes §4, notifications, announcements, admin alerts and the
 menu's test) goes through the one `Mailer` port (`remainingQuota()`, `send({to, subject, html,
-text})`); the core doesn't know the route. In Apps Script it is `src/gas/mail.ts` (§9):
+text})`, and the optional `sendMany(msgs)` for notification batches and `relayStatus()` for the
+dashboard); the core doesn't know the route. In Apps Script it is `src/gas/mail.ts` (§9):
 
 1. Settings `EMAIL_VIA` = `cloudflare` (default; anything but `gmail`) **and** the push Worker is
    configured (`PUSH_RELAY_URL` https, `PUSH_RELAY_SECRET` usable) → `POST <PUSH_RELAY_URL>/email`
-   with `Authorization: Bearer <PUSH_RELAY_SECRET>` and **one** message `{to, subject, html, text,
-   replyTo}`: subject on one line and at most 300 characters, `replyTo` = Settings `SUPPORT_EMAIL`
-   when it is one plain address (else its default). The Worker sends it From
-   `Timberlane Music Association <noreply@mytma.org>` (its own config, never the request).
+   with `Authorization: Bearer <PUSH_RELAY_SECRET>`. Each message is `{to, subject, html, text,
+   replyTo}` with **one** recipient: subject on one line and at most 300 characters, `replyTo` =
+   Settings `SUPPORT_EMAIL` when it is one plain address (else its default). `send()` (sign-in
+   codes, the test) posts one message; `sendMany()` (notifications) posts up to 10 per request,
+   each request under 200 KB, 5 requests at a time with `UrlFetchApp.fetchAll`, so an announcement
+   to every family takes seconds inside the write lock. The Worker sends From
+   `Timberlane Music Association <noreply@mytma.org>` (its own config, never the request), and only
+   for the secret pinned by its `EMAIL_KEY` secret (§9.1).
 2. `401` → `POST /register` again (at most once per execution, shared with push) and retry once.
-3. Anything else that isn't `{status:'ok'}` (an `error` result, another HTTP status, no answer) →
-   log the reason code and send **that** message with `MailApp.sendEmail({to, subject, htmlBody,
-   body, name: ORG_NAME, replyTo: SUPPORT_EMAIL})`. Sign-in codes therefore always go out.
-4. So a broken setup doesn't cost a failing request per email: `sender_not_verified`,
-   `email_not_configured` (`503`), a `404` (a Worker without `/email`) or a `401` that linking again
-   didn't fix → Gmail for 10 minutes without asking the Worker (CacheService
-   `email-worker:paused`). `rate_limited`, or 3 Worker failures in a row (problems with one message
-   such as `bad_to` don't count), → Gmail for the rest of the execution.
-5. `remainingQuota()` = 1000 while the Worker route is active (Cloudflare has no per-script daily
-   quota), else `MailApp.getRemainingDailyQuota()`. When it reported 1000 and the Worker then fails
-   in the same execution, the core may plan more emails than Gmail can take: the first Gmail
-   fallback always goes (it may be a sign-in code), later ones throw once Gmail's quota is down to
-   `SIGN_IN_EMAIL_RESERVE` (logged by `deliver` as failed sends).
+3. Anything else that isn't `{status:'ok'}` → log the reason code and send **that** message with
+   `MailApp.sendEmail({to, subject, htmlBody, body, name: ORG_NAME, replyTo: SUPPORT_EMAIL})`.
+   Sign-in codes therefore always go out. Then, by reason:
+   * about one message or recipient (`bad_*`, `no_content`, `content_too_large`,
+     `recipient_not_allowed`, `recipient_suppressed`, `delivery_failed`, `invalid_message`, or HTTP
+     `400`/`413`) → nothing more; the next email still tries the Worker;
+   * a set-up problem (`sender_not_verified`, `account_suspended`, `email_not_configured`,
+     `email_key_missing`, `email_key_mismatch`, a `404` from a Worker without `/email`, or a `401`
+     that linking again didn't fix) → Gmail for 10 minutes without asking the Worker (CacheService
+     `email-worker:paused`);
+   * `rate_limited` → Gmail for the rest of the execution;
+   * the Worker or Cloudflare failing (no answer, other HTTP statuses, an unreadable answer,
+     `send_failed`) 3 times in a row (per request) → Gmail for the rest of the execution and 2
+     minutes after it (same cache key), so later executions report Gmail's quota.
+4. `remainingQuota()` = 1000 while the Worker route is active (Cloudflare has no per-script daily
+   quota), else `MailApp.getRemainingDailyQuota()`. The Gmail fallback of `sendMany()` never goes
+   below `SIGN_IN_EMAIL_RESERVE` (those emails come back as failed results), so a Worker outage
+   can't spend the reserve on notifications. `send()`'s first fallback in an execution always goes:
+   that is how sign-in codes go out, and the reserve is theirs. `sendMany()` starts nothing new after
+   4 minutes (the rest come back as failed), so a big batch ends inside the 6-minute limit.
+5. `relayStatus()` → `{from: 'noreply@mytma.org', backupRemaining: <MailApp quota>}` while the
+   Worker route is active, so the dashboard shows the Gmail backup's quota rather than 1000.
 6. `EMAIL_VIA` = `gmail` → MailApp only; the Worker is never asked.
 
 Logs carry reason codes and HTTP codes only, never addresses, subjects or bodies. In the demo and
@@ -369,11 +385,13 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
 * Crypto: `Utilities.computeHmacSha256Signature`, uuid via `Utilities.getUuid()`, digits via uuid
   hex → numbers (rejection sampling).
 * Mailer (`src/gas/mail.ts`): §6 "Email delivery". Through the push Worker's `POST /email` (via
-  the push sender's `authorizedPost`, which owns the secret and the once-per-execution re-register),
-  with `MailApp.sendEmail({to, subject, htmlBody, body, name: ORG_NAME, replyTo: SUPPORT_EMAIL})`
-  as the per-message fallback and the only route when `EMAIL_VIA = gmail`. Besides the port it
-  offers `route()` (cloudflare, or gmail and why: `setting`, `no_worker`, `not_linked`, `paused`,
-  `this_run`), `lastDelivery()` and `gmailQuota()` for the menu.
+  the push sender's `authorizedPost` / `authorizedPostAll`, which own the secret and the
+  once-per-execution re-register), with `MailApp.sendEmail({to, subject, htmlBody, body, name:
+  ORG_NAME, replyTo: SUPPORT_EMAIL})` as the per-message fallback and the only route when
+  `EMAIL_VIA = gmail`. It implements `sendMany` and `relayStatus`, and also offers `route()`
+  (cloudflare, or gmail and why: `setting`, `no_worker`, `not_linked`, `paused`, `this_run`),
+  `lastDelivery()` and `gmailQuota()` for the menu. The push sender's `emailKey()` is the hex
+  SHA-256 of `PUSH_RELAY_SECRET`: the value for the Worker's `EMAIL_KEY` secret.
 * PayPal gateway: REST v2 via `UrlFetchApp` (`muteHttpExceptions: true`), OAuth client-credentials token
   cached ~8 h in CacheService, base `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` per
   PAYPAL_ENV. Create order: intent CAPTURE; one purchase unit with reference_id, custom_id,
@@ -420,8 +438,10 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   `PUSH_PUBLIC_KEY` is saved, and whether push is configured. Secrets are listed by name only.
   "Linked to a sheet" means *some* secret is registered with the Worker, not necessarily this sheet's.
   Its **Email** line shows the route (`from noreply@mytma.org through the push Worker` with
-  `/health`'s `email` as Cloudflare Email Sending ✓/✗, or `with Gmail … because …`), the Reply-To and
-  MailApp's quota left (the fallback). One `/health` request serves both. **Send me a test
+  `/health`'s `email` and `emailKey` as Cloudflare Email Sending ✓/✗ and email key ✓/✗, or
+  `with Gmail … because …`), the Reply-To and MailApp's quota left (the fallback), followed by
+  *Email key for Cloudflare (Worker secret EMAIL_KEY): <hex>* (the SHA-256, never the secret) unless
+  `EMAIL_VIA = gmail`. One `/health` request serves both. **Send me a test
   notification** sends its test email through the same Mailer and says which route delivered it
   (and, for Gmail, the Worker's reason).
 * Twilio SMS (optional; costs about 1¢ per text): `TWILIO_*` secrets set → enabled. POST form to
@@ -445,11 +465,11 @@ service-account key. The full reference is `workers/push/README.md`.
 
 | Endpoint | Answer |
 | --- | --- |
-| `GET /health` | `{ok:true, name:'tma-push', registered, hasKeys, email}` (`email`: the Email Sending binding is configured) |
+| `GET /health` | `{ok:true, name:'tma-push', registered, hasKeys, email, emailKey}` (`email`: the Email Sending binding is configured; `emailKey`: the `EMAIL_KEY` secret is set) |
 | `GET /vapid-public-key` | `{publicKey}`: base64url of the 65-byte uncompressed P-256 point. Creates the key pair on first use; no other endpoint creates keys. |
-| `POST /register` `{secret}` (32–256 chars) | `200 {registered:true, first}` the first time, or again with the same secret. `409 {error:'already_registered'}` for any other secret (trust on first use). `400` bad body, `413` over 4 KB. |
+| `POST /register` `{secret}` (32–256 chars) | `200 {registered:true, first}` the first time, or again with the same secret. `409 {error:'already_registered'}` for any other secret (trust on first use: it grants `/send` only, never `/email`). `400` bad body, `413` over 4 KB. |
 | `POST /send`, header `Authorization: Bearer <secret>`, body `{messages:[{subscription:{endpoint, keys:{p256dh, auth}}, payload, ttl?, urgency?, topic?}]}` | `200 {results:[{status:'ok'\|'invalid'\|'error', code?, reason?}]}`, one per message in the same order. `401 {error:'unauthorized'}` (no secret registered, missing or wrong). `400`. `413` for more than 10 messages or over 256 KB. With no key pair yet, `200` with every result `{status:'error', reason:'no_keys'}` and nothing sent. |
-| `POST /email`, same bearer secret, body `{messages:[{to, subject, html?, text?, replyTo?}]}` (1–10) | `200 {results:[{status:'ok', messageId} \| {status:'error', reason, code?}]}` in the same order. `401` as `/send`; `503 {error:'email_not_configured'}` without the `EMAIL` binding; `400` bad body or empty list; `413` over 10 messages or 256 KB. |
+| `POST /email`, bearer secret whose SHA-256 is the Worker secret `EMAIL_KEY`, body `{messages:[{to, subject, html?, text?, replyTo?}]}` (1–10) | `200 {results:[{status:'ok', messageId} \| {status:'error', reason, code?}]}` in the same order. `401` for a secret that is neither the pinned nor the registered one; `503 {error:'email_not_configured'}` without the `EMAIL` binding; `503 {error:'email_key_missing'}` without `EMAIL_KEY`; `403 {error:'email_key_mismatch'}` for the registered secret when `EMAIL_KEY` is another; `400` bad body or empty list; `413` over 10 messages or 256 KB. |
 
 * `invalid` (Apps Script deletes the Devices row): `gone` (404/410), `vapid_rejected` (403, e.g. made
   with an old key), `endpoint_not_allowed`, `bad_keys`. `error` (kept; may work next time):
@@ -465,10 +485,17 @@ service-account key. The full reference is `workers/push/README.md`.
   `html` ≤ 200 KB, `text` ≤ 100 KB, at least one of them: otherwise that message is `error` with
   `bad_to`, `bad_reply_to`, `bad_subject`, `no_content`, `bad_content`, `content_too_large` or
   `bad_message` and is not sent. Cloudflare's thrown codes map to `sender_not_verified`
-  (`E_SENDER_NOT_VERIFIED`), `rate_limited` (`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`),
-  `recipient_not_allowed` (a recipient/destination not allowed/verified code) and `send_failed`
-  (anything else), with the code in `code` and never the error message. Messages are sent one after
-  another; the log line is counts and codes only.
+  (`E_SENDER_NOT_VERIFIED`, `E_SENDER_DOMAIN_NOT_AVAILABLE`), `account_suspended`
+  (`E_ACCOUNT_SUSPENDED`), `rate_limited` (`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`),
+  `recipient_not_allowed` (a recipient/destination not allowed/verified code), `recipient_suppressed`
+  (`E_RECIPIENT_SUPPRESSED`), `delivery_failed` (`E_DELIVERY_FAILED`), `content_too_large`
+  (`E_CONTENT_TOO_LARGE`), `invalid_message` (`E_VALIDATION_ERROR`, `E_FIELD_MISSING`,
+  `E_TOO_MANY_*`, `E_HEADER*`) and `send_failed` (anything else), with the code in `code` and never
+  the error message. Messages are sent one after another; the log line is counts and codes only.
+* `EMAIL_KEY` closes the trust-on-first-use window for email: whenever no secret is registered
+  (first setup, the 5E rotation, lost KV) anyone may claim `/send`, but `/email` only answers the
+  secret pinned by a value that only someone with access to the Cloudflare account can set. It is a
+  Worker secret (dashboard or `wrangler secret put`), never in `wrangler.toml`, and survives deploys.
 * Endpoint allowlist (an SSRF guard): `https://` on the default port, host `fcm.googleapis.com` (Chrome,
   Edge, Android), `updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` (Safari and
   iPhone/iPad Home Screen apps), or a host ending in `.push.apple.com` or `.notify.windows.com`. The same
@@ -478,7 +505,7 @@ service-account key. The full reference is `workers/push/README.md`.
   of the registered secret, compared in constant time). No subscriptions, payloads or family data are
   stored. Logs show only the push service host and status.
 * **Plans**: email needs **Workers Paid** ($5 a month: 3,000 emails included, then $0.35 per 1,000)
-  and `mytma.org` onboarded for Email Sending; push alone fits the free plan.
+  and `mytma.org` onboarded for Email Sending, plus the `EMAIL_KEY` secret; push alone fits the free plan.
 * **Free-plan limits** (push): about 10 ms of CPU per request (hence at most 5 messages per request from Apps
   Script), 50 subrequests per request (10 messages are 10 fetches), 100,000 requests a day, and KV
   100,000 reads and 1,000 writes a day (each Worker instance caches what it read for 5 minutes; writes

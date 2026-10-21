@@ -93,8 +93,10 @@ export function adminOverview(ctx: Ctx): AdminOverview {
   for (const key of books.ledgerStudentKeys()) if (!known.has(key)) totalFunds += books.balance(key);
 
   let emailQuota = 0;
+  let emailRelay: { from: string; backupRemaining: number } | null = null;
   try {
     emailQuota = ctx.s.mailer.remainingQuota();
+    emailRelay = ctx.s.mailer.relayStatus?.() ?? null;
   } catch (err) {
     ctx.s.logger.error('remainingQuota failed', err);
   }
@@ -143,6 +145,8 @@ export function adminOverview(ctx: Ctx): AdminOverview {
       totalFundsCents: totalFunds,
       pushDevices: m.devices().length,
       emailQuotaRemaining: emailQuota,
+      // The Worker's allowance says nothing useful; what matters is how much Gmail can still cover.
+      ...(emailRelay ? { emailFrom: emailRelay.from, emailBackupRemaining: emailRelay.backupRemaining } : {}),
     },
     pendingRedemptions,
     pendingHouseholds,

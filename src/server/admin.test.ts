@@ -1,7 +1,25 @@
 import { describe, expect, it } from 'vitest';
+import { SIGN_IN_EMAIL_RESERVE } from './notify';
+import type { MailMessage, MailResult } from './services';
 import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, storedToken, testSubscription, TREASURER } from './test-helpers';
 
 describe('admin.overview', () => {
+  it("shows the Gmail backup's quota when the mailer relays email (e.g. the push Worker as noreply@mytma.org)", () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    h.services.mailer.remainingQuota = () => 1000;
+    h.services.mailer.relayStatus = () => ({ from: 'noreply@mytma.org', backupRemaining: 42 });
+    expect(h.ok('admin.overview', {}, admin).stats).toMatchObject({
+      emailQuotaRemaining: 1000,
+      emailFrom: 'noreply@mytma.org',
+      emailBackupRemaining: 42,
+    });
+    h.services.mailer.relayStatus = () => null;
+    const stats = h.ok('admin.overview', {}, admin).stats;
+    expect(stats.emailFrom).toBeUndefined();
+    expect(stats.emailBackupRemaining).toBeUndefined();
+  });
+
   it('summarizes stats, pending requests, pending households with match candidates, and the log', () => {
     const h = harness();
     const admin = h.signIn(TREASURER);
@@ -222,6 +240,51 @@ describe('admin.announce', () => {
     expect(bad({ channels: { push: false, email: false, sms: false } }).code).toBe('BAD_REQUEST');
     expect(bad({ link: 'javascript:alert(1)' }).code).toBe('BAD_REQUEST');
     expect(h.err('admin.announce', { title: 'T', body: 'B', channels: { push: true } }, h.signIn(PARENT)).code).toBe('FORBIDDEN');
+  });
+
+  it('emails through mailer.sendMany in one batch when the mailer has it, logging each failed recipient', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    h.clearOutbox();
+    const batches: MailMessage[][] = [];
+    h.services.mailer.sendMany = (msgs) => {
+      batches.push(msgs);
+      return msgs.map((m, i): MailResult => (i === 0 ? { ok: false, error: `refused ${m.to}` } : { ok: true }));
+    };
+    const { delivered } = h.ok(
+      'admin.announce',
+      { title: 'Concert', body: 'Friday', audience: { schools: [], ensembles: [] }, channels: { email: true } },
+      admin,
+    );
+    expect(batches).toHaveLength(1);
+    const recipients = batches[0].map((m) => m.to);
+    expect(recipients.length).toBeGreaterThan(1);
+    expect(new Set(recipients).size).toBe(recipients.length);
+    expect(batches[0].every((m) => m.subject === 'Concert' && m.html.includes('Friday') && m.text.includes('Friday'))).toBe(true);
+    expect(delivered.email).toBe(recipients.length - 1);
+    expect(h.services.outbox.mail).toHaveLength(0); // send() was not used
+    expect(h.services.logs.filter((l) => l.level === 'error').map((l) => l.message)).toEqual([`email to ${recipients[0]} failed`]);
+  });
+
+  it('with sendMany, keeps to the quota minus the sign-in reserve, and a failed email does not use up quota', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    h.clearOutbox();
+    h.services.mailer.remainingQuota = () => SIGN_IN_EMAIL_RESERVE + 2;
+    const batches: string[][] = [];
+    h.services.mailer.sendMany = (msgs) => {
+      batches.push(msgs.map((m) => m.to));
+      // The very first email fails; everything else goes out.
+      return msgs.map((_, i): MailResult => (batches.length === 1 && i === 0 ? { ok: false, error: 'x' } : { ok: true }));
+    };
+    const { delivered } = h.ok(
+      'admin.announce',
+      { title: 'Concert', body: 'Friday', audience: { schools: [], ensembles: [] }, channels: { email: true } },
+      admin,
+    );
+    expect(delivered.email).toBe(2);
+    expect(batches.map((b) => b.length)).toEqual([2, 1]);
+    expect(h.rows('Log').some((r) => String(r.Detail).includes('email skipped: daily quota used up'))).toBe(true);
   });
 
   it('escapes HTML from titles and bodies in emails', () => {

@@ -12,7 +12,7 @@ import type { App } from '../server/services';
 import { generateSecret } from '../server/setup';
 import { SETTING_DEFAULTS, type SecretName } from '../shared/schema';
 import type { ApiAction, ApiRequest, ApiResponse, SetupReport, TickReport } from '../shared/types';
-import { describeWorkerReason, replyToAddress, WORKER_EMAIL_FROM } from './mail';
+import { describeWorkerReason, pauseSeconds, replyToAddress, WORKER_EMAIL_FROM } from './mail';
 import { paypalEnv } from './paypal';
 import type { RelayHealth } from './push-relay';
 import { sendSelfTest, type SelfTestReport } from './self-test';
@@ -278,7 +278,7 @@ export function showTmaStatus(): string {
     `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting('PAYPAL_ENV'))})` : 'not configured'}; online payments ${yes(services.flag('ONLINE_PAYMENTS'))}`,
     ...pushStatus(services, health),
     `Text messages (Twilio): ${services.sms.enabled() ? 'configured' : 'not configured'}; SMS setting ${yes(services.flag('SMS_ENABLED'))}`,
-    emailStatus(services, health),
+    ...emailStatus(services, health),
     `Version: ${VERSION}`,
   ];
   if (!present.includes('TOKEN_SECRET')) lines.push('', 'TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.');
@@ -306,27 +306,34 @@ function pushStatus(services: GasServices, health: RelayHealth | null): string[]
 }
 
 /**
- * The "Email:" status line: on/off, the route (noreply@mytma.org through the
- * push Worker, and whether the Worker has Email Sending; or Gmail, and why),
- * the Reply-To address, and Gmail's quota left (the fallback).
+ * The "Email:" status lines: on/off, the route (noreply@mytma.org through the
+ * push Worker, and whether the Worker has Email Sending and its email key; or
+ * Gmail, and why), the Reply-To address, Gmail's quota left (the fallback),
+ * and the email key to paste into Cloudflare (the Worker secret EMAIL_KEY).
  */
-function emailStatus(services: GasServices, health: RelayHealth | null): string {
+function emailStatus(services: GasServices, health: RelayHealth | null): string[] {
   const on = services.flag('EMAIL_ENABLED') ? 'on' : 'notifications off (sign-in codes are still emailed)';
   const route = safely(() => services.mailer.route(), null);
   const quota = safely(() => services.mailer.gmailQuota(), 0);
   const replyTo = `Reply-To ${replyToAddress(services.setting('SUPPORT_EMAIL'))}`;
+  // The SHA-256 of PUSH_RELAY_SECRET, not the secret: it can't be turned back into it.
+  const key = route && !(route.via === 'gmail' && route.reason === 'setting') ? safely(() => services.push.emailKey(), null) : null;
+  const keyLine = key ? [`Email key for Cloudflare (Worker secret EMAIL_KEY): ${key}`] : [];
   if (route?.via === 'cloudflare') {
     let worker = '';
     if (health && !health.reachable) worker = '; Worker unreachable right now, so Gmail sends meanwhile';
-    else if (health?.email) worker = ' (Cloudflare Email Sending ✓)';
+    else if (health?.email && health.emailKey) worker = ' (Cloudflare Email Sending ✓, email key ✓)';
+    else if (health?.email) worker = ' (Cloudflare Email Sending ✓, email key ✗: add the Worker secret EMAIL_KEY below, so Gmail sends meanwhile; see docs/SETUP.md)';
     else if (health) worker = ' (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md)';
-    return `Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`;
+    return [`Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`, ...keyLine];
   }
-  const why =
-    !route || route.reason === 'setting'
-      ? 'Settings EMAIL_VIA is gmail'
-      : describeWorkerReason(route.detail ?? route.reason) + (route.reason === 'paused' ? ' (Gmail for up to 10 minutes, then the Worker is tried again)' : '');
-  return `Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`;
+  let why = 'Settings EMAIL_VIA is gmail';
+  if (route && route.reason !== 'setting') {
+    const reason = route.detail ?? route.reason;
+    why = describeWorkerReason(reason);
+    if (route.reason === 'paused') why += ` (Gmail for up to ${pauseSeconds(reason) / 60} minutes, then the Worker is tried again)`;
+  }
+  return [`Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`, ...keyLine];
 }
 
 // ---------------------------------------------------------------------------

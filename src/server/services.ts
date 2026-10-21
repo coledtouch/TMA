@@ -77,10 +77,27 @@ export interface MailMessage {
   text: string;
 }
 
+/** One message's outcome in Mailer.sendMany. */
+export type MailResult = { ok: true } | { ok: false; error: string };
+
 export interface Mailer {
   /** Remaining recipients the account may email today (Apps Script quota). */
   remainingQuota(): number;
   send(msg: MailMessage): void;
+  /**
+   * Optional: sends a batch of notification emails (never sign-in codes) in
+   * one go, e.g. several messages per request and requests in parallel. One
+   * result per message, same order; a failed message is a result, not a
+   * throw. deliver() uses it when present, send() otherwise.
+   */
+  sendMany?(msgs: MailMessage[]): MailResult[];
+  /**
+   * Optional: when email goes out through a relay with a backup sender (Apps
+   * Script: the push Worker as noreply@…, Gmail as the backup), the relay's
+   * sender and how many emails the backup may still send today. null when
+   * email goes out directly, so remainingQuota() is the whole story.
+   */
+  relayStatus?(): { from: string; backupRemaining: number } | null;
 }
 
 export interface SmsSender {

@@ -42,6 +42,8 @@ class FakeWorker {
   hasKeys = true;
   /** The Worker's EMAIL binding is configured (GET /health "email"). */
   emailBinding = true;
+  /** The Worker has its EMAIL_KEY secret (GET /health "emailKey"). */
+  emailKeySet = true;
   /** Bodies POSTed to /email that passed the secret check. */
   readonly emailBodies: unknown[] = [];
   /** Per-message status by endpoint (default ok). */
@@ -59,7 +61,14 @@ class FakeWorker {
     if (path === '/health') {
       return {
         code: 200,
-        body: { ok: true, name: 'tma-push', registered: this.registered !== null, hasKeys: this.hasKeys, email: this.emailBinding },
+        body: {
+          ok: true,
+          name: 'tma-push',
+          registered: this.registered !== null,
+          hasKeys: this.hasKeys,
+          email: this.emailBinding,
+          emailKey: this.emailKeySet,
+        },
       };
     }
     if (path === '/vapid-public-key') {
@@ -94,8 +103,9 @@ class FakeWorker {
       if (this.registered === null || r.headers.Authorization !== `Bearer ${this.registered}`) {
         return { code: 401, body: { error: 'unauthorized' } };
       }
-      this.emailBodies.push(JSON.parse(r.payload as string));
-      return { code: 200, body: { results: [{ status: 'ok', messageId: 'm-1' }] } };
+      const body = JSON.parse(r.payload as string) as { messages: unknown[] };
+      this.emailBodies.push(body);
+      return { code: 200, body: { results: body.messages.map(() => ({ status: 'ok', messageId: 'm-1' })) } };
     }
     return { code: 404, body: { error: 'not_found' } };
   }
@@ -401,11 +411,12 @@ describe('register / health', () => {
   });
 
   it('health reports the Worker state, or why it is unreachable', () => {
-    expect(sender().health()).toEqual({ reachable: true, registered: true, hasKeys: true, email: true });
+    expect(sender().health()).toEqual({ reachable: true, registered: true, hasKeys: true, email: true, emailKey: true });
     worker.registered = null;
     worker.hasKeys = false;
     worker.emailBinding = false;
-    expect(sender().health()).toEqual({ reachable: true, registered: false, hasKeys: false, email: false });
+    worker.emailKeySet = false;
+    expect(sender().health()).toEqual({ reachable: true, registered: false, hasKeys: false, email: false, emailKey: false });
     gas.fetch.handler = () => ({ code: 522, body: 'origin down' });
     expect(sender().health()).toMatchObject({ reachable: false, httpCode: 522 });
     gas.fetch.handler = () => {
@@ -480,5 +491,77 @@ describe('authorizedPost (the way email reaches the Worker)', () => {
     }
     expect(message).toMatch(/Could not reach the push Worker/);
     expect(message).not.toContain(SECRET);
+  });
+});
+
+describe('authorizedPostAll (batches of email to the Worker)', () => {
+  const body = (to: string) => ({ messages: [{ to, subject: 'Hi', text: 'x' }] });
+
+  it('POSTs every body in one fetchAll with the relay secret, answers in order', () => {
+    const answers = sender().authorizedPostAll('/email', [body('a@example.com'), body('b@example.com'), body('c@example.com')]);
+    expect(answers.map((a) => a.code)).toEqual([200, 200, 200]);
+    expect(gas.fetch.batches).toEqual([3]);
+    for (const request of gas.fetch.requests) {
+      expect(request).toMatchObject({ url: `${BASE}/email`, method: 'post', contentType: 'application/json', muteHttpExceptions: true });
+      expect(request.headers).toEqual({ Authorization: `Bearer ${SECRET}` });
+    }
+    expect(worker.emailBodies).toEqual([body('a@example.com'), body('b@example.com'), body('c@example.com')]);
+    expect(sender().authorizedPostAll('/email', [])).toEqual([]);
+  });
+
+  it('on 401 links this sheet again once and retries only the rejected requests', () => {
+    worker.registered = null;
+    const s = sender();
+    const answers = s.authorizedPostAll('/email', [body('a@example.com'), body('b@example.com')]);
+    expect(answers.map((a) => a.code)).toEqual([200, 200]);
+    expect(worker.paths).toEqual(['POST /email', 'POST /email', 'POST /register', 'POST /email', 'POST /email']);
+    expect(gas.fetch.batches).toEqual([2, 2]);
+
+    // Once per execution, shared with push and authorizedPost.
+    worker.registered = 'b'.repeat(64);
+    expect(s.authorizedPostAll('/email', [body('c@example.com')]).map((a) => a.code)).toEqual([401]);
+    expect(s.authorizedPost('/email', body('d@example.com')).code).toBe(401);
+    expect(worker.paths.filter((p) => p === 'POST /register')).toHaveLength(1);
+  });
+
+  it('keeps the first answers when the retry cannot reach the Worker (those emails were sent)', () => {
+    let rejectOnce = true;
+    gas.fetch.handler = (r) => {
+      if (r.url.endsWith('/register')) return worker.handle(r);
+      const to = (JSON.parse(r.payload as string) as { messages: Array<{ to: string }> }).messages[0].to;
+      if (to === 'b@example.com' && rejectOnce) {
+        rejectOnce = false;
+        return { code: 401, body: { error: 'unauthorized' } };
+      }
+      if (to === 'b@example.com') throw new Error('Timeout');
+      return worker.handle(r);
+    };
+    const answers = sender().authorizedPostAll('/email', [body('a@example.com'), body('b@example.com')]);
+    expect(answers.map((a) => a.code)).toEqual([200, 401]);
+    expect(JSON.stringify(logger.lines)).toContain('unreachable on retry');
+  });
+
+  it('throws when the Worker cannot be reached, never with the secret', () => {
+    gas.fetch.handler = () => {
+      throw new Error(`DNS error Bearer ${SECRET}`);
+    };
+    expect(() => sender().authorizedPostAll('/email', [body('a@example.com')])).toThrow(/Could not reach the push Worker/);
+    try {
+      sender().authorizedPostAll('/email', [body('a@example.com')]);
+    } catch (error) {
+      expect((error as Error).message).not.toContain(SECRET);
+    }
+    gas.properties.setProperty('PUSH_RELAY_SECRET', '');
+    expect(() => sender().authorizedPostAll('/email', [body('a@example.com')])).toThrow(/PUSH_RELAY_SECRET is missing/);
+  });
+});
+
+describe('emailKey (the value of the Worker secret EMAIL_KEY)', () => {
+  it('is the hex SHA-256 of PUSH_RELAY_SECRET, which is what the Worker compares', () => {
+    expect(sender().emailKey()).toBe(nodeCrypto.createHash('sha256').update(SECRET, 'utf8').digest('hex'));
+    expect(sender().emailKey()).toMatch(/^[0-9a-f]{64}$/);
+    expect(sender().emailKey()).not.toContain(SECRET);
+    gas.properties.setProperty('PUSH_RELAY_SECRET', '');
+    expect(sender().emailKey()).toBeNull();
   });
 });

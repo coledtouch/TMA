@@ -43,6 +43,14 @@ export interface Env {
   EMAIL_FROM?: string;
   /** Sender display name (default "Timberlane Music Association"). */
   EMAIL_FROM_NAME?: string;
+  /**
+   * Worker secret (set by hand in Cloudflare, never in wrangler.toml): the
+   * lowercase hex SHA-256 of the one relay secret allowed to send email. The
+   * sheet's TMA App > Status shows the value. POST /email refuses every
+   * request until it is set, so claiming an unregistered Worker through
+   * /register (trust on first use) can never send email as noreply@mytma.org.
+   */
+  EMAIL_KEY?: string;
 }
 
 /** Byte array backed by a plain ArrayBuffer (what WebCrypto accepts). */

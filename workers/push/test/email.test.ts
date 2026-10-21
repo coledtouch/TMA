@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   checkMessage,
+  emailKey,
   emailSender,
   isPlainAddress,
   isSafeSubject,
@@ -16,6 +17,17 @@ import { makeEnv } from './helpers';
 
 const BASE = 'https://tma-push.example.workers.dev';
 const SECRET = 's3cret-'.repeat(6); // 42 chars
+const ATTACKER = 'attacker-'.repeat(5); // 45 chars
+/** Hex SHA-256 of a UTF-8 string, computed here independently of the Worker's helper. */
+async function sha256(value: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+/** What TMA App > Status shows and the admin pastes into the Worker secret EMAIL_KEY. */
+let KEY: string;
+beforeAll(async () => {
+  KEY = await sha256(SECRET);
+});
 const FROM = { email: 'noreply@mytma.org', name: 'Timberlane Music Association' };
 const LINE_SEPARATOR = String.fromCharCode(0x2028);
 
@@ -38,7 +50,7 @@ function cloudflareError(code: string, message = 'Delivery to parent@example.com
   return Object.assign(new Error(message), { code });
 }
 
-type Env = ReturnType<typeof makeEnv> & { EMAIL?: EmailBinding; EMAIL_FROM?: string; EMAIL_FROM_NAME?: string };
+type Env = ReturnType<typeof makeEnv> & { EMAIL?: EmailBinding; EMAIL_FROM?: string; EMAIL_FROM_NAME?: string; EMAIL_KEY?: string };
 
 let env: Env;
 let mail: FakeEmail;
@@ -83,7 +95,7 @@ beforeEach(async () => {
   resetKvCache();
   resetVapidCache();
   mail = new FakeEmail();
-  env = { ...makeEnv(), EMAIL: mail, EMAIL_FROM: FROM.email, EMAIL_FROM_NAME: FROM.name };
+  env = { ...makeEnv(), EMAIL: mail, EMAIL_FROM: FROM.email, EMAIL_FROM_NAME: FROM.name, EMAIL_KEY: KEY };
   logs = [];
   vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
     logs.push(args.map(String).join(' '));
@@ -107,12 +119,66 @@ describe('POST /email: access', () => {
     expect(mail.sent).toHaveLength(1);
   });
 
-  it('401s when no secret has been registered yet', async () => {
+  it('401s an unknown secret when no secret has been registered yet', async () => {
     env.TMA_PUSH.data.clear();
     resetKvCache();
-    const res = await email({ messages: [message()] });
+    const res = await email({ messages: [message()] }, ATTACKER);
     expect(res.status).toBe(401);
     expect(mail.sent).toHaveLength(0);
+  });
+
+  it('claiming an unregistered Worker (trust on first use) does not allow sending email', async () => {
+    // The window: first setup, a key rotation (docs/SETUP.md 5E deletes the
+    // registered hash), or lost KV. /health says the Worker is open...
+    env.TMA_PUSH.data.clear();
+    resetKvCache();
+    expect(await jsonOf(await call('GET', '/health'))).toMatchObject({ registered: false, email: true, emailKey: true });
+    // ...and anyone can link it for push,
+    expect((await call('POST', '/register', { secret: ATTACKER })).status).toBe(200);
+    // but email only goes out for the secret pinned by EMAIL_KEY.
+    const victims = { messages: Array.from({ length: 10 }, (_, i) => message({ to: `victim${i}@example.net`, html: '<a href="https://phish.example">x</a>' })) };
+    const res = await email(victims, ATTACKER);
+    expect(res.status).toBe(403);
+    expect(await jsonOf(res)).toEqual({ error: 'email_key_mismatch' });
+    expect(mail.sent).toHaveLength(0);
+
+    // Without EMAIL_KEY nobody can send, not even the registered secret.
+    delete env.EMAIL_KEY;
+    const missing = await email(victims, ATTACKER);
+    expect(missing.status).toBe(503);
+    expect(await jsonOf(missing)).toEqual({ error: 'email_key_missing' });
+    expect(mail.sent).toHaveLength(0);
+    expect(await jsonOf(await call('GET', '/health'))).toMatchObject({ registered: true, email: true, emailKey: false });
+  });
+
+  it('the pinned secret sends even while the Worker is linked to nobody or to another secret', async () => {
+    env.TMA_PUSH.data.clear();
+    resetKvCache();
+    expect(await resultsOf(await email({ messages: [message()] }))).toEqual([{ status: 'ok', messageId: '<msg-1@mytma.org>' }]);
+    expect((await call('POST', '/register', { secret: ATTACKER })).status).toBe(200);
+    expect(await resultsOf(await email({ messages: [message()] }))).toEqual([{ status: 'ok', messageId: '<msg-2@mytma.org>' }]);
+    expect(mail.sent).toHaveLength(2);
+  });
+
+  it('tells the registered sheet when EMAIL_KEY holds another secret (e.g. after rotating the keys)', async () => {
+    env.EMAIL_KEY = await sha256('an-older-secret-'.repeat(3));
+    const res = await email({ messages: [message()] });
+    expect(res.status).toBe(403);
+    expect(await jsonOf(res)).toEqual({ error: 'email_key_mismatch' });
+    expect(mail.sent).toHaveLength(0);
+    expect(logs).toContain('email key_mismatch');
+  });
+
+  it('accepts EMAIL_KEY in capitals or with spaces around it, and treats anything else as missing', async () => {
+    env.EMAIL_KEY = `  ${KEY.toUpperCase()}\n`;
+    expect((await email({ messages: [message()] })).status).toBe(200);
+    for (const bad of ['', 'not-a-key', KEY.slice(1), `${KEY}0`, KEY.replace(/^./, 'g')]) {
+      env.EMAIL_KEY = bad;
+      const res = await email({ messages: [message()] });
+      expect(res.status, bad).toBe(503);
+      expect(await jsonOf(res)).toEqual({ error: 'email_key_missing' });
+    }
+    expect(mail.sent).toHaveLength(1);
   });
 
   it('405s a GET', async () => {
@@ -303,7 +369,7 @@ describe('POST /email: sending', () => {
       { status: 'error', reason: 'rate_limited', code: 'E_DAILY_LIMIT_EXCEEDED' },
       { status: 'error', reason: 'recipient_not_allowed', code: 'E_RECIPIENT_NOT_ALLOWED' },
       { status: 'error', reason: 'recipient_not_allowed', code: 'E_DESTINATION_NOT_VERIFIED' },
-      { status: 'error', reason: 'send_failed', code: 'E_RECIPIENT_SUPPRESSED' },
+      { status: 'error', reason: 'recipient_suppressed', code: 'E_RECIPIENT_SUPPRESSED' },
       { status: 'error', reason: 'send_failed', code: 'E_SOMETHING_NEW' },
       { status: 'error', reason: 'send_failed' },
       { status: 'error', reason: 'send_failed' },
@@ -311,6 +377,30 @@ describe('POST /email: sending', () => {
     ]);
     expect(text).not.toMatch(/Delivery|123456|boom|thrown/);
     expect(mail.sent).toHaveLength(10); // one failure doesn't stop the rest
+  });
+
+  it('gives errors about one recipient or message a reason of their own, apart from Worker or account problems', () => {
+    const cases: Array<[string, string]> = [
+      // One message or recipient: Apps Script sends just that one with Gmail and keeps using the Worker.
+      ['E_RECIPIENT_SUPPRESSED', 'recipient_suppressed'],
+      ['E_DELIVERY_FAILED', 'delivery_failed'],
+      ['E_VALIDATION_ERROR', 'invalid_message'],
+      ['E_FIELD_MISSING', 'invalid_message'],
+      ['E_TOO_MANY_RECIPIENTS', 'invalid_message'],
+      ['E_HEADER_VALUE_INVALID', 'invalid_message'],
+      ['E_HEADERS_TOO_LARGE', 'invalid_message'],
+      ['E_CONTENT_TOO_LARGE', 'content_too_large'],
+      ['E_RECIPIENT_NOT_ALLOWED', 'recipient_not_allowed'],
+      // The domain or account: Apps Script stops asking the Worker for a while.
+      ['E_SENDER_NOT_VERIFIED', 'sender_not_verified'],
+      ['E_SENDER_DOMAIN_NOT_AVAILABLE', 'sender_not_verified'],
+      ['E_ACCOUNT_SUSPENDED', 'account_suspended'],
+      ['E_DAILY_LIMIT_EXCEEDED', 'rate_limited'],
+      // Cloudflare itself, or a code we don't know.
+      ['E_INTERNAL_SERVER_ERROR', 'send_failed'],
+      ['E_SOMETHING_NEW', 'send_failed'],
+    ];
+    for (const [code, reason] of cases) expect(mapEmailError(cloudflareError(code)), code).toEqual({ status: 'error', reason, code });
   });
 
   it('logs counts and error codes only: never addresses, subjects or bodies', async () => {
@@ -328,12 +418,15 @@ describe('POST /email: sending', () => {
 });
 
 describe('GET /health', () => {
-  it('reports whether the EMAIL binding is configured, alongside the push fields', async () => {
+  it('reports whether the EMAIL binding and EMAIL_KEY are configured, alongside the push fields', async () => {
     let body = await jsonOf(await call('GET', '/health'));
-    expect(body).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: false, email: true });
+    expect(body).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: false, email: true, emailKey: true });
     delete env.EMAIL;
+    delete env.EMAIL_KEY;
     body = await jsonOf(await call('GET', '/health'));
-    expect(body).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: false, email: false });
+    expect(body).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: false, email: false, emailKey: false });
+    // Never the key itself.
+    expect(JSON.stringify(body)).not.toContain(KEY);
   });
 });
 
@@ -387,6 +480,13 @@ describe('helpers', () => {
       ok: true,
       email: { from: FROM, to: 'parent@example.com', subject: 'Hi', html: '<p>Your code is <b>123456</b></p>', text: 'Your code is 123456' },
     });
+  });
+
+  it('emailKey reads the pinned hash, or null', () => {
+    expect(emailKey({ TMA_PUSH: env.TMA_PUSH, EMAIL_KEY: KEY })).toBe(KEY);
+    expect(emailKey({ TMA_PUSH: env.TMA_PUSH, EMAIL_KEY: ` ${KEY.toUpperCase()} ` })).toBe(KEY);
+    expect(emailKey({ TMA_PUSH: env.TMA_PUSH })).toBeNull();
+    expect(emailKey({ TMA_PUSH: env.TMA_PUSH, EMAIL_KEY: SECRET })).toBeNull();
   });
 
   it('mapEmailError keeps a sanitized code and nothing else', () => {

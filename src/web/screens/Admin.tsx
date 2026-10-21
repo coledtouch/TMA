@@ -111,7 +111,9 @@ function Stats({ overview }: { overview: AdminOverview }) {
     { label: 'Activity funds held', value: <Money cents={s.totalFundsCents} /> },
     { label: 'Fund requests', value: overview.pendingRedemptions.length, sub: 'waiting for a decision' },
     { label: 'Phones with notifications', value: s.pushDevices },
-    { label: 'Emails left today', value: s.emailQuotaRemaining },
+    s.emailFrom
+      ? { label: 'Gmail backup emails left today', value: s.emailBackupRemaining ?? 0, sub: `Email is sent from ${s.emailFrom}` }
+      : { label: 'Emails left today', value: s.emailQuotaRemaining },
   ];
   return (
     <section className="section" aria-labelledby="stats-title">

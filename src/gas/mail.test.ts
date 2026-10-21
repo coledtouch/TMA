@@ -4,11 +4,15 @@ import type { MailMessage } from '../server/services';
 import {
   createGasMailer,
   describeWorkerReason,
+  EMAIL_REQUESTS_PER_FETCH_ALL,
   emailVia,
   MAX_WORKER_FAILURES_IN_A_ROW,
   readEmailAnswer,
+  readEmailBatchAnswer,
   replyToAddress,
+  SEND_MANY_TIME_BUDGET_MS,
   WORKER_DAILY_ALLOWANCE,
+  WORKER_DOWN_PAUSE_SECONDS,
   WORKER_PAUSE_CACHE_KEY,
   WORKER_PAUSE_SECONDS,
 } from './mail';
@@ -61,7 +65,15 @@ function workerHandler(r: FakeRequest): FakeReply {
 }
 
 function failWith(reason: string, code?: string): (request: EmailRequest) => FakeReply {
-  return () => ({ code: 200, body: { results: [code ? { status: 'error', reason, code } : { status: 'error', reason }] } });
+  return (request) => ({
+    code: 200,
+    body: { results: request.body.messages.map(() => (code ? { status: 'error', reason, code } : { status: 'error', reason })) },
+  });
+}
+
+/** The Worker's answer when it sent every message in the request. */
+function allOk(request: EmailRequest): FakeReply {
+  return { code: 200, body: { results: request.body.messages.map((_, i) => ({ status: 'ok', messageId: `<m-${i}@mytma.org>` })) } };
 }
 
 const mailer = () => createGasServices().mailer;
@@ -71,7 +83,7 @@ beforeEach(() => {
   gas.properties.setProperty('PUSH_RELAY_SECRET', SECRET);
   registered = SECRET;
   emailRequests = [];
-  emailReply = () => ({ code: 200, body: { results: [{ status: 'ok', messageId: '<m-1@mytma.org>' }] } });
+  emailReply = allOk;
   gas.fetch.handler = workerHandler;
   errorLogs = [];
   vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
@@ -318,6 +330,225 @@ describe('falling back to Gmail', () => {
   });
 });
 
+describe('reasons about one recipient vs. the Worker failing', () => {
+  it('a suppressed, refused or unverified recipient only sends that email with Gmail: the Worker keeps sending the rest', () => {
+    settings();
+    const bad = new Map([
+      ['old1@example.com', ['recipient_suppressed', 'E_RECIPIENT_SUPPRESSED']],
+      ['old2@example.com', ['invalid_message', 'E_VALIDATION_ERROR']],
+      ['old3@example.com', ['delivery_failed', 'E_DELIVERY_FAILED']],
+      ['old4@example.com', ['recipient_not_allowed', 'E_RECIPIENT_NOT_ALLOWED']],
+      ['old5@example.com', ['content_too_large', 'E_CONTENT_TOO_LARGE']],
+    ]);
+    emailReply = (request) => ({
+      code: 200,
+      body: {
+        results: request.body.messages.map((m) => {
+          const hit = bad.get(String(m.to));
+          return hit ? { status: 'error', reason: hit[0], code: hit[1] } : { status: 'ok', messageId: 'm' };
+        }),
+      },
+    });
+    const m = mailer();
+    for (const to of bad.keys()) m.send({ ...CODE_EMAIL, to });
+    expect(m.route().via).toBe('cloudflare');
+    m.send(CODE_EMAIL);
+    expect(m.lastDelivery()).toEqual({ via: 'cloudflare' });
+
+    // The reviewer's case: a few stale addresses at the start of an announcement.
+    const families = [...bad.keys(), ...Array.from({ length: 40 }, (_, i) => `family${i}@example.com`)];
+    const results = m.sendMany(families.map((to) => ({ ...CODE_EMAIL, to })));
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(gas.mail.sent.map((x) => x.to)).toEqual([...bad.keys(), ...bad.keys()]);
+    expect(m.route().via).toBe('cloudflare');
+    expect(gas.cache.entries.has(WORKER_PAUSE_CACHE_KEY)).toBe(false);
+  });
+
+  it(`after ${MAX_WORKER_FAILURES_IN_A_ROW} Worker failures in a row, Gmail sends for ${WORKER_DOWN_PAUSE_SECONDS / 60} minutes, and later runs report Gmail's quota`, () => {
+    settings();
+    emailReply = failWith('send_failed', 'E_INTERNAL_SERVER_ERROR');
+    gas.mail.quota = 80;
+    const m = mailer();
+    for (let i = 0; i < MAX_WORKER_FAILURES_IN_A_ROW; i += 1) m.send({ ...CODE_EMAIL, to: `p${i}@example.com` });
+    expect(m.route()).toEqual({ via: 'gmail', reason: 'this_run', detail: 'send_failed' });
+    expect(gas.cache.entries.get(WORKER_PAUSE_CACHE_KEY)).toMatchObject({ value: 'send_failed', ttl: WORKER_DOWN_PAUSE_SECONDS });
+
+    const next = mailer();
+    expect(next.route()).toEqual({ via: 'gmail', reason: 'paused', detail: 'send_failed' });
+    expect(next.remainingQuota()).toBe(80 - MAX_WORKER_FAILURES_IN_A_ROW);
+    gas.cache.nowMs += WORKER_DOWN_PAUSE_SECONDS * 1000;
+    expect(mailer().route().via).toBe('cloudflare');
+  });
+
+  it('pauses for 10 minutes when the Worker has no email key, or another one', () => {
+    settings();
+    emailReply = () => ({ code: 503, body: { error: 'email_key_missing' } });
+    const m = mailer();
+    m.send(CODE_EMAIL);
+    expect(m.lastDelivery()).toEqual({ via: 'gmail', workerReason: 'email_key_missing' });
+    expect(gas.cache.entries.get(WORKER_PAUSE_CACHE_KEY)).toMatchObject({ value: 'email_key_missing', ttl: WORKER_PAUSE_SECONDS });
+
+    gas.cache.entries.clear();
+    emailReply = () => ({ code: 403, body: { error: 'email_key_mismatch' } });
+    const other = mailer();
+    other.send(CODE_EMAIL);
+    expect(other.lastDelivery()).toEqual({ via: 'gmail', workerReason: 'email_key_mismatch' });
+    expect(gas.cache.entries.get(WORKER_PAUSE_CACHE_KEY)).toMatchObject({ value: 'email_key_mismatch', ttl: WORKER_PAUSE_SECONDS });
+    // 401 handling didn't kick in: the sheet is linked, it just isn't the one allowed to send email.
+    expect(gas.fetch.requests.map((r) => r.url)).toEqual([`${WORKER}/email`, `${WORKER}/email`]);
+  });
+});
+
+describe('sendMany (notification batches)', () => {
+  const families = (n: number) => Array.from({ length: n }, (_, i): MailMessage => ({ ...CODE_EMAIL, to: `family${i}@example.com` }));
+
+  it('sends 10 emails per request and the requests in parallel, each email to one family, with Reply-To', () => {
+    settings();
+    const m = mailer();
+    expect(m.remainingQuota()).toBe(WORKER_DAILY_ALLOWANCE);
+    const results = m.sendMany(families(73));
+    expect(results).toHaveLength(73);
+    expect(results.every((r) => r.ok)).toBe(true);
+    // 8 requests: one fetchAll of 5, then one of 3.
+    expect(gas.fetch.batches).toEqual([5, 3]);
+    expect(emailRequests.map((r) => r.body.messages.length)).toEqual([10, 10, 10, 10, 10, 10, 10, 3]);
+    expect(emailRequests.every((r) => r.auth === `Bearer ${SECRET}`)).toBe(true);
+    const sent = emailRequests.flatMap((r) => r.body.messages);
+    expect(sent.map((x) => x.to)).toEqual(families(73).map((x) => x.to));
+    expect(sent.every((x) => x.replyTo === SUPPORT && Object.keys(x).sort().join() === 'html,replyTo,subject,text,to')).toBe(true);
+    expect(gas.mail.sent).toHaveLength(0);
+  });
+
+  it('keeps each request under the Worker body cap by splitting big emails into smaller requests', () => {
+    settings();
+    const big = families(7).map((x) => ({ ...x, html: `<p>${'é'.repeat(30_000)}</p>` })); // ~60 KB each
+    const results = mailer().sendMany(big);
+    expect(results.every((r) => r.ok)).toBe(true);
+    const sizes = gas.fetch.requests.map((r) => Buffer.byteLength(String(r.payload), 'utf8'));
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(200 * 1024);
+    expect(emailRequests.map((r) => r.body.messages.length)).toEqual([3, 3, 1]);
+  });
+
+  it('on 401 links this sheet again once and retries the batch', () => {
+    settings();
+    registered = null;
+    const results = mailer().sendMany(families(12));
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(gas.fetch.requests.map((r) => r.url.slice(WORKER.length))).toEqual(['/email', '/email', '/register', '/email', '/email']);
+    expect(gas.mail.sent).toHaveLength(0);
+  });
+
+  it('sends a request that failed (HTTP 500, unreachable) with Gmail, and stops asking the Worker after repeated failures', () => {
+    settings();
+    emailReply = () => ({ code: 500, body: { error: 'internal' } });
+    const m = mailer();
+    expect(m.remainingQuota()).toBe(WORKER_DAILY_ALLOWANCE);
+    const results = m.sendMany(families(80));
+    expect(results.every((r) => r.ok)).toBe(true);
+    // One fetchAll of 5 failing requests trips the breaker; the other 30 go straight to Gmail.
+    expect(gas.fetch.batches).toEqual([5]);
+    expect(gas.mail.sent).toHaveLength(80);
+    expect(m.route()).toEqual({ via: 'gmail', reason: 'this_run', detail: 'http_error' });
+    const failures = errorLogs.filter((line) => String(line[0]).includes('Worker email failed'));
+    expect(failures[0][1]).toEqual({ reason: 'http_error', httpCode: 500, messages: 10 });
+
+    gas.cache.entries.clear();
+    gas.mail.sent.length = 0;
+    gas.mail.quota = 100;
+    gas.fetch.handler = () => {
+      throw new Error(`DNS error ${WORKER}`);
+    };
+    expect(mailer().sendMany(families(3)).every((r) => r.ok)).toBe(true);
+    expect(gas.mail.sent).toHaveLength(3);
+    expect(JSON.stringify(errorLogs)).not.toContain('DNS error');
+  });
+
+  it('a 400 or 413 for a request is about its content: Gmail sends those emails, and the Worker keeps the rest', () => {
+    settings();
+    let n = 0;
+    emailReply = (request) => (n++ < 4 ? { code: 413, body: { error: 'too_large' } } : allOk(request));
+    const m = mailer();
+    const results = m.sendMany(families(60));
+    expect(results.every((r) => r.ok)).toBe(true);
+    expect(gas.mail.sent).toHaveLength(40);
+    expect(m.route().via).toBe('cloudflare');
+  });
+
+  it("its Gmail fallback never uses the day's last emails kept for sign-in codes, across runs (Worker down)", () => {
+    // The reviewer's case: the Worker is unreachable, Gmail has exactly the reserve left, and
+    // several small notification runs (reminder ticks, admin alerts) each plan a send.
+    settings();
+    gas.fetch.handler = () => {
+      throw new Error('Address unavailable');
+    };
+    gas.mail.quota = SIGN_IN_EMAIL_RESERVE;
+    let sent = 0;
+    for (let run = 0; run < 5; run += 1) {
+      const m = mailer();
+      if (m.remainingQuota() - SIGN_IN_EMAIL_RESERVE <= 0) continue; // what deliver() does
+      const [result] = m.sendMany([{ ...CODE_EMAIL, to: `family${run}@example.com` }]);
+      if (result.ok) sent += 1;
+      else expect(result.error).toMatch(/kept for sign-in codes/);
+    }
+    expect(sent).toBe(0);
+    expect(gas.mail.quota).toBe(SIGN_IN_EMAIL_RESERVE);
+
+    // A sign-in code (send()) may still use the reserve: that's what it is for.
+    mailer().send(CODE_EMAIL);
+    expect(gas.mail.quota).toBe(SIGN_IN_EMAIL_RESERVE - 1);
+  });
+
+  it('within one batch, Gmail stops at the reserve and says why', () => {
+    settings();
+    emailReply = failWith('recipient_suppressed', 'E_RECIPIENT_SUPPRESSED');
+    gas.mail.quota = SIGN_IN_EMAIL_RESERVE + 2;
+    const results = mailer().sendMany(families(4));
+    expect(results.map((r) => r.ok)).toEqual([true, true, false, false]);
+    expect(results[2]).toEqual({ ok: false, error: expect.stringMatching(/kept for sign-in codes/) });
+    expect(gas.mail.quota).toBe(SIGN_IN_EMAIL_RESERVE);
+  });
+
+  it('uses Gmail (with the reserve) when EMAIL_VIA is gmail or the Worker is paused, without asking the Worker', () => {
+    settings([['EMAIL_VIA', 'gmail']]);
+    gas.mail.quota = SIGN_IN_EMAIL_RESERVE + 3;
+    const results = mailer().sendMany(families(5));
+    expect(results.map((r) => r.ok)).toEqual([true, true, true, false, false]);
+    expect(gas.fetch.requests).toHaveLength(0);
+    expect(gas.mail.sent[0]).toMatchObject({ name: 'Timberlane Music Association', replyTo: SUPPORT });
+  });
+
+  it('reports a bad recipient as a result and still sends the others', () => {
+    settings();
+    const results = mailer().sendMany([{ ...CODE_EMAIL, to: 'nobody' }, CODE_EMAIL]);
+    expect(results).toEqual([{ ok: false, error: 'Invalid email recipient' }, { ok: true }]);
+    expect(emailRequests[0].body.messages.map((x) => x.to)).toEqual(['parent@example.com']);
+  });
+
+  it('stops starting new sends before the Apps Script time limit', () => {
+    settings();
+    let now = Date.parse('2026-10-21T12:00:00Z');
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    emailReply = (request) => {
+      // Each round of parallel requests takes over 2 minutes.
+      if (emailRequests.length % EMAIL_REQUESTS_PER_FETCH_ALL === 1) now += SEND_MANY_TIME_BUDGET_MS / 2 + 1;
+      return allOk(request);
+    };
+    const results = mailer().sendMany(families(120));
+    // Two rounds of 50 went out; the last 20 were never started.
+    expect(results.filter((r) => r.ok)).toHaveLength(100);
+    expect(results.slice(100).every((r) => !r.ok && /time limit/.test(r.error))).toBe(true);
+    expect(JSON.stringify(errorLogs)).toContain('"notSent":20');
+  });
+
+  it('relayStatus: the Worker sender and the Gmail backup quota, or null while Gmail sends anyway', () => {
+    settings();
+    gas.mail.quota = 64;
+    expect(mailer().relayStatus()).toEqual({ from: 'noreply@mytma.org', backupRemaining: 64 });
+    gas.cache.put(WORKER_PAUSE_CACHE_KEY, 'sender_not_verified', 600);
+    expect(mailer().relayStatus()).toBeNull();
+  });
+});
+
 describe('Gmail without the Worker', () => {
   it('EMAIL_VIA = gmail sends with MailApp, reports its quota and never calls the Worker', () => {
     settings([['EMAIL_VIA', ' Gmail ']]);
@@ -395,18 +626,41 @@ describe('helpers', () => {
     expect(readEmailAnswer(404, '')).toEqual({ ok: false, reason: 'no_email_endpoint', httpCode: 404 });
     expect(readEmailAnswer(503, '{"error":"email_not_configured"}')).toEqual({ ok: false, reason: 'email_not_configured', httpCode: 503 });
     expect(readEmailAnswer(503, '{"error":"other"}')).toEqual({ ok: false, reason: 'http_error', httpCode: 503 });
-    expect(readEmailAnswer(413, '')).toEqual({ ok: false, reason: 'http_error', httpCode: 413 });
+    // About the request's content, not the Worker:
+    expect(readEmailAnswer(413, '{"error":"too_large"}')).toEqual({ ok: false, reason: 'too_large', httpCode: 413 });
+    expect(readEmailAnswer(400, '{"error":"bad_request"}')).toEqual({ ok: false, reason: 'bad_request', httpCode: 400 });
+    // The pinned email key (workers/push EMAIL_KEY):
+    expect(readEmailAnswer(503, '{"error":"email_key_missing"}')).toEqual({ ok: false, reason: 'email_key_missing', httpCode: 503 });
+    expect(readEmailAnswer(403, '{"error":"email_key_mismatch"}')).toEqual({ ok: false, reason: 'email_key_mismatch', httpCode: 403 });
+    expect(readEmailAnswer(403, '{"error":"other"}')).toEqual({ ok: false, reason: 'http_error', httpCode: 403 });
+  });
+
+  it('readEmailBatchAnswer wants one result per message', () => {
+    const two = JSON.stringify({ results: [{ status: 'ok', messageId: 'a' }, { status: 'error', reason: 'recipient_suppressed', code: 'E_RECIPIENT_SUPPRESSED' }] });
+    expect(readEmailBatchAnswer(200, two, 2)).toEqual({
+      kind: 'results',
+      outcomes: [
+        { ok: true, messageId: 'a' },
+        { ok: false, reason: 'recipient_suppressed', code: 'E_RECIPIENT_SUPPRESSED' },
+      ],
+    });
+    expect(readEmailBatchAnswer(200, two, 3)).toEqual({ kind: 'failed', outcome: { ok: false, reason: 'bad_answer', httpCode: 200 } });
+    expect(readEmailBatchAnswer(200, JSON.stringify({ results: [null, {}] }), 2)).toMatchObject({ kind: 'failed' });
+    expect(readEmailBatchAnswer(502, '', 10)).toEqual({ kind: 'failed', outcome: { ok: false, reason: 'http_error', httpCode: 502 } });
   });
 
   it('describeWorkerReason explains the common reasons and sanitizes unknown ones', () => {
     expect(describeWorkerReason('sender_not_verified')).toContain("mytma.org isn't verified");
     expect(describeWorkerReason('not_linked')).toContain('Set up / repair tabs');
+    expect(describeWorkerReason('email_key_missing')).toContain('EMAIL_KEY');
+    expect(describeWorkerReason('email_key_mismatch')).toContain('TMA App → Status');
+    expect(describeWorkerReason('recipient_not_allowed')).toContain('A and B');
     expect(describeWorkerReason('weird<script>')).toBe("the push Worker couldn't send it (weirdscript)");
   });
 
   it('createGasMailer works with any relay (e.g. one that is not configured)', () => {
     const m = createGasMailer({
-      relay: { baseUrl: () => null, enabled: () => false, authorizedPost: () => ({ code: 500, text: '' }) },
+      relay: { baseUrl: () => null, enabled: () => false, authorizedPost: () => ({ code: 500, text: '' }), authorizedPostAll: () => [] },
       cache: { get: () => null, put: () => undefined, remove: () => undefined },
       logger: { info: () => undefined, error: () => undefined },
       via: () => 'cloudflare',

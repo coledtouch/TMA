@@ -12,7 +12,7 @@ import type { FamilyRec } from './data';
 import { renderEmail } from './email';
 import type { Notice } from './messages';
 import { audienceMatches, prefsFor, TOPICS } from './prefs';
-import type { PushResult } from './services';
+import type { MailMessage, MailResult, PushResult } from './services';
 import { errorMessage, isEmail, normEmail, truncate, unique } from './util';
 
 export interface DeliverOptions {
@@ -104,25 +104,16 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
       link: notice.link,
     });
     const subject = oneLine(notice.title, 150);
-    for (const to of mailTo) {
-      if (quota <= 0) {
-        quotaSkipped++;
-        continue;
-      }
-      const sent = safely(
-        ctx,
-        `email to ${to}`,
-        () => {
-          ctx.s.mailer.send({ to, subject, html, text });
-          return true;
-        },
-        false,
-      );
-      if (sent) {
-        counts.email++;
-        quota--;
-      }
+    // Up to `quota` recipients at a time; a failed email doesn't use up quota, so the next round may take more.
+    let next = 0;
+    while (next < mailTo.length && quota > 0) {
+      const batch = mailTo.slice(next, next + quota);
+      next += batch.length;
+      const sent = sendEmails(ctx, batch, { subject, html, text });
+      counts.email += sent;
+      quota -= sent;
     }
+    quotaSkipped = mailTo.length - next;
   }
 
   if (smsTo.length > 0) {
@@ -147,6 +138,42 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
       : '';
   ctx.log('notify', `${notice.topic}: ${notice.title} → push ${counts.push}, email ${counts.email}, sms ${counts.sms}${skipped}`);
   return counts;
+}
+
+/**
+ * Email one notice to each address: in one batch when the mailer can
+ * (Apps Script: several per request to the push Worker, requests in
+ * parallel), else one by one. Failures are logged per recipient. Returns how
+ * many were sent.
+ */
+function sendEmails(ctx: Ctx, recipients: string[], content: Omit<MailMessage, 'to'>): number {
+  const mailer = ctx.s.mailer;
+  if (!mailer.sendMany) {
+    let sent = 0;
+    for (const to of recipients) {
+      const ok = safely(
+        ctx,
+        `email to ${to}`,
+        () => {
+          mailer.send({ to, ...content });
+          return true;
+        },
+        false,
+      );
+      if (ok) sent++;
+    }
+    return sent;
+  }
+  const messages = recipients.map((to) => ({ to, ...content }));
+  const results = safely<MailResult[] | null>(ctx, 'mailer.sendMany', () => mailer.sendMany!(messages), null);
+  if (!results) return 0;
+  let sent = 0;
+  recipients.forEach((to, i) => {
+    const result = results[i];
+    if (result?.ok) sent++;
+    else ctx.s.logger.error(`email to ${to} failed`, result ? result.error : 'no result');
+  });
+  return sent;
 }
 
 /** Send one push batch; remove tokens the push service reports as invalid. Returns delivered count. */

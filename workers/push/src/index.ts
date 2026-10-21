@@ -5,13 +5,14 @@
 // Worker to deliver notifications and emails. The Worker only stores its VAPID
 // key pair and the SHA-256 of the shared relay secret (both in KV). See README.md.
 //
-//   GET  /health            {"ok":true,"name":"tma-push","registered":bool,"hasKeys":bool,"email":bool}
+//   GET  /health            {"ok":true,"name":"tma-push","registered":bool,"hasKeys":bool,"email":bool,"emailKey":bool}
 //   GET  /vapid-public-key  {"publicKey":"<b64url>"}   (creates the key pair on first use)
-//   POST /register          {"secret":"..."}            trust on first use
+//   POST /register          {"secret":"..."}            trust on first use (push only)
 //   POST /send              Authorization: Bearer <secret>, {"messages":[...]} (max 10)
 //   POST /email             Authorization: Bearer <secret>, {"messages":[{to, subject, html?, text?, replyTo?}]} (1 to 10)
+//                           only for the secret whose SHA-256 is the EMAIL_KEY Worker secret
 import { concat, constantTimeEqual, sha256Hex } from './b64';
-import { emailSender, hasEmailBinding, MAX_EMAIL_MESSAGES, sendEmails, summarizeEmailResults } from './email';
+import { emailKey, emailSender, hasEmailBinding, MAX_EMAIL_MESSAGES, sendEmails, summarizeEmailResults } from './email';
 import { KV_RECHECK_MS, KV_SECRET, kvGet, kvPut, kvRead, type Env } from './env';
 import { DEFAULT_SUBJECT, getVapidKeys, hasVapidKeys, loadVapidKeys } from './vapid';
 import { sendAll, type SendResult } from './webpush';
@@ -99,18 +100,30 @@ async function storedSecretMatches(env: Env, hash: string): Promise<'match' | 'm
   return constantTimeEqual(stored, hash) ? 'match' : 'mismatch';
 }
 
-/** The request carries `Authorization: Bearer <secret>` with the registered relay secret (/send and /email). */
-async function isAuthorized(request: Request, env: Env): Promise<boolean> {
+/** The secret in `Authorization: Bearer <secret>`, when it has a usable length. */
+function bearerSecret(request: Request): string | null {
   const auth = request.headers.get('Authorization') ?? '';
-  const match = /^Bearer (.+)$/.exec(auth);
-  const secret = match?.[1];
-  if (!isValidSecret(secret)) return false;
+  const secret = /^Bearer (.+)$/.exec(auth)?.[1];
+  return isValidSecret(secret) ? secret : null;
+}
+
+/** The request carries `Authorization: Bearer <secret>` with the registered relay secret (/send). */
+async function isAuthorized(request: Request, env: Env): Promise<boolean> {
+  const secret = bearerSecret(request);
+  if (!secret) return false;
   return (await storedSecretMatches(env, await sha256Hex(secret))) === 'match';
 }
 
 async function handleHealth(env: Env): Promise<Response> {
   const [secret, hasKeys] = await Promise.all([kvGet(env, KV_SECRET), hasVapidKeys(env)]);
-  return json(200, { ok: true, name: NAME, registered: secret !== null, hasKeys, email: hasEmailBinding(env) });
+  return json(200, {
+    ok: true,
+    name: NAME,
+    registered: secret !== null,
+    hasKeys,
+    email: hasEmailBinding(env),
+    emailKey: emailKey(env) !== null,
+  });
 }
 
 async function handlePublicKey(env: Env): Promise<Response> {
@@ -174,12 +187,31 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
  * POST /email: one recipient per message, sender fixed by wrangler.toml.
  * Per-message problems (a bad address, Cloudflare refusing it) are results,
  * not HTTP errors, so Apps Script can send just that message another way.
+ *
+ * Only the relay secret pinned by the EMAIL_KEY Worker secret may send.
+ * /register is trust on first use, so whoever links an unregistered Worker
+ * (first setup, a key rotation, lost KV) can use /send; without this pin they
+ * could also send any mail to anyone as noreply@mytma.org. The registered
+ * secret still gets told what is missing (503/403) so the sheet can explain.
  */
 async function handleEmail(request: Request, env: Env): Promise<Response> {
-  if (!(await isAuthorized(request, env))) return UNAUTHORIZED();
+  const secret = bearerSecret(request);
+  if (!secret) return UNAUTHORIZED();
+  const hash = await sha256Hex(secret);
+  const pinned = emailKey(env);
+  const allowed = pinned !== null && constantTimeEqual(pinned, hash);
+  if (!allowed && (await storedSecretMatches(env, hash)) !== 'match') return UNAUTHORIZED();
   if (!hasEmailBinding(env)) {
     console.log('email not_configured');
     return json(503, { error: 'email_not_configured' });
+  }
+  if (!pinned) {
+    console.log('email key_missing');
+    return json(503, { error: 'email_key_missing' });
+  }
+  if (!allowed) {
+    console.log('email key_mismatch');
+    return json(403, { error: 'email_key_mismatch' });
   }
   const body = await readJson(request, MAX_BODY_BYTES);
   if (body === 'too_large') return json(413, { error: 'too_large' });

@@ -320,7 +320,12 @@ export interface AdminStats {
   students: number;
   totalFundsCents: Cents;
   pushDevices: number;
+  /** Emails the app may still send today (with the push Worker sending, its generous allowance). */
   emailQuotaRemaining: number;
+  /** Set when email goes out through the push Worker: its sender, e.g. noreply@mytma.org. */
+  emailFrom?: string;
+  /** With emailFrom: emails the Gmail backup may still send today. */
+  emailBackupRemaining?: number;
 }
 
 export interface AdminOverview {

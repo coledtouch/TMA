@@ -2125,25 +2125,15 @@ var TMA = (() => {
         link: notice.link
       });
       const subject = oneLine(notice.title, 150);
-      for (const to of mailTo) {
-        if (quota <= 0) {
-          quotaSkipped++;
-          continue;
-        }
-        const sent = safely(
-          ctx,
-          `email to ${to}`,
-          () => {
-            ctx.s.mailer.send({ to, subject, html, text: text2 });
-            return true;
-          },
-          false
-        );
-        if (sent) {
-          counts.email++;
-          quota--;
-        }
+      let next = 0;
+      while (next < mailTo.length && quota > 0) {
+        const batch = mailTo.slice(next, next + quota);
+        next += batch.length;
+        const sent = sendEmails(ctx, batch, { subject, html, text: text2 });
+        counts.email += sent;
+        quota -= sent;
       }
+      quotaSkipped = mailTo.length - next;
     }
     if (smsTo.length > 0) {
       const message = oneLine(`TMA: ${notice.title} – ${(_a = notice.pushBody) != null ? _a : notice.body}`, 320);
@@ -2163,6 +2153,35 @@ var TMA = (() => {
     const skipped = quotaSkipped > 0 ? ` (${quotaSkipped} email skipped: daily quota used up; the last ${SIGN_IN_EMAIL_RESERVE} are kept for sign-in codes)` : "";
     ctx.log("notify", `${notice.topic}: ${notice.title} → push ${counts.push}, email ${counts.email}, sms ${counts.sms}${skipped}`);
     return counts;
+  }
+  function sendEmails(ctx, recipients, content) {
+    const mailer = ctx.s.mailer;
+    if (!mailer.sendMany) {
+      let sent2 = 0;
+      for (const to of recipients) {
+        const ok = safely(
+          ctx,
+          `email to ${to}`,
+          () => {
+            mailer.send({ to, ...content });
+            return true;
+          },
+          false
+        );
+        if (ok) sent2++;
+      }
+      return sent2;
+    }
+    const messages = recipients.map((to) => ({ to, ...content }));
+    const results = safely(ctx, "mailer.sendMany", () => mailer.sendMany(messages), null);
+    if (!results) return 0;
+    let sent = 0;
+    recipients.forEach((to, i) => {
+      const result = results[i];
+      if (result == null ? void 0 : result.ok) sent++;
+      else ctx.s.logger.error(`email to ${to} failed`, result ? result.error : "no result");
+    });
+    return sent;
   }
   function sendPush(ctx, tokens, notice) {
     var _a;
@@ -2325,6 +2344,7 @@ var TMA = (() => {
     return out.filter((c) => c.score >= 0.6).sort((a, b) => b.score - a.score || b.balanceCents - a.balanceCents).slice(0, MAX_CANDIDATES);
   }
   function adminOverview(ctx) {
+    var _a, _b, _c;
     const m = ctx.m;
     const books = m.books();
     const families = m.families();
@@ -2334,21 +2354,23 @@ var TMA = (() => {
     const known = new Set(m.students().map((s) => idKey(s.id)));
     for (const key of books.ledgerStudentKeys()) if (!known.has(key)) totalFunds += books.balance(key);
     let emailQuota = 0;
+    let emailRelay = null;
     try {
       emailQuota = ctx.s.mailer.remainingQuota();
+      emailRelay = (_c = (_b = (_a = ctx.s.mailer).relayStatus) == null ? void 0 : _b.call(_a)) != null ? _c : null;
     } catch (err) {
       ctx.s.logger.error("remainingQuota failed", err);
     }
     const pendingRedemptions = m.redemptions().filter((r) => r.status === "Pending").sort((a, b) => a.requestedAt === b.requestedAt ? a.row - b.row : a.requestedAt < b.requestedAt ? -1 : 1).slice(0, MAX_PENDING_REDEMPTIONS).map((r) => {
-      var _a, _b, _c;
+      var _a2, _b2, _c2;
       const student2 = m.studentById(r.studentId);
       const activity = m.activityById(r.activityId);
       return {
         ...toRedemption(r),
         studentName: student2 ? studentName(student2) : r.studentId,
-        activityName: (_a = activity == null ? void 0 : activity.name) != null ? _a : r.activityId,
+        activityName: (_a2 = activity == null ? void 0 : activity.name) != null ? _a2 : r.activityId,
         availableCents: Math.max(0, books.balance(r.studentId) - (books.pending(r.studentId) - r.amountCents)),
-        remainingCents: (_c = (_b = books.account(r.studentId, r.activityId)) == null ? void 0 : _b.remainingCents) != null ? _c : 0
+        remainingCents: (_c2 = (_b2 = books.account(r.studentId, r.activityId)) == null ? void 0 : _b2.remainingCents) != null ? _c2 : 0
       };
     });
     const pendingHouseholds = [];
@@ -2372,7 +2394,9 @@ var TMA = (() => {
         students: students.length,
         totalFundsCents: totalFunds,
         pushDevices: m.devices().length,
-        emailQuotaRemaining: emailQuota
+        emailQuotaRemaining: emailQuota,
+        // The Worker's allowance says nothing useful; what matters is how much Gmail can still cover.
+        ...emailRelay ? { emailFrom: emailRelay.from, emailBackupRemaining: emailRelay.backupRemaining } : {}
       },
       pendingRedemptions,
       pendingHouseholds,
@@ -4133,24 +4157,425 @@ var TMA = (() => {
     return text2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // src/gas/push-relay.ts
+  var MESSAGES_PER_REQUEST = 5;
+  var REQUESTS_PER_FETCH_ALL = 20;
+  var MAX_PAYLOAD_BYTES = 3e3;
+  var PUSH_TTL_SECONDS = 86400;
+  var MIN_SECRET_CHARS = 32;
+  var MAX_SECRET_CHARS = 256;
+  var PUBLIC_KEY_RETRY_SECONDS = 300;
+  var PUBLIC_KEY_FAILED_CACHE_KEY = "push-relay:public-key-failed";
+  var TOPIC_MAX_CHARS = 32;
+  var ALREADY_REGISTERED_MESSAGE = "The push Worker is already linked to a different Apps Script secret. See workers/push/README.md (rotate keys).";
+  function normalizeRelayUrl(value) {
+    const url = String(value != null ? value : "").trim().replace(/\/+$/, "");
+    return /^https:\/\/[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?(?:\/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*)?$/.test(url) ? url : null;
+  }
+  function utf8Length(text2) {
+    let bytes = 0;
+    for (let i = 0; i < text2.length; i += 1) {
+      const c = text2.charCodeAt(i);
+      if (c < 128) bytes += 1;
+      else if (c < 2048) bytes += 2;
+      else if (c >= 55296 && c <= 56319 && i + 1 < text2.length && (text2.charCodeAt(i + 1) & 64512) === 56320) {
+        bytes += 4;
+        i += 1;
+      } else bytes += 3;
+    }
+    return bytes;
+  }
+  function cut(text2, n) {
+    const head = text2.slice(0, n);
+    const last = head.charCodeAt(head.length - 1);
+    return last >= 55296 && last <= 56319 ? head.slice(0, -1) : head;
+  }
+  function buildPayload(message) {
+    var _a, _b, _c;
+    const fields = {
+      title: clip(String((_a = message.title) != null ? _a : ""), 120),
+      url: message.url ? clip(String(message.url), 200) : void 0,
+      tag: message.tag ? clip(String(message.tag), 64) : void 0,
+      topic: clip(String((_b = message.topic) != null ? _b : ""), 32)
+    };
+    const render = (body2) => JSON.stringify({ title: fields.title, body: body2, url: fields.url, tag: fields.tag, topic: fields.topic });
+    const body = String((_c = message.body) != null ? _c : "");
+    const full = render(body);
+    if (utf8Length(full) <= MAX_PAYLOAD_BYTES) return full;
+    let lo = 0;
+    let hi = body.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (utf8Length(render(`${cut(body, mid)}…`)) <= MAX_PAYLOAD_BYTES) lo = mid;
+      else hi = mid - 1;
+    }
+    return render(lo > 0 ? `${cut(body, lo)}…` : "");
+  }
+  function pushTopic(tag) {
+    if (!tag) return void 0;
+    const topic = String(tag).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, TOPIC_MAX_CHARS);
+    return topic === "" ? void 0 : topic;
+  }
+  function pushUrgency(topic) {
+    return topic === "reminders" || topic === "announcements" ? "normal" : "high";
+  }
+  function readSendResponse(code, text2, size) {
+    const body = parseJson(text2);
+    if (code === 401) return { kind: "unauthorized" };
+    if (code === 503 && pick(body, "error") === "no_keys") return { kind: "no_keys" };
+    if (code !== 200) return { kind: "failed", httpCode: code };
+    const entries = pick(body, "results");
+    if (!Array.isArray(entries) || entries.length !== size) return { kind: "failed", httpCode: code };
+    const reasons = entries.map((e) => {
+      const reason = pick(e, "reason");
+      return typeof reason === "string" ? clip(reason.replace(/[^a-z0-9_]/gi, ""), 40) : "";
+    });
+    if (size > 0 && reasons.every((r) => r === "no_keys")) return { kind: "no_keys" };
+    const results = entries.map((e) => {
+      const status = isRecord2(e) ? e.status : void 0;
+      return status === "ok" ? "ok" : status === "invalid" ? "invalid" : "error";
+    });
+    return { kind: "results", results, reasons };
+  }
+  function errorText(error, secret) {
+    const text2 = clip(error instanceof Error ? error.message : String(error), 200);
+    return secret ? text2.split(secret).join("[secret]") : text2;
+  }
+  function createPushRelaySender(deps) {
+    const { secrets, cache, logger } = deps;
+    let secretMemo = null;
+    let publicKeyMemo = null;
+    let reRegistered = false;
+    let keysRequested = false;
+    const baseUrl = () => normalizeRelayUrl(deps.relayUrl());
+    function relaySecret() {
+      if (secretMemo === null) {
+        const value = secrets.get("PUSH_RELAY_SECRET");
+        if (value && value.length >= MIN_SECRET_CHARS && value.length <= MAX_SECRET_CHARS && !/[\u0000-\u001f\u007f]/.test(value)) {
+          secretMemo = value;
+        }
+      }
+      return secretMemo;
+    }
+    function requireBase() {
+      const base = baseUrl();
+      if (!base) throw new Error("Settings PUSH_RELAY_URL is not an https:// address.");
+      return base;
+    }
+    function fetchOrExplain(url, params) {
+      try {
+        return UrlFetchApp.fetch(url, { ...params, muteHttpExceptions: true });
+      } catch (error) {
+        throw new Error(`Could not reach the push Worker (${errorText(error, secretMemo)}).`);
+      }
+    }
+    function register() {
+      const base = requireBase();
+      const secret = relaySecret();
+      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
+      const res = fetchOrExplain(`${base}/register`, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({ secret })
+      });
+      const code = res.getResponseCode();
+      const body = parseJson(res.getContentText());
+      if (code === 200 && pick(body, "registered") === true) return { first: pick(body, "first") === true };
+      if (code === 409) throw new Error(ALREADY_REGISTERED_MESSAGE);
+      throw new Error(`The push Worker answered HTTP ${code} when linking this sheet.`);
+    }
+    function refreshPublicKey() {
+      const base = requireBase();
+      const res = fetchOrExplain(`${base}/vapid-public-key`, { method: "get", headers: { Accept: "application/json" } });
+      const code = res.getResponseCode();
+      if (code !== 200) throw new Error(`The push Worker answered HTTP ${code} for its public key.`);
+      const key = canonicalP256Key(pick(parseJson(res.getContentText()), "publicKey"));
+      if (!key) throw new Error("The push Worker sent a public key that is not a P-256 key.");
+      secrets.set("PUSH_PUBLIC_KEY", key);
+      publicKeyMemo = key;
+      cache.remove(PUBLIC_KEY_FAILED_CACHE_KEY);
+      return key;
+    }
+    function publicKey() {
+      if (publicKeyMemo) return publicKeyMemo;
+      const stored = canonicalP256Key(secrets.get("PUSH_PUBLIC_KEY"));
+      if (stored) {
+        publicKeyMemo = stored;
+        return stored;
+      }
+      if (!baseUrl() || cache.get(PUBLIC_KEY_FAILED_CACHE_KEY)) return "";
+      try {
+        return refreshPublicKey();
+      } catch (error) {
+        cache.put(PUBLIC_KEY_FAILED_CACHE_KEY, "1", PUBLIC_KEY_RETRY_SECONDS);
+        logger.error("Could not get the push public key", { message: errorText(error, secretMemo) });
+        return "";
+      }
+    }
+    function health() {
+      const down = { reachable: false, registered: false, hasKeys: false, email: false, emailKey: false };
+      const base = baseUrl();
+      if (!base) return { ...down, error: "PUSH_RELAY_URL is not an https:// address" };
+      try {
+        const res = UrlFetchApp.fetch(`${base}/health`, { method: "get", muteHttpExceptions: true });
+        const code = res.getResponseCode();
+        const body = parseJson(res.getContentText());
+        if (code !== 200 || pick(body, "ok") !== true) return { ...down, httpCode: code };
+        return {
+          reachable: true,
+          registered: pick(body, "registered") === true,
+          hasKeys: pick(body, "hasKeys") === true,
+          email: pick(body, "email") === true,
+          emailKey: pick(body, "emailKey") === true
+        };
+      } catch (error) {
+        return { ...down, error: errorText(error, secretMemo) };
+      }
+    }
+    function relinkOnce(secret) {
+      if (reRegistered) return false;
+      reRegistered = true;
+      try {
+        register();
+        return true;
+      } catch (error) {
+        logger.error("Push Worker rejected this sheet and linking again failed", { message: errorText(error, secret) });
+        return false;
+      }
+    }
+    function authorizedRequest(base, path, secret, body) {
+      return {
+        url: `${base}${path}`,
+        method: "post",
+        contentType: "application/json",
+        headers: { Authorization: `Bearer ${secret}` },
+        payload: JSON.stringify(body),
+        muteHttpExceptions: true
+      };
+    }
+    function requireSecret2() {
+      const secret = relaySecret();
+      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
+      return secret;
+    }
+    function authorizedPost(path, body) {
+      const base = requireBase();
+      const secret = requireSecret2();
+      const once = () => {
+        const { url, ...params } = authorizedRequest(base, path, secret, body);
+        const res = fetchOrExplain(url, params);
+        return { code: res.getResponseCode(), text: res.getContentText() };
+      };
+      const answer = once();
+      if (answer.code !== 401 || !relinkOnce(secret)) return answer;
+      return once();
+    }
+    function authorizedPostAll(path, bodies) {
+      const base = requireBase();
+      const secret = requireSecret2();
+      const all = (items) => {
+        if (items.length === 0) return [];
+        let responses;
+        try {
+          responses = UrlFetchApp.fetchAll(items.map((body) => authorizedRequest(base, path, secret, body)));
+        } catch (error) {
+          throw new Error(`Could not reach the push Worker (${errorText(error, secret)}).`);
+        }
+        return items.map((_, i) => {
+          const res = responses[i];
+          return res ? { code: res.getResponseCode(), text: res.getContentText() } : { code: 0, text: "" };
+        });
+      };
+      const answers = all(bodies);
+      const rejected = answers.flatMap((a, i) => a.code === 401 ? [i] : []);
+      if (rejected.length === 0 || !relinkOnce(secret)) return answers;
+      try {
+        const again = all(rejected.map((i) => bodies[i]));
+        rejected.forEach((i, k) => {
+          answers[i] = again[k];
+        });
+      } catch (error) {
+        logger.error("Push Worker unreachable on retry", { message: errorText(error, secret) });
+      }
+      return answers;
+    }
+    function emailKey() {
+      const secret = relaySecret();
+      if (!secret) return null;
+      return bytesToHex(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, secret, Utilities.Charset.UTF_8));
+    }
+    function post(base, secret, chunks) {
+      const outcomes = [];
+      for (let start = 0; start < chunks.length; start += REQUESTS_PER_FETCH_ALL) {
+        const group = chunks.slice(start, start + REQUESTS_PER_FETCH_ALL);
+        try {
+          const responses = UrlFetchApp.fetchAll(
+            group.map((chunk) => ({
+              url: `${base}/send`,
+              method: "post",
+              contentType: "application/json",
+              headers: { Authorization: `Bearer ${secret}` },
+              payload: JSON.stringify({ messages: chunk.map((p) => p.message) }),
+              muteHttpExceptions: true
+            }))
+          );
+          group.forEach((chunk, i) => {
+            const res = responses[i];
+            outcomes.push(res ? readSendResponse(res.getResponseCode(), res.getContentText(), chunk.length) : { kind: "failed", httpCode: 0 });
+          });
+        } catch (error) {
+          logger.error("Push Worker unreachable", { message: errorText(error, secret) });
+          for (let i = 0; i < group.length; i += 1) outcomes.push({ kind: "failed", httpCode: 0 });
+        }
+      }
+      return outcomes;
+    }
+    function send(tokens, message) {
+      const results = tokens.map(() => "error");
+      if (tokens.length === 0) return results;
+      const base = baseUrl();
+      const secret = relaySecret();
+      if (!base || !secret) return results;
+      const payload = buildPayload(message);
+      const topic = pushTopic(message.tag);
+      const urgency = pushUrgency(message.topic);
+      const queue = [];
+      tokens.forEach((token, index) => {
+        const subscription = typeof token === "string" ? toSubscription(token) : null;
+        if (!subscription) {
+          results[index] = "invalid";
+          return;
+        }
+        const msg = { subscription, payload, ttl: PUSH_TTL_SECONDS, urgency };
+        if (topic) msg.topic = topic;
+        queue.push({ index, message: msg });
+      });
+      if (queue.length === 0) return results;
+      const chunks = [];
+      for (let i = 0; i < queue.length; i += MESSAGES_PER_REQUEST) chunks.push(queue.slice(i, i + MESSAGES_PER_REQUEST));
+      const httpCodes = [];
+      const reasons = [];
+      const apply = (batch, outcomes) => {
+        const retry = { unauthorized: [], noKeys: [] };
+        batch.forEach((chunk, i) => {
+          const outcome = outcomes[i];
+          if (outcome.kind === "results") {
+            chunk.forEach((p, k) => {
+              results[p.index] = outcome.results[k];
+              if (outcome.results[k] === "error" && outcome.reasons[k]) reasons.push(outcome.reasons[k]);
+            });
+          } else if (outcome.kind === "unauthorized") {
+            retry.unauthorized.push(chunk);
+          } else if (outcome.kind === "no_keys") {
+            retry.noKeys.push(chunk);
+          } else {
+            httpCodes.push(outcome.httpCode);
+          }
+        });
+        return retry;
+      };
+      const first = apply(chunks, post(base, secret, chunks));
+      const noKeys = first.noKeys;
+      if (first.unauthorized.length > 0) {
+        if (!relinkOnce(secret)) {
+          httpCodes.push(401);
+        } else {
+          const again = apply(first.unauthorized, post(base, secret, first.unauthorized));
+          if (again.unauthorized.length > 0) httpCodes.push(401);
+          noKeys.push(...again.noKeys);
+        }
+      }
+      if (noKeys.length > 0) {
+        if (keysRequested) {
+          reasons.push("no_keys");
+        } else {
+          keysRequested = true;
+          try {
+            refreshPublicKey();
+            const again = apply(noKeys, post(base, secret, noKeys));
+            if (again.noKeys.length > 0) reasons.push("no_keys");
+            if (again.unauthorized.length > 0) httpCodes.push(401);
+          } catch (error) {
+            reasons.push("no_keys");
+            logger.error("Push Worker has no keys and creating them failed", { message: errorText(error, secret) });
+          }
+        }
+      }
+      const failed = results.filter((r) => r === "error").length;
+      if (failed > 0) {
+        logger.error("Push delivery errors", {
+          failed,
+          total: tokens.length,
+          httpCodes: unique2(httpCodes.map(String)).slice(0, 5),
+          reasons: unique2(reasons).slice(0, 5)
+        });
+      }
+      return results;
+    }
+    return {
+      enabled: () => baseUrl() !== null && relaySecret() !== null,
+      publicKey,
+      send,
+      baseUrl,
+      register,
+      refreshPublicKey,
+      health,
+      authorizedPost,
+      authorizedPostAll,
+      emailKey
+    };
+  }
+  function unique2(items) {
+    return items.filter((item, i) => items.indexOf(item) === i);
+  }
+
   // src/gas/mail.ts
   var WORKER_EMAIL_FROM = "noreply@mytma.org";
   var WORKER_DAILY_ALLOWANCE = 1e3;
   var WORKER_PAUSE_SECONDS = 600;
+  var WORKER_DOWN_PAUSE_SECONDS = 120;
   var WORKER_PAUSE_CACHE_KEY = "email-worker:paused";
   var MAX_WORKER_FAILURES_IN_A_ROW = 3;
   var MAX_SUBJECT_CHARS = 300;
+  var MESSAGES_PER_EMAIL_REQUEST = 10;
+  var MAX_EMAIL_REQUEST_BYTES = 200 * 1024;
+  var EMAIL_REQUESTS_PER_FETCH_ALL = 5;
+  var SEND_MANY_TIME_BUDGET_MS = 4 * 6e4;
   var PAUSE_REASONS = /* @__PURE__ */ new Set([
     "sender_not_verified",
     // mytma.org isn't onboarded/verified in Cloudflare Email Sending yet
+    "account_suspended",
+    // Cloudflare paused Email Sending for the account
     "email_not_configured",
     // the Worker has no EMAIL binding
+    "email_key_missing",
+    // the Worker has no EMAIL_KEY secret
+    "email_key_mismatch",
+    // EMAIL_KEY holds another sheet's (or an old) key
     "no_email_endpoint",
     // the Worker is older than POST /email (404)
     "unauthorized"
     // the Worker is linked to another sheet, and linking again failed
   ]);
-  var MESSAGE_REASONS = /* @__PURE__ */ new Set(["bad_message", "bad_to", "bad_reply_to", "bad_subject", "bad_content", "no_content", "content_too_large"]);
+  var STOP_REASONS = /* @__PURE__ */ new Set(["rate_limited"]);
+  var MESSAGE_REASONS = /* @__PURE__ */ new Set([
+    // The Worker's own checks:
+    "bad_message",
+    "bad_to",
+    "bad_reply_to",
+    "bad_subject",
+    "bad_content",
+    "no_content",
+    "content_too_large",
+    // Cloudflare's answer about the recipient or the content:
+    "recipient_not_allowed",
+    "recipient_suppressed",
+    "delivery_failed",
+    "invalid_message",
+    // HTTP 400/413 for a request: its content, not the Worker.
+    "bad_request",
+    "too_large"
+  ]);
   function emailVia(value) {
     return String(value != null ? value : "").trim().toLowerCase() === "gmail" ? "gmail" : "cloudflare";
   }
@@ -4161,34 +4586,67 @@ var TMA = (() => {
   function cleanCode(value) {
     return typeof value === "string" ? clip(value.replace(/[^A-Za-z0-9_]/g, ""), 64) : "";
   }
+  function errorText2(error) {
+    return clip(error instanceof Error ? error.message : String(error), 300);
+  }
   function replyToAddress(value) {
     const email2 = String(value != null ? value : "").trim().toLowerCase();
     return email2.length <= 254 && PLAIN_ADDRESS.test(email2) ? email2 : SETTING_DEFAULTS.SUPPORT_EMAIL;
   }
-  function readEmailAnswer(code, text2) {
+  function readEmailBatchAnswer(code, text2, count) {
     const body = parseJson(text2);
-    if (code === 401) return { ok: false, reason: "unauthorized", httpCode: code };
-    if (code === 404) return { ok: false, reason: "no_email_endpoint", httpCode: code };
-    if (code === 503 && pick(body, "error") === "email_not_configured") return { ok: false, reason: "email_not_configured", httpCode: code };
-    if (code !== 200) return { ok: false, reason: "http_error", httpCode: code };
+    const error = pick(body, "error");
+    const failed = (reason) => ({ kind: "failed", outcome: { ok: false, reason, httpCode: code } });
+    if (code === 401) return failed("unauthorized");
+    if (code === 404) return failed("no_email_endpoint");
+    if (code === 503 && (error === "email_not_configured" || error === "email_key_missing")) return failed(error);
+    if (code === 403 && error === "email_key_mismatch") return failed(error);
+    if (code === 400) return failed("bad_request");
+    if (code === 413) return failed("too_large");
+    if (code !== 200) return failed("http_error");
     const results = pick(body, "results");
-    if (!Array.isArray(results) || results.length !== 1 || !isRecord2(results[0])) return { ok: false, reason: "bad_answer", httpCode: code };
-    const result = results[0];
-    if (result.status === "ok") return { ok: true, messageId: typeof result.messageId === "string" ? clip(result.messageId, 200) : "" };
-    const reason = cleanCode(result.reason) || "send_failed";
-    const cfCode = cleanCode(result.code);
-    return cfCode ? { ok: false, reason, code: cfCode } : { ok: false, reason };
+    if (!Array.isArray(results) || results.length !== count || !results.every(isRecord2)) return failed("bad_answer");
+    return {
+      kind: "results",
+      outcomes: results.map((result) => {
+        if (result.status === "ok") return { ok: true, messageId: typeof result.messageId === "string" ? clip(result.messageId, 200) : "" };
+        const reason = cleanCode(result.reason) || "send_failed";
+        const cfCode = cleanCode(result.code);
+        return cfCode ? { ok: false, reason, code: cfCode } : { ok: false, reason };
+      })
+    };
+  }
+  function readEmailAnswer(code, text2) {
+    const answer = readEmailBatchAnswer(code, text2, 1);
+    return answer.kind === "failed" ? answer.outcome : answer.outcomes[0];
+  }
+  function pauseSeconds(reason) {
+    return PAUSE_REASONS.has(reason) ? WORKER_PAUSE_SECONDS : WORKER_DOWN_PAUSE_SECONDS;
   }
   function describeWorkerReason(reason) {
     switch (reason) {
       case "sender_not_verified":
         return "mytma.org isn't verified for Cloudflare Email Sending yet (finish onboarding it; see docs/SETUP.md, Email from noreply@mytma.org)";
+      case "account_suspended":
+        return "Cloudflare paused Email Sending for the account (check Compute → Email Service → Email Sending in Cloudflare)";
       case "recipient_not_allowed":
-        return "Cloudflare only sends to verified addresses until mytma.org is onboarded on the Workers Paid plan";
+        return "Cloudflare only sends to verified addresses until mytma.org is onboarded on the Workers Paid plan (finish steps A and B)";
+      case "recipient_suppressed":
+        return "Cloudflare won't email this address any more (it bounced or complained before)";
+      case "delivery_failed":
+        return "the recipient's mail server refused it";
+      case "invalid_message":
+      case "bad_request":
+      case "too_large":
+        return "Cloudflare didn't accept this email's content";
       case "rate_limited":
         return "Cloudflare's sending limit was reached";
       case "email_not_configured":
         return "the push Worker has no Email Sending binding (deploy it again from workers/push)";
+      case "email_key_missing":
+        return "the push Worker doesn't have its EMAIL_KEY secret yet (copy the email key from TMA App → Status into Cloudflare; see docs/SETUP.md)";
+      case "email_key_mismatch":
+        return "the push Worker's EMAIL_KEY secret isn't this sheet's email key (copy it again from TMA App → Status; see docs/SETUP.md)";
       case "no_email_endpoint":
         return "the push Worker is an older version without email (deploy it again from workers/push)";
       case "unauthorized":
@@ -4221,6 +4679,14 @@ var TMA = (() => {
       }
       return pausedMemo;
     }
+    function pause(reason) {
+      pausedMemo = reason;
+      try {
+        cache.put(WORKER_PAUSE_CACHE_KEY, reason, pauseSeconds(reason));
+      } catch (error) {
+        logger.error("Could not pause Worker email", error);
+      }
+    }
     function route() {
       if (emailVia(deps.via()) === "gmail") return { via: "gmail", reason: "setting" };
       const base = relay.baseUrl();
@@ -4231,6 +4697,18 @@ var TMA = (() => {
       if (paused) return { via: "gmail", reason: "paused", detail: paused };
       return { via: "cloudflare", from: WORKER_EMAIL_FROM, workerUrl: base };
     }
+    function prepare(msg) {
+      var _a, _b, _c;
+      const to = String((_a = msg.to) != null ? _a : "").trim();
+      if (!to || !to.includes("@")) return null;
+      return {
+        to,
+        subject: clip(oneLine2(msg.subject), MAX_SUBJECT_CHARS),
+        html: String((_b = msg.html) != null ? _b : ""),
+        text: String((_c = msg.text) != null ? _c : ""),
+        replyTo: replyToAddress(deps.replyTo())
+      };
+    }
     function sendThroughWorker(email2) {
       try {
         const answer = relay.authorizedPost("/email", { messages: [email2] });
@@ -4239,30 +4717,25 @@ var TMA = (() => {
         return { ok: false, reason: "network" };
       }
     }
-    function workerFailed(outcome) {
-      if (!MESSAGE_REASONS.has(outcome.reason)) failuresInARow += 1;
+    function workerFailed(outcome, messages = 1) {
       const details = { reason: outcome.reason };
       if (outcome.httpCode !== void 0) details.httpCode = outcome.httpCode;
       if (outcome.code) details.code = outcome.code;
-      logger.error("Worker email failed; sending this one with Gmail instead", details);
+      if (messages !== 1) details.messages = messages;
+      logger.error(`Worker email failed; sending ${messages === 1 ? "this one" : "these"} with Gmail instead`, details);
       if (PAUSE_REASONS.has(outcome.reason)) {
-        pausedMemo = outcome.reason;
-        try {
-          cache.put(WORKER_PAUSE_CACHE_KEY, outcome.reason, WORKER_PAUSE_SECONDS);
-        } catch (error) {
-          logger.error("Could not pause Worker email", error);
-        }
-      } else if (outcome.reason === "rate_limited" || failuresInARow >= MAX_WORKER_FAILURES_IN_A_ROW) {
+        pause(outcome.reason);
+      } else if (STOP_REASONS.has(outcome.reason)) {
         stoppedReason = outcome.reason;
+      } else if (!MESSAGE_REASONS.has(outcome.reason)) {
+        failuresInARow += 1;
+        if (failuresInARow >= MAX_WORKER_FAILURES_IN_A_ROW) {
+          stoppedReason = outcome.reason;
+          pause(outcome.reason);
+        }
       }
     }
-    function sendWithGmail(email2) {
-      if (promisedWorkerAllowance) {
-        if (gmailSendsSincePromise > 0 && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) {
-          throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
-        }
-        gmailSendsSincePromise += 1;
-      }
+    function mailApp(email2) {
       MailApp.sendEmail({
         to: email2.to,
         subject: email2.subject,
@@ -4272,22 +4745,24 @@ var TMA = (() => {
         replyTo: email2.replyTo
       });
     }
+    function sendWithGmail(email2) {
+      if (promisedWorkerAllowance) {
+        if (gmailSendsSincePromise > 0 && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) {
+          throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
+        }
+        gmailSendsSincePromise += 1;
+      }
+      mailApp(email2);
+    }
     function send(msg) {
-      var _a, _b, _c, _d;
+      var _a;
       last = null;
-      const to = String((_a = msg.to) != null ? _a : "").trim();
-      if (!to || !to.includes("@")) throw new Error("Invalid email recipient");
-      const email2 = {
-        to,
-        subject: clip(oneLine2(msg.subject), MAX_SUBJECT_CHARS),
-        html: String((_b = msg.html) != null ? _b : ""),
-        text: String((_c = msg.text) != null ? _c : ""),
-        replyTo: replyToAddress(deps.replyTo())
-      };
+      const email2 = prepare(msg);
+      if (!email2) throw new Error("Invalid email recipient");
       const current = route();
       if (current.via === "gmail") {
         sendWithGmail(email2);
-        last = current.reason === "setting" ? { via: "gmail" } : { via: "gmail", workerReason: (_d = current.detail) != null ? _d : current.reason };
+        last = current.reason === "setting" ? { via: "gmail" } : { via: "gmail", workerReason: (_a = current.detail) != null ? _a : current.reason };
         return;
       }
       const outcome = sendThroughWorker(email2);
@@ -4300,6 +4775,95 @@ var TMA = (() => {
       sendWithGmail(email2);
       last = outcome.code ? { via: "gmail", workerReason: outcome.reason, workerCode: outcome.code } : { via: "gmail", workerReason: outcome.reason };
     }
+    function chunk(items) {
+      const EMPTY_BODY_BYTES = 15;
+      const chunks = [];
+      let current = [];
+      let bytes = EMPTY_BODY_BYTES;
+      for (const item of items) {
+        const size = utf8Length(JSON.stringify(item.email)) + 1;
+        if (current.length > 0 && (current.length >= MESSAGES_PER_EMAIL_REQUEST || bytes + size > MAX_EMAIL_REQUEST_BYTES)) {
+          chunks.push(current);
+          current = [];
+          bytes = EMPTY_BODY_BYTES;
+        }
+        current.push(item);
+        bytes += size;
+      }
+      if (current.length > 0) chunks.push(current);
+      return chunks;
+    }
+    function sendMany(msgs) {
+      const started = Date.now();
+      const results = msgs.map(() => ({ ok: false, error: "not sent" }));
+      const pending = [];
+      msgs.forEach((msg, index) => {
+        const email2 = prepare(msg);
+        if (email2) pending.push({ index, email: email2 });
+        else results[index] = { ok: false, error: "Invalid email recipient" };
+      });
+      let gmailLeft = null;
+      const viaGmail = (item) => {
+        try {
+          if (gmailLeft === null) gmailLeft = MailApp.getRemainingDailyQuota();
+          if (gmailLeft <= SIGN_IN_EMAIL_RESERVE) {
+            throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
+          }
+          mailApp(item.email);
+          gmailLeft -= 1;
+          results[item.index] = { ok: true };
+        } catch (error) {
+          results[item.index] = { ok: false, error: errorText2(error) };
+        }
+      };
+      const outOfTime = () => Date.now() - started > SEND_MANY_TIME_BUDGET_MS;
+      let next = 0;
+      while (next < pending.length) {
+        if (outOfTime()) {
+          const left = pending.length - next;
+          logger.error("Stopped sending emails before the Apps Script time limit", { notSent: left });
+          for (; next < pending.length; next += 1) {
+            results[pending[next].index] = { ok: false, error: "Not sent: this run was close to the Apps Script time limit" };
+          }
+          break;
+        }
+        if (route().via === "gmail") {
+          viaGmail(pending[next]);
+          next += 1;
+          continue;
+        }
+        const group = chunk(pending.slice(next, next + MESSAGES_PER_EMAIL_REQUEST * EMAIL_REQUESTS_PER_FETCH_ALL)).slice(0, EMAIL_REQUESTS_PER_FETCH_ALL);
+        next += group.reduce((n, c) => n + c.length, 0);
+        let answers;
+        try {
+          answers = relay.authorizedPostAll(
+            "/email",
+            group.map((c) => ({ messages: c.map((item) => item.email) }))
+          );
+        } catch {
+          answers = null;
+        }
+        group.forEach((items, i) => {
+          const answer = answers == null ? void 0 : answers[i];
+          const parsed = answer ? readEmailBatchAnswer(answer.code, answer.text, items.length) : { kind: "failed", outcome: { ok: false, reason: "network" } };
+          if (parsed.kind === "failed") {
+            workerFailed(parsed.outcome, items.length);
+            items.forEach(viaGmail);
+            return;
+          }
+          parsed.outcomes.forEach((outcome, k) => {
+            if (outcome.ok) {
+              failuresInARow = 0;
+              results[items[k].index] = { ok: true };
+            } else {
+              workerFailed(outcome);
+              viaGmail(items[k]);
+            }
+          });
+        });
+      }
+      return results;
+    }
     return {
       remainingQuota() {
         if (route().via === "cloudflare") {
@@ -4309,6 +4873,8 @@ var TMA = (() => {
         return MailApp.getRemainingDailyQuota();
       },
       send,
+      sendMany,
+      relayStatus: () => route().via === "cloudflare" ? { from: WORKER_EMAIL_FROM, backupRemaining: MailApp.getRemainingDailyQuota() } : null,
       route,
       lastDelivery: () => last,
       gmailQuota: () => MailApp.getRemainingDailyQuota()
@@ -4595,335 +5161,6 @@ Email from the TMA app is working.
       '<p style="margin:0">Email from the TMA app is working.</p>',
       "</div></div>"
     ].join("");
-  }
-
-  // src/gas/push-relay.ts
-  var MESSAGES_PER_REQUEST = 5;
-  var REQUESTS_PER_FETCH_ALL = 20;
-  var MAX_PAYLOAD_BYTES = 3e3;
-  var PUSH_TTL_SECONDS = 86400;
-  var MIN_SECRET_CHARS = 32;
-  var MAX_SECRET_CHARS = 256;
-  var PUBLIC_KEY_RETRY_SECONDS = 300;
-  var PUBLIC_KEY_FAILED_CACHE_KEY = "push-relay:public-key-failed";
-  var TOPIC_MAX_CHARS = 32;
-  var ALREADY_REGISTERED_MESSAGE = "The push Worker is already linked to a different Apps Script secret. See workers/push/README.md (rotate keys).";
-  function normalizeRelayUrl(value) {
-    const url = String(value != null ? value : "").trim().replace(/\/+$/, "");
-    return /^https:\/\/[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?(?:\/[A-Za-z0-9._~%!$&'()*+,;=:@/-]*)?$/.test(url) ? url : null;
-  }
-  function utf8Length(text2) {
-    let bytes = 0;
-    for (let i = 0; i < text2.length; i += 1) {
-      const c = text2.charCodeAt(i);
-      if (c < 128) bytes += 1;
-      else if (c < 2048) bytes += 2;
-      else if (c >= 55296 && c <= 56319 && i + 1 < text2.length && (text2.charCodeAt(i + 1) & 64512) === 56320) {
-        bytes += 4;
-        i += 1;
-      } else bytes += 3;
-    }
-    return bytes;
-  }
-  function cut(text2, n) {
-    const head = text2.slice(0, n);
-    const last = head.charCodeAt(head.length - 1);
-    return last >= 55296 && last <= 56319 ? head.slice(0, -1) : head;
-  }
-  function buildPayload(message) {
-    var _a, _b, _c;
-    const fields = {
-      title: clip(String((_a = message.title) != null ? _a : ""), 120),
-      url: message.url ? clip(String(message.url), 200) : void 0,
-      tag: message.tag ? clip(String(message.tag), 64) : void 0,
-      topic: clip(String((_b = message.topic) != null ? _b : ""), 32)
-    };
-    const render = (body2) => JSON.stringify({ title: fields.title, body: body2, url: fields.url, tag: fields.tag, topic: fields.topic });
-    const body = String((_c = message.body) != null ? _c : "");
-    const full = render(body);
-    if (utf8Length(full) <= MAX_PAYLOAD_BYTES) return full;
-    let lo = 0;
-    let hi = body.length;
-    while (lo < hi) {
-      const mid = Math.ceil((lo + hi) / 2);
-      if (utf8Length(render(`${cut(body, mid)}…`)) <= MAX_PAYLOAD_BYTES) lo = mid;
-      else hi = mid - 1;
-    }
-    return render(lo > 0 ? `${cut(body, lo)}…` : "");
-  }
-  function pushTopic(tag) {
-    if (!tag) return void 0;
-    const topic = String(tag).replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, TOPIC_MAX_CHARS);
-    return topic === "" ? void 0 : topic;
-  }
-  function pushUrgency(topic) {
-    return topic === "reminders" || topic === "announcements" ? "normal" : "high";
-  }
-  function readSendResponse(code, text2, size) {
-    const body = parseJson(text2);
-    if (code === 401) return { kind: "unauthorized" };
-    if (code === 503 && pick(body, "error") === "no_keys") return { kind: "no_keys" };
-    if (code !== 200) return { kind: "failed", httpCode: code };
-    const entries = pick(body, "results");
-    if (!Array.isArray(entries) || entries.length !== size) return { kind: "failed", httpCode: code };
-    const reasons = entries.map((e) => {
-      const reason = pick(e, "reason");
-      return typeof reason === "string" ? clip(reason.replace(/[^a-z0-9_]/gi, ""), 40) : "";
-    });
-    if (size > 0 && reasons.every((r) => r === "no_keys")) return { kind: "no_keys" };
-    const results = entries.map((e) => {
-      const status = isRecord2(e) ? e.status : void 0;
-      return status === "ok" ? "ok" : status === "invalid" ? "invalid" : "error";
-    });
-    return { kind: "results", results, reasons };
-  }
-  function errorText(error, secret) {
-    const text2 = clip(error instanceof Error ? error.message : String(error), 200);
-    return secret ? text2.split(secret).join("[secret]") : text2;
-  }
-  function createPushRelaySender(deps) {
-    const { secrets, cache, logger } = deps;
-    let secretMemo = null;
-    let publicKeyMemo = null;
-    let reRegistered = false;
-    let keysRequested = false;
-    const baseUrl = () => normalizeRelayUrl(deps.relayUrl());
-    function relaySecret() {
-      if (secretMemo === null) {
-        const value = secrets.get("PUSH_RELAY_SECRET");
-        if (value && value.length >= MIN_SECRET_CHARS && value.length <= MAX_SECRET_CHARS && !/[\u0000-\u001f\u007f]/.test(value)) {
-          secretMemo = value;
-        }
-      }
-      return secretMemo;
-    }
-    function requireBase() {
-      const base = baseUrl();
-      if (!base) throw new Error("Settings PUSH_RELAY_URL is not an https:// address.");
-      return base;
-    }
-    function fetchOrExplain(url, params) {
-      try {
-        return UrlFetchApp.fetch(url, { ...params, muteHttpExceptions: true });
-      } catch (error) {
-        throw new Error(`Could not reach the push Worker (${errorText(error, secretMemo)}).`);
-      }
-    }
-    function register() {
-      const base = requireBase();
-      const secret = relaySecret();
-      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
-      const res = fetchOrExplain(`${base}/register`, {
-        method: "post",
-        contentType: "application/json",
-        payload: JSON.stringify({ secret })
-      });
-      const code = res.getResponseCode();
-      const body = parseJson(res.getContentText());
-      if (code === 200 && pick(body, "registered") === true) return { first: pick(body, "first") === true };
-      if (code === 409) throw new Error(ALREADY_REGISTERED_MESSAGE);
-      throw new Error(`The push Worker answered HTTP ${code} when linking this sheet.`);
-    }
-    function refreshPublicKey() {
-      const base = requireBase();
-      const res = fetchOrExplain(`${base}/vapid-public-key`, { method: "get", headers: { Accept: "application/json" } });
-      const code = res.getResponseCode();
-      if (code !== 200) throw new Error(`The push Worker answered HTTP ${code} for its public key.`);
-      const key = canonicalP256Key(pick(parseJson(res.getContentText()), "publicKey"));
-      if (!key) throw new Error("The push Worker sent a public key that is not a P-256 key.");
-      secrets.set("PUSH_PUBLIC_KEY", key);
-      publicKeyMemo = key;
-      cache.remove(PUBLIC_KEY_FAILED_CACHE_KEY);
-      return key;
-    }
-    function publicKey() {
-      if (publicKeyMemo) return publicKeyMemo;
-      const stored = canonicalP256Key(secrets.get("PUSH_PUBLIC_KEY"));
-      if (stored) {
-        publicKeyMemo = stored;
-        return stored;
-      }
-      if (!baseUrl() || cache.get(PUBLIC_KEY_FAILED_CACHE_KEY)) return "";
-      try {
-        return refreshPublicKey();
-      } catch (error) {
-        cache.put(PUBLIC_KEY_FAILED_CACHE_KEY, "1", PUBLIC_KEY_RETRY_SECONDS);
-        logger.error("Could not get the push public key", { message: errorText(error, secretMemo) });
-        return "";
-      }
-    }
-    function health() {
-      const down = { reachable: false, registered: false, hasKeys: false, email: false };
-      const base = baseUrl();
-      if (!base) return { ...down, error: "PUSH_RELAY_URL is not an https:// address" };
-      try {
-        const res = UrlFetchApp.fetch(`${base}/health`, { method: "get", muteHttpExceptions: true });
-        const code = res.getResponseCode();
-        const body = parseJson(res.getContentText());
-        if (code !== 200 || pick(body, "ok") !== true) return { ...down, httpCode: code };
-        return {
-          reachable: true,
-          registered: pick(body, "registered") === true,
-          hasKeys: pick(body, "hasKeys") === true,
-          email: pick(body, "email") === true
-        };
-      } catch (error) {
-        return { ...down, error: errorText(error, secretMemo) };
-      }
-    }
-    function authorizedPost(path, body) {
-      const base = requireBase();
-      const secret = relaySecret();
-      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
-      const payload = JSON.stringify(body);
-      const once = () => {
-        const res = fetchOrExplain(`${base}${path}`, {
-          method: "post",
-          contentType: "application/json",
-          headers: { Authorization: `Bearer ${secret}` },
-          payload
-        });
-        return { code: res.getResponseCode(), text: res.getContentText() };
-      };
-      const answer = once();
-      if (answer.code !== 401 || reRegistered) return answer;
-      reRegistered = true;
-      try {
-        register();
-      } catch (error) {
-        logger.error("Push Worker rejected this sheet and linking again failed", { message: errorText(error, secret) });
-        return answer;
-      }
-      return once();
-    }
-    function post(base, secret, chunks) {
-      const outcomes = [];
-      for (let start = 0; start < chunks.length; start += REQUESTS_PER_FETCH_ALL) {
-        const group = chunks.slice(start, start + REQUESTS_PER_FETCH_ALL);
-        try {
-          const responses = UrlFetchApp.fetchAll(
-            group.map((chunk) => ({
-              url: `${base}/send`,
-              method: "post",
-              contentType: "application/json",
-              headers: { Authorization: `Bearer ${secret}` },
-              payload: JSON.stringify({ messages: chunk.map((p) => p.message) }),
-              muteHttpExceptions: true
-            }))
-          );
-          group.forEach((chunk, i) => {
-            const res = responses[i];
-            outcomes.push(res ? readSendResponse(res.getResponseCode(), res.getContentText(), chunk.length) : { kind: "failed", httpCode: 0 });
-          });
-        } catch (error) {
-          logger.error("Push Worker unreachable", { message: errorText(error, secret) });
-          for (let i = 0; i < group.length; i += 1) outcomes.push({ kind: "failed", httpCode: 0 });
-        }
-      }
-      return outcomes;
-    }
-    function send(tokens, message) {
-      const results = tokens.map(() => "error");
-      if (tokens.length === 0) return results;
-      const base = baseUrl();
-      const secret = relaySecret();
-      if (!base || !secret) return results;
-      const payload = buildPayload(message);
-      const topic = pushTopic(message.tag);
-      const urgency = pushUrgency(message.topic);
-      const queue = [];
-      tokens.forEach((token, index) => {
-        const subscription = typeof token === "string" ? toSubscription(token) : null;
-        if (!subscription) {
-          results[index] = "invalid";
-          return;
-        }
-        const msg = { subscription, payload, ttl: PUSH_TTL_SECONDS, urgency };
-        if (topic) msg.topic = topic;
-        queue.push({ index, message: msg });
-      });
-      if (queue.length === 0) return results;
-      const chunks = [];
-      for (let i = 0; i < queue.length; i += MESSAGES_PER_REQUEST) chunks.push(queue.slice(i, i + MESSAGES_PER_REQUEST));
-      const httpCodes = [];
-      const reasons = [];
-      const apply = (batch, outcomes) => {
-        const retry = { unauthorized: [], noKeys: [] };
-        batch.forEach((chunk, i) => {
-          const outcome = outcomes[i];
-          if (outcome.kind === "results") {
-            chunk.forEach((p, k) => {
-              results[p.index] = outcome.results[k];
-              if (outcome.results[k] === "error" && outcome.reasons[k]) reasons.push(outcome.reasons[k]);
-            });
-          } else if (outcome.kind === "unauthorized") {
-            retry.unauthorized.push(chunk);
-          } else if (outcome.kind === "no_keys") {
-            retry.noKeys.push(chunk);
-          } else {
-            httpCodes.push(outcome.httpCode);
-          }
-        });
-        return retry;
-      };
-      const first = apply(chunks, post(base, secret, chunks));
-      const noKeys = first.noKeys;
-      if (first.unauthorized.length > 0) {
-        if (reRegistered) {
-          httpCodes.push(401);
-        } else {
-          reRegistered = true;
-          try {
-            register();
-            const again = apply(first.unauthorized, post(base, secret, first.unauthorized));
-            if (again.unauthorized.length > 0) httpCodes.push(401);
-            noKeys.push(...again.noKeys);
-          } catch (error) {
-            httpCodes.push(401);
-            logger.error("Push Worker rejected this sheet and linking again failed", { message: errorText(error, secret) });
-          }
-        }
-      }
-      if (noKeys.length > 0) {
-        if (keysRequested) {
-          reasons.push("no_keys");
-        } else {
-          keysRequested = true;
-          try {
-            refreshPublicKey();
-            const again = apply(noKeys, post(base, secret, noKeys));
-            if (again.noKeys.length > 0) reasons.push("no_keys");
-            if (again.unauthorized.length > 0) httpCodes.push(401);
-          } catch (error) {
-            reasons.push("no_keys");
-            logger.error("Push Worker has no keys and creating them failed", { message: errorText(error, secret) });
-          }
-        }
-      }
-      const failed = results.filter((r) => r === "error").length;
-      if (failed > 0) {
-        logger.error("Push delivery errors", {
-          failed,
-          total: tokens.length,
-          httpCodes: unique2(httpCodes.map(String)).slice(0, 5),
-          reasons: unique2(reasons).slice(0, 5)
-        });
-      }
-      return results;
-    }
-    return {
-      enabled: () => baseUrl() !== null && relaySecret() !== null,
-      publicKey,
-      send,
-      baseUrl,
-      register,
-      refreshPublicKey,
-      health,
-      authorizedPost
-    };
-  }
-  function unique2(items) {
-    return items.filter((item, i) => items.indexOf(item) === i);
   }
 
   // src/gas/settings.ts
@@ -5655,7 +5892,7 @@ ${next}`);
       `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting("PAYPAL_ENV"))})` : "not configured"}; online payments ${yes(services.flag("ONLINE_PAYMENTS"))}`,
       ...pushStatus(services, health),
       `Text messages (Twilio): ${services.sms.enabled() ? "configured" : "not configured"}; SMS setting ${yes(services.flag("SMS_ENABLED"))}`,
-      emailStatus(services, health),
+      ...emailStatus(services, health),
       `Version: ${VERSION}`
     ];
     if (!present.includes("TOKEN_SECRET")) lines.push("", "TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.");
@@ -5683,15 +5920,23 @@ ${next}`);
     const route = safely2(() => services.mailer.route(), null);
     const quota = safely2(() => services.mailer.gmailQuota(), 0);
     const replyTo = `Reply-To ${replyToAddress(services.setting("SUPPORT_EMAIL"))}`;
+    const key = route && !(route.via === "gmail" && route.reason === "setting") ? safely2(() => services.push.emailKey(), null) : null;
+    const keyLine = key ? [`Email key for Cloudflare (Worker secret EMAIL_KEY): ${key}`] : [];
     if ((route == null ? void 0 : route.via) === "cloudflare") {
       let worker = "";
       if (health && !health.reachable) worker = "; Worker unreachable right now, so Gmail sends meanwhile";
-      else if (health == null ? void 0 : health.email) worker = " (Cloudflare Email Sending ✓)";
+      else if ((health == null ? void 0 : health.email) && health.emailKey) worker = " (Cloudflare Email Sending ✓, email key ✓)";
+      else if (health == null ? void 0 : health.email) worker = " (Cloudflare Email Sending ✓, email key ✗: add the Worker secret EMAIL_KEY below, so Gmail sends meanwhile; see docs/SETUP.md)";
       else if (health) worker = " (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md)";
-      return `Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`;
+      return [`Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`, ...keyLine];
     }
-    const why = !route || route.reason === "setting" ? "Settings EMAIL_VIA is gmail" : describeWorkerReason((_a = route.detail) != null ? _a : route.reason) + (route.reason === "paused" ? " (Gmail for up to 10 minutes, then the Worker is tried again)" : "");
-    return `Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`;
+    let why = "Settings EMAIL_VIA is gmail";
+    if (route && route.reason !== "setting") {
+      const reason = (_a = route.detail) != null ? _a : route.reason;
+      why = describeWorkerReason(reason);
+      if (route.reason === "paused") why += ` (Gmail for up to ${pauseSeconds(reason) / 60} minutes, then the Worker is tried again)`;
+    }
+    return [`Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`, ...keyLine];
   }
   function errorMessage2(error) {
     return error instanceof Error ? error.message : String(error);

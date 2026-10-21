@@ -24,7 +24,9 @@ announcements, board alerts) as **Timberlane Music Association
 binding: `POST /email` below. Email Sending is in public beta and needs the
 **Workers Paid** plan and `mytma.org` onboarded (see
 [docs/SETUP.md, Email from noreply@mytma.org](../../docs/SETUP.md#email-from-noreplymytmaorg)).
-Apps Script falls back to Gmail for any email the Worker can't send.
+Only the spreadsheet whose key is in the Worker secret **`EMAIL_KEY`** can
+send email (see `POST /email`). Apps Script falls back to Gmail for any email
+the Worker can't send.
 
 The Worker is **stateless** as far as families are concerned: it does not
 know who is subscribed. Apps Script keeps the push subscriptions in the Google
@@ -47,12 +49,14 @@ a known path gives `405 {"error":"method_not_allowed"}`.
 ### `GET /health`
 
 ```json
-{"ok": true, "name": "tma-push", "registered": true, "hasKeys": true, "email": true}
+{"ok": true, "name": "tma-push", "registered": true, "hasKeys": true, "email": true, "emailKey": true}
 ```
 
 `registered`: a secret has been registered. `hasKeys`: the VAPID key pair exists.
 `email`: the Email Sending binding `EMAIL` is configured (it says nothing about
 whether `mytma.org` is verified yet; a send answers `sender_not_verified` then).
+`emailKey`: the Worker secret `EMAIL_KEY` is set (not whose key it is, and
+never the key itself).
 
 ### `GET /vapid-public-key`
 
@@ -79,6 +83,14 @@ Body `{"secret": "<32 to 256 characters>"}`. Trust on first use:
 | Body over 4 KB                              | `413 {"error": "too_large"}`               |
 
 Only the SHA-256 of the secret is stored; comparisons are constant-time.
+
+Trust on first use means that whenever no secret is registered (before the
+first Set up, during a key rotation, or if the KV namespace is emptied),
+whoever calls `/register` first gets `/send`. That can only reach push
+subscriptions the caller already has, and the real spreadsheet notices
+(Set up answers `409`). It does **not** give email: `/email` also needs the
+`EMAIL_KEY` secret, which only someone with access to the Cloudflare account
+can set.
 
 ### `POST /send`
 
@@ -150,7 +162,14 @@ and all the messages of one request are sent concurrently.
 
 ### `POST /email`
 
-The same `Authorization: Bearer <secret>` as `/send`. Body:
+`Authorization: Bearer <secret>`, where the secret's SHA-256 (lowercase hex)
+must equal the Worker secret **`EMAIL_KEY`**. That pin is what keeps a
+claimed Worker (see `/register`) from sending email as `noreply@mytma.org`.
+`EMAIL_KEY` is set by hand in Cloudflare (*Workers & Pages → tma-push →
+Settings → Variables and Secrets*, type **Secret**) or with `npx wrangler
+secret put EMAIL_KEY`; the spreadsheet's **TMA App → Status** shows the value
+as *Email key for Cloudflare*. It is never in `wrangler.toml`, and deploys
+keep it. Body:
 
 ```json
 {
@@ -168,11 +187,17 @@ The same `Authorization: Bearer <secret>` as `/send`. Body:
 
 | Situation                                        | Response                                   |
 | ------------------------------------------------ | ------------------------------------------ |
-| No secret registered, missing or wrong secret    | `401 {"error": "unauthorized"}`            |
+| Missing secret, or neither the `EMAIL_KEY` one nor the registered one | `401 {"error": "unauthorized"}` |
 | The `EMAIL` binding isn't configured             | `503 {"error": "email_not_configured"}`    |
+| `EMAIL_KEY` isn't set (or isn't 64 hex characters) | `503 {"error": "email_key_missing"}`     |
+| The registered secret, but `EMAIL_KEY` is another one (e.g. after rotating the keys) | `403 {"error": "email_key_mismatch"}` |
 | Not JSON, `messages` not an array, or empty      | `400 {"error": "bad_request"}`             |
 | More than 10 messages (or body over 256 KB)      | `413 {"error": "too_many_messages", "max": 10}` (or `"too_large"`) |
 | Otherwise                                        | `200 {"results": [...]}`                   |
+
+Nothing is sent in any of the error cases. The secret pinned by `EMAIL_KEY`
+works even while the KV namespace has no registration (or another one), so
+email keeps working through a key rotation until `EMAIL_KEY` is changed.
 
 `results` has one entry per message, in the same order:
 `{"status": "ok", "messageId": "…"}` or `{"status": "error", "reason": "…", "code"?: "E_…"}`.
@@ -197,15 +222,28 @@ Messages are sent one after the other; one failure doesn't stop the rest.
     `content_too_large` (`html` over 200 KB or `text` over 100 KB of UTF-8),
     `bad_message` (not an object).
 * What Cloudflare answered (its error code is passed on as `code`; the error
-  message, which can quote the email, never is):
-  * `sender_not_verified`: `E_SENDER_NOT_VERIFIED`, `mytma.org` isn't
-    onboarded/verified for Email Sending yet.
+  message, which can quote the email, never is). About the domain or the
+  account, so every email will fail the same way:
+  * `sender_not_verified`: `E_SENDER_NOT_VERIFIED` or
+    `E_SENDER_DOMAIN_NOT_AVAILABLE`, `mytma.org` isn't onboarded/verified for
+    Email Sending yet.
+  * `account_suspended`: `E_ACCOUNT_SUSPENDED`, Cloudflare paused Email
+    Sending for the account.
   * `rate_limited`: `E_RATE_LIMIT_EXCEEDED` or `E_DAILY_LIMIT_EXCEEDED`.
+
+  About this one message or recipient, so the next one may well go out:
   * `recipient_not_allowed`: a recipient/destination "not allowed" or "not
     verified" code such as `E_RECIPIENT_NOT_ALLOWED` (before the domain is
     onboarded, Cloudflare only sends to verified addresses).
-  * `send_failed`: anything else (for example `E_RECIPIENT_SUPPRESSED` or
-    `E_VALIDATION_ERROR`).
+  * `recipient_suppressed`: `E_RECIPIENT_SUPPRESSED`, the address is on the
+    suppression list (an earlier hard bounce or complaint).
+  * `delivery_failed`: `E_DELIVERY_FAILED`, the recipient's server refused it.
+  * `invalid_message`: `E_VALIDATION_ERROR`, `E_FIELD_MISSING`,
+    `E_TOO_MANY_RECIPIENTS`, `E_TOO_MANY_ATTACHMENTS` or an `E_HEADER…` code;
+    `content_too_large` also covers `E_CONTENT_TOO_LARGE`.
+
+  And `send_failed`: anything else (for example `E_INTERNAL_SERVER_ERROR`, or
+  a code this Worker doesn't know).
 
 The log line for a request is counts and codes only, e.g.
 `email ok 1 error 1 rate_limited:E_RATE_LIMIT_EXCEEDED`: never addresses,
@@ -226,8 +264,9 @@ Script Properties:
 
 1. **Set up** (`setupTma`, or **TMA App → Set up / repair tabs**) creates
    `PUSH_RELAY_SECRET` if it is missing, then calls `POST /register` with it
-   (the first caller wins, which is why the endpoint is safe to leave open)
-   and `GET /vapid-public-key`, and saves the key as `PUSH_PUBLIC_KEY`. A
+   (the first caller wins: acceptable for push, see `/register`; email also
+   needs `EMAIL_KEY`) and `GET /vapid-public-key`, and saves the key as
+   `PUSH_PUBLIC_KEY`. A
    `409`, an unreachable Worker or a bad `PUSH_RELAY_URL` only adds a ⚠ line
    to the setup message; setup itself never fails because of the Worker.
 2. `me.bootstrap` gives the saved key to the web app as
@@ -249,8 +288,10 @@ Script Properties:
    KV was cleared); `no_keys` makes it `GET /vapid-public-key`, save the key
    and retry.
 5. **TMA App → Status** shows `GET /health` (reachable, `registered`,
-   `hasKeys`), whether `PUSH_PUBLIC_KEY` is saved and whether push is
-   configured. `registered` only means *some* secret is registered, not
+   `hasKeys`, `email`, `emailKey`), whether `PUSH_PUBLIC_KEY` is saved,
+   whether push is configured, and *Email key for Cloudflare*: the SHA-256 of
+   `PUSH_RELAY_SECRET`, the value for `EMAIL_KEY` (it can't be turned back
+   into the secret). `registered` only means *some* secret is registered, not
    necessarily this sheet's.
 
 Apps Script logs carry counts, HTTP codes and these reason codes only, never
@@ -258,17 +299,31 @@ the secret, payloads or endpoints.
 
 **Email** (`src/gas/mail.ts`, the app's `Mailer`): with the spreadsheet's
 Settings key `EMAIL_VIA` = `cloudflare` (the default) and the sheet linked,
-each email is one `POST /email` with one message and `replyTo` = Settings
-`SUPPORT_EMAIL`. A `401` links the sheet again once per execution (shared with
-push) and retries. Any other failure (an `error` result, another HTTP status,
-no answer) sends **that** email with Gmail (`MailApp`, same Reply-To, sender
-name `ORG_NAME`) instead. `sender_not_verified`, `email_not_configured`, a
-`404` (a Worker older than `/email`) and an unfixable `401` make Apps Script
-use Gmail for the next 10 minutes without asking the Worker (CacheService);
-`rate_limited`, or 3 failures in a row, switch the rest of that execution to
-Gmail. `EMAIL_VIA` = `gmail` never calls `/email`. **TMA App → Status** shows
-the route and `/health`'s `email`; **Send me a test notification** says which
-way its test email went.
+a sign-in code (or the test email) is one `POST /email` with one message, and
+notifications and announcements go out in batches: **10 messages per request,
+5 requests in parallel** (`UrlFetchApp.fetchAll`), each request under 200 KB.
+Every message has one recipient and `replyTo` = Settings `SUPPORT_EMAIL`. A
+`401` links the sheet again once per execution (shared with push) and
+retries. Any other failure sends **that** email with Gmail (`MailApp`, same
+Reply-To, sender name `ORG_NAME`) instead, and then:
+
+* a reason about one message or recipient (the list above, or a `400`/`413`):
+  nothing more; the next email still tries the Worker;
+* `sender_not_verified`, `account_suspended`, `email_not_configured`,
+  `email_key_missing`, `email_key_mismatch`, a `404` (a Worker older than
+  `/email`) or an unfixable `401`: Gmail for the next **10 minutes** without
+  asking the Worker (CacheService);
+* `rate_limited`: Gmail for the rest of that execution;
+* the Worker or Cloudflare failing (no answer, HTTP 5xx, an unreadable answer,
+  `send_failed`) **3 times in a row**: Gmail for the rest of that execution
+  and the next **2 minutes**.
+
+For notifications the Gmail fallback keeps the day's last 20 Gmail emails for
+sign-in codes, and a batch stops starting new requests after 4 minutes so it
+ends inside Apps Script's 6-minute limit. `EMAIL_VIA` = `gmail` never calls
+`/email`. **TMA App → Status** shows the route, `/health`'s `email` and
+`emailKey`, and the email key; **Send me a test notification** says which way
+its test email went.
 
 ## Deployment
 
@@ -293,8 +348,8 @@ KV namespace already exists; its id is in [wrangler.toml](wrangler.toml).
 To deploy from a computer instead: `cd workers/push && npm ci && npx wrangler
 login && npx wrangler deploy`.
 
-Deploying new code keeps the KV contents, so the link with Apps Script and the
-key pair survive every deploy. To move the Worker to another Cloudflare
+Deploying new code keeps the KV contents and the `EMAIL_KEY` secret, so the
+link with Apps Script, the key pair and email survive every deploy. To move the Worker to another Cloudflare
 account (new KV namespace id in `wrangler.toml`, new repository secrets,
 `PUSH_RELAY_URL`, then Set up), follow
 [docs/SETUP.md, step 5F](../../docs/SETUP.md#f-moving-the-worker-to-another-cloudflare-account).
@@ -302,8 +357,8 @@ account (new KV namespace id in `wrangler.toml`, new repository secrets,
 ## Plan and limits
 
 **Email** needs the **Workers Paid** plan ($5 a month: 3,000 emails a month
-included, then $0.35 per 1,000) and `mytma.org` onboarded under *Compute →
-Email Service → Email Sending*. Limits per email: 50 recipients (the Worker
+included, then $0.35 per 1,000), `mytma.org` onboarded under *Compute →
+Email Service → Email Sending*, and the `EMAIL_KEY` secret. Limits per email: 50 recipients (the Worker
 uses 1), subject 998 characters (the Worker allows 300), 5 MiB in all. The
 `[[send_email]]` binding is in [wrangler.toml](wrangler.toml); if a deploy
 fails because the account can't use Email Sending yet, finish the onboarding

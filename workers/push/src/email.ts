@@ -1,11 +1,15 @@
 // Transactional email through Cloudflare Email Service ("Email Sending").
 //
 // Apps Script posts the emails the app sends (sign-in codes, notifications,
-// announcements, admin alerts) to POST /email, one recipient per message, and
-// the Worker hands each one to the `send_email` binding EMAIL. The sender is
-// fixed by wrangler.toml ([vars] EMAIL_FROM and EMAIL_FROM_NAME) and is never
-// taken from the request, so the relay secret can't be used to send as anyone
-// else.
+// announcements, admin alerts) to POST /email, one recipient per message (up
+// to 10 messages per request), and the Worker hands each one to the
+// `send_email` binding EMAIL. The sender is fixed by wrangler.toml ([vars]
+// EMAIL_FROM and EMAIL_FROM_NAME) and is never taken from the request, so the
+// relay secret can't be used to send as anyone else.
+//
+// Only the relay secret pinned by the EMAIL_KEY Worker secret may send (see
+// emailKey below): /register is trust on first use, and whoever registers
+// first must not be able to send mail as noreply@mytma.org.
 //
 // Every address, the subject and both bodies are checked before anything is
 // sent: plain addresses only (no display names, lists or line breaks) and no
@@ -17,7 +21,7 @@
 import { utf8 } from './b64';
 import type { EmailAddressLike, EmailBinding, Env, OutgoingEmail } from './env';
 
-/** Messages per /email request. Apps Script sends one at a time. */
+/** Messages per /email request (Apps Script batches notification emails up to this). */
 export const MAX_EMAIL_MESSAGES = 10;
 /** RFC 5321 path limit. */
 export const MAX_ADDRESS_CHARS = 254;
@@ -42,11 +46,18 @@ export type EmailErrorReason =
   | 'bad_content' // `html` or `text` is not a string
   | 'no_content' // neither `html` nor `text`
   | 'content_too_large' // html over 200 KB or text over 100 KB (UTF-8)
-  // Cloudflare refused it (the thrown error's code is passed along as `code`):
-  | 'sender_not_verified' // E_SENDER_NOT_VERIFIED: the sending domain isn't onboarded/verified yet
+  // Cloudflare refused it (the thrown error's code is passed along as `code`).
+  // About the account or domain (every message will fail the same way):
+  | 'sender_not_verified' // E_SENDER_NOT_VERIFIED, E_SENDER_DOMAIN_NOT_AVAILABLE: the domain isn't onboarded/verified yet
+  | 'account_suspended' // E_ACCOUNT_SUSPENDED: Cloudflare paused Email Sending for the account
   | 'rate_limited' // E_RATE_LIMIT_EXCEEDED or E_DAILY_LIMIT_EXCEEDED
-  | 'recipient_not_allowed' // E_RECIPIENT_NOT_ALLOWED (e.g. only verified destinations allowed)
-  | 'send_failed'; // anything else
+  // About this one message or recipient (the next message may well go out):
+  | 'recipient_not_allowed' // E_RECIPIENT_NOT_ALLOWED and the like (only verified destinations until the domain is onboarded)
+  | 'recipient_suppressed' // E_RECIPIENT_SUPPRESSED: on the suppression list (an earlier hard bounce or complaint)
+  | 'delivery_failed' // E_DELIVERY_FAILED: the recipient's server refused it
+  | 'invalid_message' // E_VALIDATION_ERROR, E_FIELD_MISSING, E_HEADER_*, E_TOO_MANY_*: Cloudflare refused the content
+  // (content_too_large above also covers E_CONTENT_TOO_LARGE)
+  | 'send_failed'; // anything else, e.g. E_INTERNAL_SERVER_ERROR or a code this Worker doesn't know
 
 export type EmailResult =
   | { status: 'ok'; messageId: string }
@@ -85,6 +96,15 @@ export function emailSender(env: Env): EmailAddressLike {
     email: isPlainAddress(email) ? email : DEFAULT_EMAIL_FROM,
     name: name || DEFAULT_EMAIL_FROM_NAME,
   };
+}
+
+/**
+ * The EMAIL_KEY Worker secret (lowercase hex SHA-256 of the relay secret that
+ * may send email), or null when it is missing or not 64 hex characters.
+ */
+export function emailKey(env: Env): string | null {
+  const key = (env.EMAIL_KEY ?? '').trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(key) ? key : null;
 }
 
 /** True when the EMAIL binding is configured on this Worker. */
@@ -136,13 +156,36 @@ function errorCode(error: unknown): string {
   return typeof code === 'string' ? code.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, MAX_CODE_CHARS) : '';
 }
 
-/** Maps a thrown Email Sending error to a reason. Only the code is kept, never the error message. */
+/** Cloudflare's codes (Email Sending Workers API, "Error codes") with a reason of their own. */
+const REASON_BY_CODE = new Map<string, EmailErrorReason>([
+  ['E_SENDER_NOT_VERIFIED', 'sender_not_verified'],
+  ['E_SENDER_DOMAIN_NOT_AVAILABLE', 'sender_not_verified'],
+  ['E_ACCOUNT_SUSPENDED', 'account_suspended'],
+  ['E_RATE_LIMIT_EXCEEDED', 'rate_limited'],
+  ['E_DAILY_LIMIT_EXCEEDED', 'rate_limited'],
+  ['E_RECIPIENT_SUPPRESSED', 'recipient_suppressed'],
+  ['E_DELIVERY_FAILED', 'delivery_failed'],
+  ['E_CONTENT_TOO_LARGE', 'content_too_large'],
+  ['E_VALIDATION_ERROR', 'invalid_message'],
+  ['E_FIELD_MISSING', 'invalid_message'],
+  ['E_TOO_MANY_RECIPIENTS', 'invalid_message'],
+  ['E_TOO_MANY_ATTACHMENTS', 'invalid_message'],
+]);
+
+/**
+ * Maps a thrown Email Sending error to a reason. Only the code is kept, never
+ * the error message. Apps Script tells problems with one message or recipient
+ * (it sends just that one another way) from problems with the Worker or the
+ * account (it stops asking the Worker for a while), so the codes about one
+ * recipient must not end up as send_failed.
+ */
 export function mapEmailError(error: unknown): { status: 'error'; reason: EmailErrorReason; code?: string } {
   const code = errorCode(error);
-  let reason: EmailErrorReason = 'send_failed';
-  if (code === 'E_SENDER_NOT_VERIFIED') reason = 'sender_not_verified';
-  else if (code === 'E_RATE_LIMIT_EXCEEDED' || code === 'E_DAILY_LIMIT_EXCEEDED') reason = 'rate_limited';
-  else if (/RECIPIENT|DESTINATION/i.test(code) && /NOT_?ALLOWED|NOT_?VERIFIED|UNVERIFIED/i.test(code)) reason = 'recipient_not_allowed';
+  let reason: EmailErrorReason = REASON_BY_CODE.get(code) ?? 'send_failed';
+  if (reason === 'send_failed') {
+    if (/^E_HEADERS?_/.test(code)) reason = 'invalid_message';
+    else if (/RECIPIENT|DESTINATION/i.test(code) && /NOT_?ALLOWED|NOT_?VERIFIED|UNVERIFIED/i.test(code)) reason = 'recipient_not_allowed';
+  }
   return code ? { status: 'error', reason, code } : { status: 'error', reason };
 }
 
@@ -159,8 +202,8 @@ async function sendOne(message: unknown, binding: EmailBinding, from: EmailAddre
 }
 
 /**
- * Sends each message in order, one at a time (Apps Script sends one per
- * request; a batch is at most 10). Results are in the same order.
+ * Sends each message in order, one at a time (a request carries at most 10;
+ * Apps Script runs a few requests in parallel). Results are in the same order.
  */
 export async function sendEmails(messages: unknown[], binding: EmailBinding, from: EmailAddressLike): Promise<EmailResult[]> {
   const results: EmailResult[] = [];

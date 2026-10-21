@@ -23,6 +23,12 @@ EMAIL_FROM_NAME = "Timberlane Music Association"
 # Email Sending (public beta, needs the Workers Paid plan and mytma.org onboarded
 # under Compute > Email Service > Email Sending). The binding may only send from
 # EMAIL_FROM. See docs/SETUP.md, "Email from noreply@mytma.org".
+#
+# POST /email also needs the Worker *secret* EMAIL_KEY (the value TMA App >
+# Status shows: the SHA-256 of the linked sheet's relay secret). It is set by
+# hand in Cloudflare (Workers & Pages > tma-push > Settings > Variables and
+# Secrets, type Secret) or with `npx wrangler secret put EMAIL_KEY`, never
+# here: deploys keep secrets, and the Worker sends no email without it.
 [[send_email]]
 name = "EMAIL"
 allowed_sender_addresses = ["noreply@mytma.org"]

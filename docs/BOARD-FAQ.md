@@ -50,8 +50,8 @@ message so that only the receiving phone can read it (Apple, Google and the othe
 scrambled data), passes it on, and forgets it. It keeps no copies, and its logs show only which
 notification service answered, never names, addresses or message text.
 
-The app's emails pass through the Worker the same way: the script hands it one email at a time, the
-Worker passes it to Cloudflare's email service and forgets it. Its logs show only counts and error
+The app's emails pass through the Worker the same way: the script hands it a few emails at a time
+(each to one family), the Worker passes each to Cloudflare's email service and forgets it. Its logs show only counts and error
 codes, never addresses or what an email says.
 
 Push runs fine on **Cloudflare's free Workers plan** (up to 100,000 requests a day). The script sends
@@ -68,10 +68,17 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
 * **Replies** go to TMA's support address (the `SUPPORT_EMAIL` setting, normally
   `timberlanemusictma@gmail.com`), so a parent who answers an email reaches TMA.
 * **Backup:** if Cloudflare can't send an email for any reason (not set up yet, an outage, a sending
-  limit), the script sends that email from TMA's Google account instead, so sign-in codes always
-  arrive. A setting (`EMAIL_VIA` = `gmail`) switches to Google-only sending at any time.
-* Only TMA's spreadsheet can ask the Worker to send email: it uses the same password as push
-  notifications, which is kept in the script's private settings.
+  limit), the script sends that email from the Google account the script runs under instead, so
+  sign-in codes always arrive. Those emails show that account's address, which is why the script
+  should run under **TMA's own Google account**, not a volunteer's. A setting (`EMAIL_VIA` = `gmail`)
+  switches to Google-only sending at any time.
+* Only TMA's spreadsheet can ask the Worker to send email. It needs both the push password (kept in
+  the script's private settings) and an **email key** that a board member pastes into Cloudflare
+  once (SETUP.md, *Email from noreply@mytma.org*, step D). Without access to TMA's Cloudflare
+  account, nobody can make the Worker send email, not even while it is being re-linked to a new
+  spreadsheet.
+* **Cost:** the first 3,000 emails a month are included in the $5 plan; an emailed announcement to
+  every family costs well under a dollar on top (see the cost question below).
 
 ### Who can see what?
 
@@ -94,8 +101,9 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
   PayPal, TMA's push Worker and Twilio, and run its own schedule.
 * **PayPal handles all card data.** TMA never sees or stores card numbers.
 * **Secrets** (the PayPal key and the push Worker password) are kept out of the spreadsheet, in the
-  script's private settings. The push Worker password also lets its holder send email as
-  `noreply@mytma.org`, so it's rotated the same way if it ever leaks (SETUP.md, step 5E).
+  script's private settings. Together with the email key in Cloudflare, the push Worker password
+  lets its holder send email as `noreply@mytma.org`, so if it ever leaks, rotate it and update the
+  email key right away (SETUP.md, step 5E).
 
 ### What about children's privacy (COPPA)?
 

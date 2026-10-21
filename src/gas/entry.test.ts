@@ -423,6 +423,9 @@ describe('showTmaStatus', () => {
     expect(text).toContain(
       'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md); Reply-To timberlanemusictma@gmail.com; Gmail fallback: 93 emails left today',
     );
+    // The email key is the SHA-256 of the relay secret (what the Worker compares), never the secret.
+    const key = nodeCrypto.createHash('sha256').update('super-secret-relay-value-0123456789abcdef').digest('hex');
+    expect(text).toContain(`Email key for Cloudflare (Worker secret EMAIL_KEY): ${key}`);
     expect(text).not.toContain('super-secret');
     expect(text).not.toMatch(/firebase|fcm/i);
     expect(gas.ui.alerts[0]).toEqual({ title: 'TMA App status', message: text });
@@ -445,9 +448,16 @@ describe('showTmaStatus', () => {
     gas.properties.setProperty('PUSH_RELAY_SECRET', 'f'.repeat(64));
     gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['SUPPORT_EMAIL', 'Help@Example.org']]));
     gas.mail.quota = 88;
-    gas.fetch.handler = () => ({ code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: true, email: true } });
+    let emailKey = true;
+    gas.fetch.handler = () => ({ code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: true, email: true, emailKey } });
     expect(showTmaStatus()).toContain(
-      'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓); Reply-To help@example.org; Gmail fallback: 88 emails left today',
+      'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓, email key ✓); Reply-To help@example.org; Gmail fallback: 88 emails left today',
+    );
+    const key = nodeCrypto.createHash('sha256').update('f'.repeat(64)).digest('hex');
+    expect(showTmaStatus()).toContain(`\nEmail key for Cloudflare (Worker secret EMAIL_KEY): ${key}\n`);
+    emailKey = false;
+    expect(showTmaStatus()).toContain(
+      'through the push Worker (Cloudflare Email Sending ✓, email key ✗: add the Worker secret EMAIL_KEY below, so Gmail sends meanwhile; see docs/SETUP.md)',
     );
 
     gas.cache.put('email-worker:paused', 'sender_not_verified', 600);
@@ -455,15 +465,19 @@ describe('showTmaStatus', () => {
       "Email: on; with Gmail from this Google account, because mytma.org isn't verified for Cloudflare Email Sending yet",
     );
     expect(showTmaStatus()).toContain('(Gmail for up to 10 minutes, then the Worker is tried again); Reply-To help@example.org; 88 emails left today');
+    gas.cache.put('email-worker:paused', 'http_error', 120);
+    expect(showTmaStatus()).toContain('(Gmail for up to 2 minutes, then the Worker is tried again)');
 
     gas.spreadsheet.sheets.length = 0;
     gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail'], ['EMAIL_ENABLED', 'FALSE']]));
-    expect(showTmaStatus()).toContain(
+    const gmailOnly = showTmaStatus();
+    expect(gmailOnly).toContain(
       'Email: notifications off (sign-in codes are still emailed); with Gmail from this Google account, because Settings EMAIL_VIA is gmail; Reply-To timberlanemusictma@gmail.com; 88 emails left today',
     );
+    expect(gmailOnly).not.toContain('Email key');
     // Still read-only: one health check per Status, no email sent.
     expect(gas.fetch.requests.every((r) => r.url.endsWith('/health'))).toBe(true);
-    expect(gas.fetch.requests).toHaveLength(4);
+    expect(gas.fetch.requests).toHaveLength(7);
     expect(gas.mail.sent).toHaveLength(0);
   });
 

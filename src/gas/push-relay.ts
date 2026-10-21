@@ -13,8 +13,11 @@
  * in parallel with UrlFetchApp.fetchAll.
  *
  * The same Worker also sends the app's email (POST /email, see mail.ts),
- * with the same secret: `authorizedPost` is the shared way in, and a 401 from
- * either links this sheet again at most once per execution.
+ * with the same secret: `authorizedPost` and `authorizedPostAll` are the
+ * shared way in, and a 401 from any of them (or /send) links this sheet again
+ * at most once per execution. The Worker only sends email for the secret
+ * whose SHA-256 is its EMAIL_KEY secret; `emailKey()` is that value, which
+ * the Status dialog shows for the admin to paste into Cloudflare.
  *
  * Logs carry counts, HTTP codes and the Worker's reason codes only: never
  * the secret, payloads or subscription endpoints.
@@ -22,7 +25,7 @@
 import { canonicalP256Key, toSubscription, type StoredSubscription } from '../server/push-subscription';
 import type { Cache, Logger, PushResult, PushSender, Secrets } from '../server/services';
 import type { PushMessage } from '../shared/types';
-import { clip, isRecord, parseJson, pick } from './util';
+import { bytesToHex, clip, isRecord, parseJson, pick } from './util';
 
 /** Messages per /send request (the Worker accepts 10; 5 keeps each request well inside its CPU budget). */
 export const MESSAGES_PER_REQUEST = 5;
@@ -58,6 +61,8 @@ export interface RelayHealth {
   hasKeys: boolean;
   /** The Worker has its Cloudflare Email Sending binding (it can send as noreply@mytma.org). */
   email: boolean;
+  /** The Worker has its EMAIL_KEY secret (which sheet may send email); whether it is this sheet's, only sending tells. */
+  emailKey: boolean;
   /** HTTP status when the Worker answered with something other than 200. */
   httpCode?: number;
   /** Why the Worker could not be reached (network error text). */
@@ -81,6 +86,19 @@ export interface PushRelaySender extends PushSender {
    * Worker can't be reached; the message never contains the secret.
    */
   authorizedPost(path: string, body: unknown): RelayAnswer;
+  /**
+   * Like authorizedPost for several bodies at once, in parallel
+   * (UrlFetchApp.fetchAll). Answers are in the same order. Requests that got a
+   * 401 are retried once after linking this sheet again. Throws when the
+   * Worker can't be reached; then none of the answers are known.
+   */
+  authorizedPostAll(path: string, bodies: unknown[]): RelayAnswer[];
+  /**
+   * The value for the Worker's EMAIL_KEY secret: the lowercase hex SHA-256 of
+   * PUSH_RELAY_SECRET (what the Worker stores; it can't be turned back into
+   * the secret). null when there is no usable secret.
+   */
+  emailKey(): string | null;
 }
 
 /** An HTTP answer from the Worker. */
@@ -302,7 +320,7 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
   }
 
   function health(): RelayHealth {
-    const down: RelayHealth = { reachable: false, registered: false, hasKeys: false, email: false };
+    const down: RelayHealth = { reachable: false, registered: false, hasKeys: false, email: false, emailKey: false };
     const base = baseUrl();
     if (!base) return { ...down, error: 'PUSH_RELAY_URL is not an https:// address' };
     try {
@@ -315,37 +333,95 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
         registered: pick(body, 'registered') === true,
         hasKeys: pick(body, 'hasKeys') === true,
         email: pick(body, 'email') === true,
+        emailKey: pick(body, 'emailKey') === true,
       };
     } catch (error) {
       return { ...down, error: errorText(error, secretMemo) };
     }
   }
 
-  function authorizedPost(path: string, body: unknown): RelayAnswer {
-    const base = requireBase();
-    const secret = relaySecret();
-    if (!secret) throw new Error('PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.');
-    const payload = JSON.stringify(body);
-    const once = (): RelayAnswer => {
-      const res = fetchOrExplain(`${base}${path}`, {
-        method: 'post',
-        contentType: 'application/json',
-        headers: { Authorization: `Bearer ${secret}` },
-        payload,
-      });
-      return { code: res.getResponseCode(), text: res.getContentText() };
-    };
-    const answer = once();
-    if (answer.code !== 401 || reRegistered) return answer;
-    // The Worker forgot this sheet (e.g. its KV was cleared): link again once, then retry.
+  /**
+   * The Worker answered 401: it forgot this sheet (e.g. its KV was cleared).
+   * Link again, at most once per execution for push and email together.
+   * True when linking worked, so the caller should retry.
+   */
+  function relinkOnce(secret: string): boolean {
+    if (reRegistered) return false;
     reRegistered = true;
     try {
       register();
+      return true;
     } catch (error) {
       logger.error('Push Worker rejected this sheet and linking again failed', { message: errorText(error, secret) });
-      return answer;
+      return false;
     }
+  }
+
+  function authorizedRequest(base: string, path: string, secret: string, body: unknown) {
+    return {
+      url: `${base}${path}`,
+      method: 'post' as const,
+      contentType: 'application/json',
+      headers: { Authorization: `Bearer ${secret}` },
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true,
+    };
+  }
+
+  function requireSecret(): string {
+    const secret = relaySecret();
+    if (!secret) throw new Error('PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.');
+    return secret;
+  }
+
+  function authorizedPost(path: string, body: unknown): RelayAnswer {
+    const base = requireBase();
+    const secret = requireSecret();
+    const once = (): RelayAnswer => {
+      const { url, ...params } = authorizedRequest(base, path, secret, body);
+      const res = fetchOrExplain(url, params);
+      return { code: res.getResponseCode(), text: res.getContentText() };
+    };
+    const answer = once();
+    if (answer.code !== 401 || !relinkOnce(secret)) return answer;
     return once();
+  }
+
+  function authorizedPostAll(path: string, bodies: unknown[]): RelayAnswer[] {
+    const base = requireBase();
+    const secret = requireSecret();
+    const all = (items: unknown[]): RelayAnswer[] => {
+      if (items.length === 0) return [];
+      let responses: GoogleAppsScript.URL_Fetch.HTTPResponse[];
+      try {
+        responses = UrlFetchApp.fetchAll(items.map((body) => authorizedRequest(base, path, secret, body)));
+      } catch (error) {
+        throw new Error(`Could not reach the push Worker (${errorText(error, secret)}).`);
+      }
+      return items.map((_, i) => {
+        const res = responses[i];
+        return res ? { code: res.getResponseCode(), text: res.getContentText() } : { code: 0, text: '' };
+      });
+    };
+    const answers = all(bodies);
+    const rejected = answers.flatMap((a, i) => (a.code === 401 ? [i] : []));
+    if (rejected.length === 0 || !relinkOnce(secret)) return answers;
+    try {
+      const again = all(rejected.map((i) => bodies[i]));
+      rejected.forEach((i, k) => {
+        answers[i] = again[k];
+      });
+    } catch (error) {
+      // Keep the first answers: the other requests were delivered and must not be reported as unknown.
+      logger.error('Push Worker unreachable on retry', { message: errorText(error, secret) });
+    }
+    return answers;
+  }
+
+  function emailKey(): string | null {
+    const secret = relaySecret();
+    if (!secret) return null;
+    return bytesToHex(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, secret, Utilities.Charset.UTF_8));
   }
 
   /** POST each chunk to /send, REQUESTS_PER_FETCH_ALL requests per fetchAll. */
@@ -430,20 +506,13 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
     const first = apply(chunks, post(base, secret, chunks));
     const noKeys = first.noKeys;
     if (first.unauthorized.length > 0) {
-      if (reRegistered) {
+      // The Worker forgot this sheet (e.g. its keys were rotated): link again once, then retry.
+      if (!relinkOnce(secret)) {
         httpCodes.push(401);
       } else {
-        // The Worker forgot this sheet (e.g. its keys were rotated): link again once, then retry.
-        reRegistered = true;
-        try {
-          register();
-          const again = apply(first.unauthorized, post(base, secret, first.unauthorized));
-          if (again.unauthorized.length > 0) httpCodes.push(401);
-          noKeys.push(...again.noKeys);
-        } catch (error) {
-          httpCodes.push(401);
-          logger.error('Push Worker rejected this sheet and linking again failed', { message: errorText(error, secret) });
-        }
+        const again = apply(first.unauthorized, post(base, secret, first.unauthorized));
+        if (again.unauthorized.length > 0) httpCodes.push(401);
+        noKeys.push(...again.noKeys);
       }
     }
     if (noKeys.length > 0) {
@@ -486,6 +555,8 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
     refreshPublicKey,
     health,
     authorizedPost,
+    authorizedPostAll,
+    emailKey,
   };
 }
 

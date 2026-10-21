@@ -121,6 +121,22 @@ describe('Admin', () => {
     expect(harness.refresh).toHaveBeenCalledWith({ force: true });
   });
 
+  it("shows the day's email allowance, or the Gmail backup's when the push Worker sends the email", async () => {
+    const direct = renderScreen(<Admin />, { api: fakeApi({ 'admin.overview': () => makeOverview() }), data: adminData() });
+    const tile = (await screen.findByText('Emails left today')).closest('li') as HTMLElement;
+    expect(within(tile).getByText('97')).toBeInTheDocument();
+    direct.unmount();
+
+    const relayed = makeOverview();
+    relayed.stats = { ...relayed.stats, emailQuotaRemaining: 1000, emailFrom: 'noreply@mytma.org', emailBackupRemaining: 81 };
+    renderScreen(<Admin />, { api: fakeApi({ 'admin.overview': () => relayed }), data: adminData() });
+    const backup = (await screen.findByText('Gmail backup emails left today')).closest('li') as HTMLElement;
+    expect(within(backup).getByText('81')).toBeInTheDocument();
+    expect(within(backup).getByText('Email is sent from noreply@mytma.org')).toBeInTheDocument();
+    expect(screen.queryByText('1000')).not.toBeInTheDocument();
+    expect(screen.queryByText('Emails left today')).not.toBeInTheDocument();
+  });
+
   it('denies with a note and shows conflicts from the server', async () => {
     const api = fakeApi({
       'admin.overview': () => makeOverview(),
