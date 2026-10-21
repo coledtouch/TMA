@@ -286,9 +286,14 @@ describe('sendTestPushToMe', () => {
       ['treasurer@example.com', 'F1', 'demo-device-parent', 'Demo', 'x', 'x'],
     ]);
     const sentTo: string[] = [];
+    const emailed: Array<Record<string, unknown>> = [];
     gas.fetch.handler = (r) => {
-      expect(r.url).toBe(`${WORKER}/send`);
       expect(r.headers.Authorization).toBe(`Bearer ${SECRET}`);
+      if (r.url === `${WORKER}/email`) {
+        emailed.push(...(JSON.parse(r.payload as string) as { messages: Array<Record<string, unknown>> }).messages);
+        return { code: 200, body: { results: [{ status: 'ok', messageId: 'm-1' }] } };
+      }
+      expect(r.url).toBe(`${WORKER}/send`);
       const { messages } = JSON.parse(r.payload as string) as { messages: Array<{ subscription: { endpoint: string }; payload: string }> };
       for (const m of messages) {
         sentTo.push(m.subscription.endpoint);
@@ -303,15 +308,57 @@ describe('sendTestPushToMe', () => {
     const report = sendTestPushToMe();
 
     expect(sentTo.map((e) => e.replace(/.*device-/, ''))).toEqual(['live:APA91bH', 'dead:APA91bH']);
-    expect(report).toMatchObject({ email: 'treasurer@example.com', devices: 3, push: 1, removed: 2, emailSent: true });
+    expect(report).toMatchObject({ email: 'treasurer@example.com', devices: 3, push: 1, removed: 2, emailSent: true, emailVia: 'cloudflare' });
     // Dead and demo rows blanked; the others are untouched.
     expect([1, 2, 3, 4, 5, 6].map((c) => sheet.raw(4, c))).toEqual(['', '', '', '', '', '']);
     expect(sheet.dump().map((row) => row[2])).toEqual(['Token', live, other]);
-    expect(gas.mail.sent[0]).toMatchObject({ to: 'treasurer@example.com' });
+    // The test email took the same path as every email: the Worker, as noreply@mytma.org.
+    expect(emailed).toEqual([
+      expect.objectContaining({ to: 'treasurer@example.com', subject: 'Timberlane Music Association: test notification', replyTo: 'timberlanemusictma@gmail.com' }),
+    ]);
+    expect(gas.mail.sent).toHaveLength(0);
     const log = gas.spreadsheet.getSheetByName('Log')!.dump();
     expect(log[1][1]).toBe('notify');
     expect(log[1][2]).toBe('test: Test notification ✅ → push 1, email 1, sms 0');
     expect(gas.ui.alerts[0].message).toContain('Push: delivered to 1 of 3 device(s).');
+    expect(gas.ui.alerts[0].message).toContain('Email: sent from noreply@mytma.org through the push Worker (Cloudflare Email Sending).');
+  });
+
+  it('reports a test email that went out with Gmail because the Worker could not send it', () => {
+    gas.properties.setProperty('PUSH_RELAY_SECRET', SECRET);
+    devices([]);
+    gas.fetch.handler = (r) => {
+      expect(r.url).toBe(`${WORKER}/email`);
+      return { code: 200, body: { results: [{ status: 'error', reason: 'sender_not_verified', code: 'E_SENDER_NOT_VERIFIED' }] } };
+    };
+    const report = sendTestPushToMe();
+    expect(report).toMatchObject({ emailSent: true, emailVia: 'gmail', emailWorkerReason: 'sender_not_verified', emailWorkerCode: 'E_SENDER_NOT_VERIFIED' });
+    expect(gas.mail.sent).toEqual([expect.objectContaining({ to: 'treasurer@example.com', replyTo: 'timberlanemusictma@gmail.com' })]);
+    expect(gas.ui.alerts[0].message).toContain(
+      "Email: sent with Gmail from this Google account instead of noreply@mytma.org, because mytma.org isn't verified for Cloudflare Email Sending yet",
+    );
+    expect(gas.ui.alerts[0].message).toContain('E_SENDER_NOT_VERIFIED.');
+  });
+
+  it('reports a test email sent with Gmail on purpose (EMAIL_VIA = gmail)', () => {
+    gas.properties.setProperty('PUSH_RELAY_SECRET', SECRET);
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail']]));
+    devices([]);
+    expect(sendTestPushToMe()).toMatchObject({ emailSent: true, emailVia: 'gmail' });
+    expect(gas.fetch.requests).toHaveLength(0);
+    expect(gas.ui.alerts[0].message).toContain('Email: sent with Gmail from this Google account (Settings EMAIL_VIA is gmail).');
+  });
+
+  it('reports a test email that could not be sent at all', () => {
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail']]));
+    devices([]);
+    vi.spyOn(MailApp, 'sendEmail').mockImplementation(() => {
+      throw new Error('Service invoked too many times for one day: email.');
+    });
+    const report = sendTestPushToMe();
+    expect(report.emailSent).toBe(false);
+    expect(gas.ui.alerts[0].message).toContain('Email: not sent.');
+    expect(gas.ui.alerts[0].message).toContain('The test email could not be sent: Service invoked too many times');
   });
 
   it('explains how to set push up when the relay secret is missing', () => {
@@ -326,7 +373,10 @@ describe('sendTestPushToMe', () => {
     const report = sendTestPushToMe();
     expect(report.push).toBe(0);
     expect(report.notes[0]).toContain('No phones are registered for treasurer@example.com');
-    expect(report.emailSent).toBe(true);
+    // Not linked to the Worker (no PUSH_RELAY_SECRET): the email still goes, with Gmail.
+    expect(report).toMatchObject({ emailSent: true, emailVia: 'gmail', emailWorkerReason: 'not_linked' });
+    expect(gas.fetch.requests).toHaveLength(0);
+    expect(gas.ui.alerts[0].message).toContain("because this sheet isn't linked to the push Worker yet");
   });
 
   it('respects EMAIL_ENABLED and the mail quota', () => {
@@ -369,7 +419,10 @@ describe('showTmaStatus', () => {
     expect(text).toContain('Push public key (PUSH_PUBLIC_KEY): not saved yet');
     expect(text).toContain('Push notifications: configured');
     expect(text).toContain('sync every 15 min ✓, daily reminders ✗ (TMA App → Install schedules)');
-    expect(text).toContain('93 emails left today');
+    // The Worker answered without "email": true, so it can't send email yet; Gmail does meanwhile.
+    expect(text).toContain(
+      'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md); Reply-To timberlanemusictma@gmail.com; Gmail fallback: 93 emails left today',
+    );
     expect(text).not.toContain('super-secret');
     expect(text).not.toMatch(/firebase|fcm/i);
     expect(gas.ui.alerts[0]).toEqual({ title: 'TMA App status', message: text });
@@ -386,6 +439,32 @@ describe('showTmaStatus', () => {
     expect(text).toContain('Push Worker health: unreachable (Address unavailable)');
     expect(text).toContain('Push public key (PUSH_PUBLIC_KEY): saved ✓');
     expect(text).toContain('Push notifications: not configured (TMA App → Set up / repair tabs)');
+  });
+
+  it('shows the email route: the Worker with Email Sending, Gmail by setting, or Gmail while paused', () => {
+    gas.properties.setProperty('PUSH_RELAY_SECRET', 'f'.repeat(64));
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['SUPPORT_EMAIL', 'Help@Example.org']]));
+    gas.mail.quota = 88;
+    gas.fetch.handler = () => ({ code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: true, email: true } });
+    expect(showTmaStatus()).toContain(
+      'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓); Reply-To help@example.org; Gmail fallback: 88 emails left today',
+    );
+
+    gas.cache.put('email-worker:paused', 'sender_not_verified', 600);
+    expect(showTmaStatus()).toContain(
+      "Email: on; with Gmail from this Google account, because mytma.org isn't verified for Cloudflare Email Sending yet",
+    );
+    expect(showTmaStatus()).toContain('(Gmail for up to 10 minutes, then the Worker is tried again); Reply-To help@example.org; 88 emails left today');
+
+    gas.spreadsheet.sheets.length = 0;
+    gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail'], ['EMAIL_ENABLED', 'FALSE']]));
+    expect(showTmaStatus()).toContain(
+      'Email: notifications off (sign-in codes are still emailed); with Gmail from this Google account, because Settings EMAIL_VIA is gmail; Reply-To timberlanemusictma@gmail.com; 88 emails left today',
+    );
+    // Still read-only: one health check per Status, no email sent.
+    expect(gas.fetch.requests.every((r) => r.url.endsWith('/health'))).toBe(true);
+    expect(gas.fetch.requests).toHaveLength(4);
+    expect(gas.mail.sent).toHaveLength(0);
   });
 
   it('points to setup when TOKEN_SECRET is missing', () => {

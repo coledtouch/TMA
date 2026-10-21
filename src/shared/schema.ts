@@ -224,6 +224,8 @@ export const SETTING_DEFAULTS = {
     'TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student\'s name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.',
   REMINDER_DAYS: '14, 7, 1',
   EMAIL_ENABLED: 'TRUE',
+  /** "cloudflare": send as noreply@mytma.org through the push Worker (Gmail if that fails); "gmail": always MailApp. */
+  EMAIL_VIA: 'cloudflare',
   SMS_ENABLED: 'FALSE',
   PUSH_RELAY_URL: 'https://tma-push.coleciprari.workers.dev',
   TOKEN_VERSION: '1',

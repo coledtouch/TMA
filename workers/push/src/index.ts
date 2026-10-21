@@ -1,14 +1,17 @@
-// tma-push: a stateless Web Push sender for the TMA Family App.
+// tma-push: a stateless Web Push sender for the TMA Family App, which also
+// sends the app's email as noreply@mytma.org (Cloudflare Email Sending).
 //
 // Apps Script keeps the push subscriptions in the Google Sheet and calls this
-// Worker to deliver notifications. The Worker only stores its VAPID key pair
-// and the SHA-256 of the shared relay secret (both in KV). See README.md.
+// Worker to deliver notifications and emails. The Worker only stores its VAPID
+// key pair and the SHA-256 of the shared relay secret (both in KV). See README.md.
 //
-//   GET  /health            {"ok":true,"name":"tma-push","registered":bool,"hasKeys":bool}
+//   GET  /health            {"ok":true,"name":"tma-push","registered":bool,"hasKeys":bool,"email":bool}
 //   GET  /vapid-public-key  {"publicKey":"<b64url>"}   (creates the key pair on first use)
 //   POST /register          {"secret":"..."}            trust on first use
 //   POST /send              Authorization: Bearer <secret>, {"messages":[...]} (max 10)
+//   POST /email             Authorization: Bearer <secret>, {"messages":[{to, subject, html?, text?, replyTo?}]} (1 to 10)
 import { concat, constantTimeEqual, sha256Hex } from './b64';
+import { emailSender, hasEmailBinding, MAX_EMAIL_MESSAGES, sendEmails, summarizeEmailResults } from './email';
 import { KV_RECHECK_MS, KV_SECRET, kvGet, kvPut, kvRead, type Env } from './env';
 import { DEFAULT_SUBJECT, getVapidKeys, hasVapidKeys, loadVapidKeys } from './vapid';
 import { sendAll, type SendResult } from './webpush';
@@ -20,7 +23,7 @@ export const NAME = 'tma-push';
 export const MAX_MESSAGES = 10;
 export const MIN_SECRET = 32;
 export const MAX_SECRET = 256;
-/** /send body cap in bytes: 10 messages of up to 3000 bytes each, with JSON escaping headroom. */
+/** /send and /email body cap in bytes: 10 push messages of up to 3000 bytes each with JSON escaping headroom, or a few emails. */
 export const MAX_BODY_BYTES = 256 * 1024;
 /** /register body cap in bytes ({"secret": <= 256 chars}, even fully escaped, is far below). */
 export const MAX_REGISTER_BODY_BYTES = 4 * 1024;
@@ -30,6 +33,7 @@ const ROUTES = new Map<string, string>([
   ['/vapid-public-key', 'GET'],
   ['/register', 'POST'],
   ['/send', 'POST'],
+  ['/email', 'POST'],
 ]);
 
 function json(status: number, body: unknown, extra: Record<string, string> = {}): Response {
@@ -95,9 +99,18 @@ async function storedSecretMatches(env: Env, hash: string): Promise<'match' | 'm
   return constantTimeEqual(stored, hash) ? 'match' : 'mismatch';
 }
 
+/** The request carries `Authorization: Bearer <secret>` with the registered relay secret (/send and /email). */
+async function isAuthorized(request: Request, env: Env): Promise<boolean> {
+  const auth = request.headers.get('Authorization') ?? '';
+  const match = /^Bearer (.+)$/.exec(auth);
+  const secret = match?.[1];
+  if (!isValidSecret(secret)) return false;
+  return (await storedSecretMatches(env, await sha256Hex(secret))) === 'match';
+}
+
 async function handleHealth(env: Env): Promise<Response> {
   const [secret, hasKeys] = await Promise.all([kvGet(env, KV_SECRET), hasVapidKeys(env)]);
-  return json(200, { ok: true, name: NAME, registered: secret !== null, hasKeys });
+  return json(200, { ok: true, name: NAME, registered: secret !== null, hasKeys, email: hasEmailBinding(env) });
 }
 
 async function handlePublicKey(env: Env): Promise<Response> {
@@ -132,11 +145,7 @@ async function handleRegister(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleSend(request: Request, env: Env): Promise<Response> {
-  const auth = request.headers.get('Authorization') ?? '';
-  const match = /^Bearer (.+)$/.exec(auth);
-  const secret = match?.[1];
-  if (!isValidSecret(secret)) return UNAUTHORIZED();
-  if ((await storedSecretMatches(env, await sha256Hex(secret))) !== 'match') return UNAUTHORIZED();
+  if (!(await isAuthorized(request, env))) return UNAUTHORIZED();
 
   const body = await readJson(request, MAX_BODY_BYTES);
   if (body === 'too_large') return json(413, { error: 'too_large' });
@@ -161,6 +170,30 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   return json(200, { results });
 }
 
+/**
+ * POST /email: one recipient per message, sender fixed by wrangler.toml.
+ * Per-message problems (a bad address, Cloudflare refusing it) are results,
+ * not HTTP errors, so Apps Script can send just that message another way.
+ */
+async function handleEmail(request: Request, env: Env): Promise<Response> {
+  if (!(await isAuthorized(request, env))) return UNAUTHORIZED();
+  if (!hasEmailBinding(env)) {
+    console.log('email not_configured');
+    return json(503, { error: 'email_not_configured' });
+  }
+  const body = await readJson(request, MAX_BODY_BYTES);
+  if (body === 'too_large') return json(413, { error: 'too_large' });
+  if (!body || typeof body.value !== 'object' || body.value === null) return BAD_REQUEST();
+  const messages = (body.value as { messages?: unknown }).messages;
+  if (!Array.isArray(messages) || messages.length === 0) return BAD_REQUEST();
+  if (messages.length > MAX_EMAIL_MESSAGES) return json(413, { error: 'too_many_messages', max: MAX_EMAIL_MESSAGES });
+
+  const results = await sendEmails(messages, env.EMAIL, emailSender(env));
+  // Counts and error codes only: never addresses, subjects or bodies.
+  console.log(summarizeEmailResults(results));
+  return json(200, { results });
+}
+
 /** Routes one request. Exported for tests; the Worker entry point is below. */
 export async function handleRequest(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
@@ -175,6 +208,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
         return await handlePublicKey(env);
       case '/register':
         return await handleRegister(request, env);
+      case '/email':
+        return await handleEmail(request, env);
       default:
         return await handleSend(request, env);
     }

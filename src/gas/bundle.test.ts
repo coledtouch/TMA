@@ -96,6 +96,8 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
     let workerSecret = '';
     let parentToken = '';
     const pushed: Array<{ subscription: { endpoint: string }; payload: string }> = [];
+    /** Emails the Worker was asked to send as noreply@mytma.org. */
+    const emailed: Array<{ to: string; subject: string; html?: string; text?: string; replyTo?: string }> = [];
     const g = globalThis as unknown as Record<string, (e?: unknown) => unknown>;
 
     beforeAll(() => {
@@ -125,6 +127,12 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
           const { messages } = JSON.parse(String(r.payload)) as { messages: Array<{ subscription: { endpoint: string }; payload: string }> };
           pushed.push(...messages);
           return { code: 200, body: { results: messages.map(() => ({ status: 'ok' })) } };
+        }
+        if (r.url === `${WORKER}/email`) {
+          if (r.headers.Authorization !== `Bearer ${workerSecret}`) return { code: 401, body: { error: 'unauthorized' } };
+          const { messages } = JSON.parse(String(r.payload)) as { messages: typeof emailed };
+          emailed.push(...messages);
+          return { code: 200, body: { results: messages.map((_, i) => ({ status: 'ok', messageId: `m-${emailed.length + i}` })) } };
         }
         return { code: 404, body: { error: 'not_found' } };
       };
@@ -162,8 +170,11 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
 
       const sent = post({ action: 'auth.requestCode', params: { email: 'parent@example.com' } });
       expect(sent).toEqual({ ok: true, data: { sent: true } }); // production mode: no devCode
-      const mail = gas.mail.sent.at(-1)!;
+      // The code went out through the Worker (as noreply@mytma.org), not from the script's Gmail.
+      const mail = emailed.at(-1)!;
       expect(mail.to).toBe('parent@example.com');
+      expect(mail.replyTo).toBe('timberlanemusictma@gmail.com');
+      expect(gas.mail.sent).toHaveLength(0);
       const code = /(\d{6})/.exec(String(mail.subject))?.[1];
       expect(code).toBeDefined();
 
@@ -214,14 +225,31 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
         if (h in values) ledger.write(row, i + 1, values[h]);
       });
 
-      const before = gas.mail.sent.length;
+      const before = emailed.length;
       pushed.length = 0;
       g.syncTick();
-      const alerts = gas.mail.sent.slice(before).filter((m) => m.subject === '+$50.00 for Avery');
+      const alerts = emailed.slice(before).filter((m) => m.subject === '+$50.00 for Avery');
       expect(alerts.map((m) => m.to).sort()).toEqual(['casey.thompson@example.com', 'parent@example.com']);
       // And the parent's phone got it through the push Worker.
       expect(pushed.map((m) => m.subscription.endpoint)).toEqual(['https://web.push.apple.com/QGuQyavXutnMH-test-device']);
       expect(JSON.parse(pushed[0].payload)).toMatchObject({ title: '+$50.00 for Avery', url: '#/funds', topic: 'balance' });
+      expect(gas.mail.sent).toHaveLength(0);
+    });
+
+    it('falls back to Gmail for a sign-in code when the Worker cannot send email', () => {
+      const handler = gas.fetch.handler;
+      gas.fetch.handler = (r) =>
+        r.url === `${WORKER}/email`
+          ? { code: 200, body: { results: [{ status: 'error', reason: 'sender_not_verified', code: 'E_SENDER_NOT_VERIFIED' }] } }
+          : handler(r);
+      try {
+        const sent = post({ action: 'auth.requestCode', params: { email: 'nguyen.family@example.com' } });
+        expect(sent).toEqual({ ok: true, data: { sent: true } });
+        expect(gas.mail.sent.at(-1)).toMatchObject({ to: 'nguyen.family@example.com', replyTo: 'timberlanemusictma@gmail.com' });
+        expect(String(gas.mail.sent.at(-1)?.subject)).toMatch(/^Your TMA sign-in code: \d{6}$/);
+      } finally {
+        gas.fetch.handler = handler;
+      }
     });
   });
 });

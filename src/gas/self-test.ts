@@ -4,6 +4,7 @@
  * email and calls the push sender (and mailer) directly.
  */
 import type { PushMessage } from '../shared/types';
+import type { EmailVia } from './mail';
 import type { GasServices } from './services';
 import { escapeHtml } from './util';
 
@@ -21,6 +22,12 @@ export interface SelfTestReport {
   push: number;
   removed: number;
   emailSent: boolean;
+  /** Which way the test email went out: through the push Worker (noreply@mytma.org) or with Gmail. */
+  emailVia?: EmailVia;
+  /** Why the Worker didn't send it, when Gmail did. */
+  emailWorkerReason?: string;
+  /** Cloudflare's error code, when there was one. */
+  emailWorkerCode?: string;
   notes: string[];
 }
 
@@ -82,13 +89,22 @@ export function sendSelfTest(services: GasServices, rawEmail: string): SelfTestR
     report.notes.push('No emails left in today\'s Google quota.');
   } else {
     const orgName = services.setting('ORG_NAME');
-    services.mailer.send({
-      to: email,
-      subject: `${orgName}: test notification`,
-      html: testEmailHtml(orgName),
-      text: `${TEST_MESSAGE.title}\n\nEmail from the TMA app is working.\n`,
-    });
-    report.emailSent = true;
+    try {
+      // Same path as every other email: the push Worker (noreply@mytma.org), or Gmail when that fails.
+      services.mailer.send({
+        to: email,
+        subject: `${orgName}: test notification`,
+        html: testEmailHtml(orgName),
+        text: `${TEST_MESSAGE.title}\n\nEmail from the TMA app is working.\n`,
+      });
+      report.emailSent = true;
+      const delivery = services.mailer.lastDelivery();
+      report.emailVia = delivery?.via ?? 'gmail';
+      if (delivery?.workerReason) report.emailWorkerReason = delivery.workerReason;
+      if (delivery?.workerCode) report.emailWorkerCode = delivery.workerCode;
+    } catch (error) {
+      report.notes.push(`The test email could not be sent: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   services.store.append('Log', [

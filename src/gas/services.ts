@@ -3,7 +3,8 @@
  * execution: every web request, trigger run and menu click starts fresh.
  */
 import type { SecretName, SettingKey } from '../shared/schema';
-import type { Cache, Crypto, Logger, Mailer, Secrets, Services } from '../server/services';
+import type { Cache, Crypto, Logger, Secrets, Services } from '../server/services';
+import { createGasMailer, type GasMailer } from './mail';
 import { createPayPalGateway } from './paypal';
 import { createPushRelaySender, type PushRelaySender } from './push-relay';
 import { readFlag, readSetting } from './settings';
@@ -20,6 +21,8 @@ export interface GasServices extends Services {
   store: SheetStore;
   /** Push over the TMA push Worker (also used by setup and the status dialog). */
   push: PushRelaySender;
+  /** Email as noreply@mytma.org through the same Worker, Gmail (MailApp) as the fallback. */
+  mailer: GasMailer;
   /** A Settings-tab value (or its default) as text. */
   setting(key: SettingKey): string;
   /** A yes/no Settings-tab value (or its default). */
@@ -41,6 +44,7 @@ export function createGasServices(): GasServices {
   const clock = { now: () => new Date() };
   const secrets = createScriptSecrets();
   const logger = createConsoleLogger();
+  const push = createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting('PUSH_RELAY_URL') });
 
   return {
     mode: 'production',
@@ -51,9 +55,16 @@ export function createGasServices(): GasServices {
     clock,
     crypto: createGasCrypto(),
     secrets,
-    mailer: createMailAppMailer(() => setting('ORG_NAME')),
+    mailer: createGasMailer({
+      relay: push,
+      cache,
+      logger,
+      via: () => setting('EMAIL_VIA'),
+      senderName: () => setting('ORG_NAME'),
+      replyTo: () => setting('SUPPORT_EMAIL'),
+    }),
     sms: createTwilioSender({ secrets, logger }),
-    push: createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting('PUSH_RELAY_URL') }),
+    push,
     payments: createPayPalGateway({
       cache,
       logger,
@@ -163,23 +174,6 @@ export function createScriptSecrets(): Secrets {
     },
     set(name: SecretName, value: string) {
       props().setProperty(name, value);
-    },
-  };
-}
-
-export function createMailAppMailer(senderName: () => string): Mailer {
-  const oneLine = (s: string) => s.replace(/[\r\n]+/g, ' ').trim();
-  return {
-    remainingQuota: () => MailApp.getRemainingDailyQuota(),
-    send(msg) {
-      if (!msg.to || !msg.to.includes('@')) throw new Error('Invalid email recipient');
-      MailApp.sendEmail({
-        to: msg.to,
-        subject: oneLine(msg.subject),
-        htmlBody: msg.html,
-        body: msg.text,
-        name: oneLine(senderName()),
-      });
     },
   };
 }

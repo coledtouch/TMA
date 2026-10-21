@@ -122,6 +122,7 @@ describe('sampleData()', () => {
   it('uses only fictional example.com/example.org addresses', () => {
     const json = JSON.stringify(sampleData(TEST_NOW, { demoSettings: true }));
     const emails = json.match(/[\w.+-]+@[\w.-]+/g) ?? [];
-    for (const e of emails) expect(e).toMatch(/@example\.(com|org)$|^timberlanemusictma@gmail\.com$/);
+    // TMA's own addresses are fine (its Gmail, and noreply@mytma.org, the app's sender); no real person's.
+    for (const e of emails) expect(e).toMatch(/@example\.(com|org)$|^timberlanemusictma@gmail\.com$|^noreply@mytma\.org$/);
   });
 });

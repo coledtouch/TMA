@@ -92,12 +92,16 @@ The screenshots are taken from the demo at iPhone 13 size by `npm run screenshot
 
 ## What it costs
 
-Everything runs on free services: TMA's own Google account, GitHub Pages and Cloudflare's free Workers plan.
+Everything runs on free services (TMA's own Google account, GitHub Pages and Cloudflare Workers)
+except one choice: sending the app's email from **noreply@mytma.org**, which needs Cloudflare's
+Workers Paid plan ($5 a month). Without it, the app emails from TMA's Gmail for free.
 
 | Piece | Cost | Notes |
 | --- | --- | --- |
-| Google Sheet, Apps Script (the app's server) and Gmail | **$0** | A free Gmail account can email about 100 recipients a day, including sign-in codes. Free [Google Workspace for Nonprofits](https://www.google.com/nonprofits/) raises that to about 1,500. |
-| Push notifications (TMA's push Worker on Cloudflare) | **$0** | Cloudflare Workers free plan (100,000 requests a day; one request carries up to 5 notifications). No charge per message, no credit card. |
+| Google Sheet and Apps Script (the app's server) | **$0** | |
+| Email from noreply@mytma.org (Cloudflare Email Sending, through the push Worker) | **$5 a month** | Cloudflare's Workers Paid plan: 3,000 emails a month included (sign-in codes, notifications, announcements), then $0.35 per 1,000. Replies go to `SUPPORT_EMAIL`. See [docs/SETUP.md](docs/SETUP.md#email-from-noreplymytmaorg). |
+| Email from TMA's Gmail instead (Settings `EMAIL_VIA` = `gmail`), and the automatic fallback | **$0** | A free Gmail account can email about 100 recipients a day, including sign-in codes. Free [Google Workspace for Nonprofits](https://www.google.com/nonprofits/) raises that to about 1,500. |
+| Push notifications (TMA's push Worker on Cloudflare) | **$0** | Works on Cloudflare's free Workers plan (100,000 requests a day; one request carries up to 5 notifications), and costs nothing extra on Workers Paid. No charge per message. |
 | Hosting the app (GitHub Pages) | **$0** | Free for public repositories. |
 | Using activity funds for a trip | **$0** | An internal ledger entry. No payment processor is involved. |
 | Checks and cash | **$0** | |
@@ -111,18 +115,21 @@ Everything runs on free services: TMA's own Google account, GitHub Pages and Clo
 ┌────────────────────────┐  HTTPS  ┌─────────────────────────────────────┐
 │ React PWA              │ ──────▶ │ Apps Script web app                 │
 │ service worker         │         │  reads/writes ▶ TMA's Google Sheet  │
-│ (push + offline)       │         │  sends ▶ Gmail, every 15 min sync   │
+│ (push + offline)       │         │  every 15 min sync, Gmail fallback  │
 └──────────▲─────────────┘         └──────┬───────────────┬──────────────┘
            │ push                         │               │
    phone's push service ◀── push Worker ◀─┘          PayPal REST
-                        (Cloudflare, free)
+   families' inboxes ◀───── (Cloudflare: push,
+                            email as noreply@mytma.org)
 ```
 
 The app talks to a script inside TMA's Google account, which reads and writes the treasurer's
 Google Sheet. Phone notifications go through a tiny **push Worker** on Cloudflare's free plan
 ([workers/push](workers/push/README.md)). It only encrypts each notification and hands it to Apple,
 Google, Mozilla or Microsoft for delivery. It stores no family information: the phones' notification
-addresses stay in TMA's sheet.
+addresses stay in TMA's sheet. The same Worker sends the app's emails as **noreply@mytma.org**
+(Cloudflare Email Sending), with replies going to TMA's `SUPPORT_EMAIL`. If it can't send one, the
+script sends that email with Gmail instead, so sign-in codes always arrive.
 
 The full design, including every API action, notification message and scheduled job, is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -137,7 +144,7 @@ The full design, including every API action, notification message and scheduled 
 | [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md) | Board | Privacy, security, liability, costs, and what happens if the volunteer developer leaves. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Developers | Behavior spec and contracts. |
 | [apps-script/README.md](apps-script/README.md) | Whoever sets it up | The two files that go into Apps Script. |
-| [workers/push/README.md](workers/push/README.md) | Developers | The push Worker on Cloudflare: its API, deployment, free-plan limits and key rotation. |
+| [workers/push/README.md](workers/push/README.md) | Developers | The push Worker on Cloudflare: its API (push and email), deployment, plan limits and key rotation. |
 
 ## Privacy in short
 
@@ -183,7 +190,7 @@ needs no build setting: the app gets the push Worker's public key from Apps Scri
 ```
 src/shared/    types, sheet layout (schema.ts) and money helpers shared by everything
 src/server/    backend logic (plain TypeScript; runs in Apps Script and in the demo)
-src/gas/       Apps Script adapters: Sheet, Gmail, PayPal, push Worker, Twilio, menu, triggers
+src/gas/       Apps Script adapters: Sheet, email (Worker + Gmail fallback), PayPal, push Worker, Twilio, menu, triggers
 src/demo/      the in-browser demo backend with sample data
 src/web/       the React app, service worker, push and PayPal UI
 apps-script/   Code.js (generated, committed) and appsscript.json, to paste into Apps Script

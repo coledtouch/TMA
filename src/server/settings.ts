@@ -43,6 +43,8 @@ export const SETTING_NOTES: Readonly<Record<SettingKey, string>> = {
   PRIVACY_NOTE: 'Shown in the app under More > Privacy.',
   REMINDER_DAYS: 'Send payment reminders this many days before a due date (comma-separated).',
   EMAIL_ENABLED: 'TRUE sends email notifications to families who chose email.',
+  EMAIL_VIA:
+    'cloudflare = send as noreply@mytma.org through the TMA Worker (falls back to Gmail if that fails); gmail = always send from the Google account that runs the script',
   SMS_ENABLED: 'TRUE sends text messages to families who chose texts (needs Twilio; about 1 cent per text).',
   PUSH_RELAY_URL: 'Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.',
   TOKEN_VERSION: 'Change this number to sign everyone out of the app.',

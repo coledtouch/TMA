@@ -17,6 +17,15 @@ for old Edge):
 It uses only WebCrypto: no libraries, no Google Cloud project and no
 service-account key.
 
+It also sends **the app's email** (sign-in codes, notifications,
+announcements, board alerts) as **Timberlane Music Association
+&lt;noreply@mytma.org&gt;**, through Cloudflare Email Service's
+[Email Sending](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/)
+binding: `POST /email` below. Email Sending is in public beta and needs the
+**Workers Paid** plan and `mytma.org` onboarded (see
+[docs/SETUP.md, Email from noreply@mytma.org](../../docs/SETUP.md#email-from-noreplymytmaorg)).
+Apps Script falls back to Gmail for any email the Worker can't send.
+
 The Worker is **stateless** as far as families are concerned: it does not
 know who is subscribed. Apps Script keeps the push subscriptions in the Google
 Sheet (the hidden Devices tab) and hands the Worker 5 messages per request
@@ -38,10 +47,12 @@ a known path gives `405 {"error":"method_not_allowed"}`.
 ### `GET /health`
 
 ```json
-{"ok": true, "name": "tma-push", "registered": true, "hasKeys": true}
+{"ok": true, "name": "tma-push", "registered": true, "hasKeys": true, "email": true}
 ```
 
 `registered`: a secret has been registered. `hasKeys`: the VAPID key pair exists.
+`email`: the Email Sending binding `EMAIL` is configured (it says nothing about
+whether `mytma.org` is verified yet; a send answers `sender_not_verified` then).
 
 ### `GET /vapid-public-key`
 
@@ -137,6 +148,69 @@ Per message:
 Each message is encrypted with a fresh ephemeral ECDH key and random salt,
 and all the messages of one request are sent concurrently.
 
+### `POST /email`
+
+The same `Authorization: Bearer <secret>` as `/send`. Body:
+
+```json
+{
+  "messages": [
+    {
+      "to": "parent@example.com",
+      "subject": "Your TMA sign-in code: 123456",
+      "html": "<!doctype html>…",
+      "text": "Your sign-in code…",
+      "replyTo": "timberlanemusictma@gmail.com"
+    }
+  ]
+}
+```
+
+| Situation                                        | Response                                   |
+| ------------------------------------------------ | ------------------------------------------ |
+| No secret registered, missing or wrong secret    | `401 {"error": "unauthorized"}`            |
+| The `EMAIL` binding isn't configured             | `503 {"error": "email_not_configured"}`    |
+| Not JSON, `messages` not an array, or empty      | `400 {"error": "bad_request"}`             |
+| More than 10 messages (or body over 256 KB)      | `413 {"error": "too_many_messages", "max": 10}` (or `"too_large"`) |
+| Otherwise                                        | `200 {"results": [...]}`                   |
+
+`results` has one entry per message, in the same order:
+`{"status": "ok", "messageId": "…"}` or `{"status": "error", "reason": "…", "code"?: "E_…"}`.
+Messages are sent one after the other; one failure doesn't stop the rest.
+
+* **The sender is never taken from the request.** Every email is from
+  `EMAIL_FROM` / `EMAIL_FROM_NAME` (`[vars]` in [wrangler.toml](wrangler.toml):
+  `noreply@mytma.org`, `Timberlane Music Association`), and the binding itself
+  may only send from `noreply@mytma.org` (`allowed_sender_addresses`). Fields
+  like `from`, `cc`, `bcc`, `headers` or `attachments` in a message are
+  ignored.
+* **Exactly one recipient per message**, so families never see each other's
+  addresses.
+* Checked before anything is sent (answered `error` with this `reason`, and
+  nothing is sent for that message):
+  * `bad_to` / `bad_reply_to`: not one plain address (`name@domain.tld`, at
+    most 254 characters): no display names, angle brackets, lists, spaces or
+    line breaks. `replyTo` is optional.
+  * `bad_subject`: not 1 to 300 characters, blank, or contains a line break
+    or other control character (so a value can't add headers).
+  * `no_content` (neither `html` nor `text`), `bad_content` (not a string),
+    `content_too_large` (`html` over 200 KB or `text` over 100 KB of UTF-8),
+    `bad_message` (not an object).
+* What Cloudflare answered (its error code is passed on as `code`; the error
+  message, which can quote the email, never is):
+  * `sender_not_verified`: `E_SENDER_NOT_VERIFIED`, `mytma.org` isn't
+    onboarded/verified for Email Sending yet.
+  * `rate_limited`: `E_RATE_LIMIT_EXCEEDED` or `E_DAILY_LIMIT_EXCEEDED`.
+  * `recipient_not_allowed`: a recipient/destination "not allowed" or "not
+    verified" code such as `E_RECIPIENT_NOT_ALLOWED` (before the domain is
+    onboarded, Cloudflare only sends to verified addresses).
+  * `send_failed`: anything else (for example `E_RECIPIENT_SUPPRESSED` or
+    `E_VALIDATION_ERROR`).
+
+The log line for a request is counts and codes only, e.g.
+`email ok 1 error 1 rate_limited:E_RATE_LIMIT_EXCEEDED`: never addresses,
+subjects or bodies.
+
 ## How Apps Script uses it
 
 The Apps Script side is `src/gas/push-relay.ts` (the sender) and
@@ -182,6 +256,20 @@ Script Properties:
 Apps Script logs carry counts, HTTP codes and these reason codes only, never
 the secret, payloads or endpoints.
 
+**Email** (`src/gas/mail.ts`, the app's `Mailer`): with the spreadsheet's
+Settings key `EMAIL_VIA` = `cloudflare` (the default) and the sheet linked,
+each email is one `POST /email` with one message and `replyTo` = Settings
+`SUPPORT_EMAIL`. A `401` links the sheet again once per execution (shared with
+push) and retries. Any other failure (an `error` result, another HTTP status,
+no answer) sends **that** email with Gmail (`MailApp`, same Reply-To, sender
+name `ORG_NAME`) instead. `sender_not_verified`, `email_not_configured`, a
+`404` (a Worker older than `/email`) and an unfixable `401` make Apps Script
+use Gmail for the next 10 minutes without asking the Worker (CacheService);
+`rate_limited`, or 3 failures in a row, switch the rest of that execution to
+Gmail. `EMAIL_VIA` = `gmail` never calls `/email`. **TMA App → Status** shows
+the route and `/health`'s `email`; **Send me a test notification** says which
+way its test email went.
+
 ## Deployment
 
 [.github/workflows/deploy-push-worker.yml](../../.github/workflows/deploy-push-worker.yml)
@@ -211,9 +299,17 @@ account (new KV namespace id in `wrangler.toml`, new repository secrets,
 `PUSH_RELAY_URL`, then Set up), follow
 [docs/SETUP.md, step 5F](../../docs/SETUP.md#f-moving-the-worker-to-another-cloudflare-account).
 
-## Free plan
+## Plan and limits
 
-Everything fits Cloudflare's free Workers plan:
+**Email** needs the **Workers Paid** plan ($5 a month: 3,000 emails a month
+included, then $0.35 per 1,000) and `mytma.org` onboarded under *Compute →
+Email Service → Email Sending*. Limits per email: 50 recipients (the Worker
+uses 1), subject 998 characters (the Worker allows 300), 5 MiB in all. The
+`[[send_email]]` binding is in [wrangler.toml](wrangler.toml); if a deploy
+fails because the account can't use Email Sending yet, finish the onboarding
+and deploy again. The Worker that's running keeps working meanwhile.
+
+**Push** fits Cloudflare's free Workers plan (and costs nothing extra on Workers Paid):
 
 * **10 ms CPU per request**: at most 10 messages per `/send`, and Apps Script
   sends 5, to stay well inside the budget. Encrypting one message takes a
@@ -282,16 +378,19 @@ npx tsc -p workers/push/tsconfig.json
 The tests check the RFC 8291 Appendix A vector byte for byte, decrypt real
 output with an independent receiver implementation, verify the VAPID JWT
 signature, and drive every endpoint against an in-memory KV with a mocked
-`fetch`.
+`fetch` and a fake `EMAIL` binding (header-injection attempts, the fixed
+sender, error-code mapping, logs without addresses).
 
 To run the Worker locally: `cd workers/push && npm ci && npx wrangler dev`
 (uses a local, empty KV).
 
 Files:
 
-* `src/index.ts`: routing, `/register` and `/send` auth.
+* `src/index.ts`: routing, `/register`, and the bearer-secret check for `/send` and `/email`.
+* `src/email.ts`: `/email` validation, the fixed sender, sending through the
+  `EMAIL` binding and error-code mapping.
 * `src/webpush.ts`: validation, RFC 8291 encryption, the push request and
   status mapping.
 * `src/vapid.ts`: key pair creation and storage, ES256 JWT.
 * `src/b64.ts`: base64url, UTF-8, hex, SHA-256 helpers.
-* `src/env.ts`: binding types and the per-isolate KV cache.
+* `src/env.ts`: binding types (KV, `EMAIL`) and the per-isolate KV cache.

@@ -1,4 +1,5 @@
-# Cloudflare Worker that sends Web Push (RFC 8030) for the TMA Family App.
+# Cloudflare Worker that sends Web Push (RFC 8030) for the TMA Family App, and
+# the app's email as noreply@mytma.org (Cloudflare Email Service, Email Sending).
 # Deployed by .github/workflows/deploy-push-worker.yml; see README.md here.
 name = "tma-push"
 main = "src/index.ts"
@@ -14,3 +15,14 @@ id = "8d4b2d2e7e914753bbe663f16051e751"
 [vars]
 # VAPID "sub" claim: who push services contact about this sender.
 VAPID_SUBJECT = "mailto:timberlanemusictma@gmail.com"
+# The sender of every email the app sends (POST /email never takes it from the
+# request). Replies go to the Reply-To Apps Script sets: Settings SUPPORT_EMAIL.
+EMAIL_FROM = "noreply@mytma.org"
+EMAIL_FROM_NAME = "Timberlane Music Association"
+
+# Email Sending (public beta, needs the Workers Paid plan and mytma.org onboarded
+# under Compute > Email Service > Email Sending). The binding may only send from
+# EMAIL_FROM. See docs/SETUP.md, "Email from noreply@mytma.org".
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["noreply@mytma.org"]

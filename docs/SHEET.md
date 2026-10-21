@@ -284,7 +284,7 @@ app uses it on the next request. You don't need to redeploy.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `ORG_NAME` | Timberlane Music Association | Name shown in the app, in emails and on the PayPal checkout. |
-| `SUPPORT_EMAIL` | timberlanemusictma@gmail.com | Where families can email TMA with questions (shown in the app). |
+| `SUPPORT_EMAIL` | timberlanemusictma@gmail.com | Where families can email TMA with questions (shown in the app). Also the **Reply-To** of every email the app sends, so replies to `noreply@mytma.org` reach TMA. |
 | `APP_URL` | *(blank)* | The app's web address, e.g. `https://<owner>.github.io/<repo>/`. Used for the "Open the TMA app" button in emails. With no address, emails have no button. |
 | `ADMIN_EMAILS` | *(blank)* | Comma-separated emails of board members who get **Board tools** in the app (approve fund requests, verify households, send announcements) and get alerts about new sign-ups and fund requests. They sign in to the app with these emails. |
 | `SCHOOLS` | High School, Middle School, Elementary | School levels families can pick. If you rename one, update the Students tab to match. |
@@ -301,6 +301,7 @@ app uses it on the next request. You don't need to redeploy.
 | `PRIVACY_NOTE` | TMA only stores what it needs… | Shown in the app under *More → Your privacy*. |
 | `REMINDER_DAYS` | 14, 7, 1 | Send payment reminders this many days before an activity's Due Date (only to students with something left to pay). |
 | `EMAIL_ENABLED` | TRUE | `FALSE` stops notification emails (push still works). **Sign-in codes are always emailed.** |
+| `EMAIL_VIA` | cloudflare | Which way the app's emails go out. `cloudflare` = from **noreply@mytma.org** through TMA's push Worker (Cloudflare Email Sending, see [SETUP.md](SETUP.md#email-from-noreplymytmaorg)); if the Worker can't send one, that email goes out with Gmail instead. `gmail` = always from the Google account that runs the script. |
 | `SMS_ENABLED` | FALSE | `TRUE` offers text messages (needs Twilio, which costs about 1¢ per text; see SETUP.md). |
 | `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
 | `TOKEN_VERSION` | 1 | Change it (e.g. to `2`) to **sign everyone out** of the app, for example after a board member leaves or a phone is lost. Everyone simply signs in again with a new code. |

@@ -16,7 +16,10 @@ will maintain it and for contributors adding features. Contracts live in code:
   everything uploaded by hand. The school cannot share family emails, so families
   must be able to **sign themselves up**.
 * **No new spending.** Everything must run on free tiers: TMA's own Google account, GitHub Pages,
-  and Cloudflare's free Workers plan (for push notifications).
+  and Cloudflare's free Workers plan (for push notifications). One opt-in exception: email from
+  `noreply@mytma.org` uses Cloudflare Email Sending, which needs the Workers Paid plan ($5 a month,
+  3,000 emails included). With `EMAIL_VIA = gmail`, or whenever the Worker can't send, email goes
+  out with TMA's Gmail for free (§6).
 * Families can:
   * see each student's **earmarked activity-fund balance** and history,
   * see **trip/activity costs, what's paid and what's left**,
@@ -41,16 +44,18 @@ will maintain it and for contributors adding features. Contracts live in code:
 └──────────▲────────────┘                │        ▼                                  │
            │ Web Push                    │ Google Sheet (treasurer's ledger; Devices │
 ┌──────────┴────────────┐                │   tab = browsers' push subscriptions)     │
-│ Browser push services │                │ MailApp (email), time triggers (sync)     │
+│ Browser push services │                │ MailApp (email fallback), time triggers   │
 │ (Google, Apple,       │                │ UrlFetchApp → push Worker, PayPal REST,   │
 │ Mozilla, Microsoft)   │                │               Twilio (optional, paid)     │
 └──────────▲────────────┘                └─────────────────────┬─────────────────────┘
-           │ encrypted, VAPID-signed                           │ POST /send (≤ 5 each)
+           │ encrypted, VAPID-signed                           │ POST /send (≤ 5 each), /email
 ┌──────────┴───────────────────────────────────────────────────▼─────────────────────┐
-│ tma-push: Cloudflare Worker (workers/push, free plan). Stateless Web Push sender:  │
-│ VAPID signing + RFC 8291 encryption. Its KV holds only its VAPID key pair and the  │
-│ SHA-256 of the relay secret Apps Script registered (no family data).               │
+│ tma-push: Cloudflare Worker (workers/push). Stateless Web Push sender: VAPID       │
+│ signing + RFC 8291 encryption. Also sends the app's email as noreply@mytma.org     │
+│ (Cloudflare Email Sending, Workers Paid). Its KV holds only its VAPID key pair     │
+│ and the SHA-256 of the relay secret Apps Script registered (no family data).       │
 └────────────────────────────────────────────────────────────────────────────────────┘
+           Email Sending ▶ families' inboxes (From noreply@mytma.org, Reply-To SUPPORT_EMAIL)
            PayPal JS SDK buttons in the page ⇄ PayPal (orders created/captured server-side)
 ```
 
@@ -60,6 +65,10 @@ will maintain it and for contributors adding features. Contracts live in code:
   `.github/workflows/deploy-push-worker.yml`, live at `https://tma-push.coleciprari.workers.dev`
   (Settings `PUSH_RELAY_URL`). Apps Script keeps each browser's push subscription in the Devices tab
   and asks the Worker to deliver. The Worker knows no families. See §9 and §9.1.
+* **Email** (Workers Paid, $5 a month): the same Worker sends every email as
+  `Timberlane Music Association <noreply@mytma.org>` through Cloudflare Email Sending; replies go to
+  Settings `SUPPORT_EMAIL`. MailApp (TMA's Gmail) is the fallback, and the only route with
+  `EMAIL_VIA = gmail`. See §6 "Email delivery".
 * **Demo mode**: the browser runs the *same backend core* (`src/server`) against an in-memory,
   localStorage-persisted copy of the sample sheet (`src/demo`). PayPal and push are simulated. A build
   without `VITE_API_URL` is always the demo. A live build opens the demo when the address has `?demo`
@@ -227,6 +236,35 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
   with a log otherwise. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
   Admin-chosen channels further restrict announcements.
 * Each delivery batch is logged in `Log` (kind `notify`, detail "topic: title → push n, email n, sms n").
+
+**Email delivery.** Every email (sign-in codes §4, notifications, announcements, admin alerts and the
+menu's test) goes through the one `Mailer` port (`remainingQuota()`, `send({to, subject, html,
+text})`); the core doesn't know the route. In Apps Script it is `src/gas/mail.ts` (§9):
+
+1. Settings `EMAIL_VIA` = `cloudflare` (default; anything but `gmail`) **and** the push Worker is
+   configured (`PUSH_RELAY_URL` https, `PUSH_RELAY_SECRET` usable) → `POST <PUSH_RELAY_URL>/email`
+   with `Authorization: Bearer <PUSH_RELAY_SECRET>` and **one** message `{to, subject, html, text,
+   replyTo}`: subject on one line and at most 300 characters, `replyTo` = Settings `SUPPORT_EMAIL`
+   when it is one plain address (else its default). The Worker sends it From
+   `Timberlane Music Association <noreply@mytma.org>` (its own config, never the request).
+2. `401` → `POST /register` again (at most once per execution, shared with push) and retry once.
+3. Anything else that isn't `{status:'ok'}` (an `error` result, another HTTP status, no answer) →
+   log the reason code and send **that** message with `MailApp.sendEmail({to, subject, htmlBody,
+   body, name: ORG_NAME, replyTo: SUPPORT_EMAIL})`. Sign-in codes therefore always go out.
+4. So a broken setup doesn't cost a failing request per email: `sender_not_verified`,
+   `email_not_configured` (`503`), a `404` (a Worker without `/email`) or a `401` that linking again
+   didn't fix → Gmail for 10 minutes without asking the Worker (CacheService
+   `email-worker:paused`). `rate_limited`, or 3 Worker failures in a row (problems with one message
+   such as `bad_to` don't count), → Gmail for the rest of the execution.
+5. `remainingQuota()` = 1000 while the Worker route is active (Cloudflare has no per-script daily
+   quota), else `MailApp.getRemainingDailyQuota()`. When it reported 1000 and the Worker then fails
+   in the same execution, the core may plan more emails than Gmail can take: the first Gmail
+   fallback always goes (it may be a sign-in code), later ones throw once Gmail's quota is down to
+   `SIGN_IN_EMAIL_RESERVE` (logged by `deliver` as failed sends).
+6. `EMAIL_VIA` = `gmail` → MailApp only; the Worker is never asked.
+
+Logs carry reason codes and HTTP codes only, never addresses, subjects or bodies. In the demo and
+tests the mailer is an in-memory recorder.
 * Email: HTML with a maroon header bar showing the org name, the body paragraphs, a button "Open the TMA app"
   → `APP_URL + url` (button omitted if APP_URL empty), and a footer "You're receiving this because you
   signed up for TMA updates. Change what you get in the app under More → Notifications."
@@ -330,8 +368,12 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
 * Cache: `CacheService.getScriptCache()`. Lock: `LockService.getScriptLock().waitLock(20000)`.
 * Crypto: `Utilities.computeHmacSha256Signature`, uuid via `Utilities.getUuid()`, digits via uuid
   hex → numbers (rejection sampling).
-* Mailer: `MailApp.sendEmail({to, subject, htmlBody, body, name: ORG_NAME})`,
-  quota `MailApp.getRemainingDailyQuota()`.
+* Mailer (`src/gas/mail.ts`): §6 "Email delivery". Through the push Worker's `POST /email` (via
+  the push sender's `authorizedPost`, which owns the secret and the once-per-execution re-register),
+  with `MailApp.sendEmail({to, subject, htmlBody, body, name: ORG_NAME, replyTo: SUPPORT_EMAIL})`
+  as the per-message fallback and the only route when `EMAIL_VIA = gmail`. Besides the port it
+  offers `route()` (cloudflare, or gmail and why: `setting`, `no_worker`, `not_linked`, `paused`,
+  `this_run`), `lastDelivery()` and `gmailQuota()` for the menu.
 * PayPal gateway: REST v2 via `UrlFetchApp` (`muteHttpExceptions: true`), OAuth client-credentials token
   cached ~8 h in CacheService, base `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` per
   PAYPAL_ENV. Create order: intent CAPTURE; one purchase unit with reference_id, custom_id,
@@ -377,6 +419,11 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
 * **Status** prints the Worker URL, its `/health` (reachable, linked to a sheet, keys), whether
   `PUSH_PUBLIC_KEY` is saved, and whether push is configured. Secrets are listed by name only.
   "Linked to a sheet" means *some* secret is registered with the Worker, not necessarily this sheet's.
+  Its **Email** line shows the route (`from noreply@mytma.org through the push Worker` with
+  `/health`'s `email` as Cloudflare Email Sending ✓/✗, or `with Gmail … because …`), the Reply-To and
+  MailApp's quota left (the fallback). One `/health` request serves both. **Send me a test
+  notification** sends its test email through the same Mailer and says which route delivered it
+  (and, for Gmail, the Worker's reason).
 * Twilio SMS (optional; costs about 1¢ per text): `TWILIO_*` secrets set → enabled. POST form to
   `https://api.twilio.com/2010-04-01/Accounts/<sid>/Messages.json` with basic auth.
 * `onOpen()` adds a sheet menu **TMA App**: Run sync now · Send me a test notification · Set up / repair tabs ·
@@ -390,7 +437,7 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
 
 ### 9.1 Push Worker (workers/push, Cloudflare)
 
-A stateless Web Push sender on Cloudflare's free Workers plan, written with WebCrypto only: RFC 8030
+A stateless Web Push sender, and the app's email sender, on Cloudflare Workers. Push is written with WebCrypto only: RFC 8030
 delivery, RFC 8292 VAPID (its own P-256 key; the ES256 JWT is cached per push service for 12 hours) and
 RFC 8291 `aes128gcm` encryption, so only the subscribed browser can read a notification. Push used to
 go through Firebase Cloud Messaging; this Worker replaced it so TMA needs no Firebase project and no
@@ -398,10 +445,11 @@ service-account key. The full reference is `workers/push/README.md`.
 
 | Endpoint | Answer |
 | --- | --- |
-| `GET /health` | `{ok:true, name:'tma-push', registered, hasKeys}` |
+| `GET /health` | `{ok:true, name:'tma-push', registered, hasKeys, email}` (`email`: the Email Sending binding is configured) |
 | `GET /vapid-public-key` | `{publicKey}`: base64url of the 65-byte uncompressed P-256 point. Creates the key pair on first use; no other endpoint creates keys. |
 | `POST /register` `{secret}` (32–256 chars) | `200 {registered:true, first}` the first time, or again with the same secret. `409 {error:'already_registered'}` for any other secret (trust on first use). `400` bad body, `413` over 4 KB. |
 | `POST /send`, header `Authorization: Bearer <secret>`, body `{messages:[{subscription:{endpoint, keys:{p256dh, auth}}, payload, ttl?, urgency?, topic?}]}` | `200 {results:[{status:'ok'\|'invalid'\|'error', code?, reason?}]}`, one per message in the same order. `401 {error:'unauthorized'}` (no secret registered, missing or wrong). `400`. `413` for more than 10 messages or over 256 KB. With no key pair yet, `200` with every result `{status:'error', reason:'no_keys'}` and nothing sent. |
+| `POST /email`, same bearer secret, body `{messages:[{to, subject, html?, text?, replyTo?}]}` (1–10) | `200 {results:[{status:'ok', messageId} \| {status:'error', reason, code?}]}` in the same order. `401` as `/send`; `503 {error:'email_not_configured'}` without the `EMAIL` binding; `400` bad body or empty list; `413` over 10 messages or 256 KB. |
 
 * `invalid` (Apps Script deletes the Devices row): `gone` (404/410), `vapid_rejected` (403, e.g. made
   with an old key), `endpoint_not_allowed`, `bad_keys`. `error` (kept; may work next time):
@@ -410,6 +458,17 @@ service-account key. The full reference is `workers/push/README.md`.
 * Per message: `payload` a string of at most 3000 bytes of UTF-8; `ttl` default 86400, clamped to
   0–2419200; `urgency` `very-low`, `low`, `normal` or `high` (default `high`); `topic`
   `[A-Za-z0-9_-]{1,32}`.
+* `/email`: From is `EMAIL_FROM` / `EMAIL_FROM_NAME` (wrangler.toml `[vars]`: `noreply@mytma.org`,
+  `Timberlane Music Association`), never the request; the `[[send_email]]` binding `EMAIL` may only
+  send from `noreply@mytma.org`. One plain recipient per message; `to`/`replyTo` plain addresses
+  (no display names, lists or CR/LF, ≤ 254 chars), subject 1–300 chars without control characters,
+  `html` ≤ 200 KB, `text` ≤ 100 KB, at least one of them: otherwise that message is `error` with
+  `bad_to`, `bad_reply_to`, `bad_subject`, `no_content`, `bad_content`, `content_too_large` or
+  `bad_message` and is not sent. Cloudflare's thrown codes map to `sender_not_verified`
+  (`E_SENDER_NOT_VERIFIED`), `rate_limited` (`E_RATE_LIMIT_EXCEEDED`, `E_DAILY_LIMIT_EXCEEDED`),
+  `recipient_not_allowed` (a recipient/destination not allowed/verified code) and `send_failed`
+  (anything else), with the code in `code` and never the error message. Messages are sent one after
+  another; the log line is counts and codes only.
 * Endpoint allowlist (an SSRF guard): `https://` on the default port, host `fcm.googleapis.com` (Chrome,
   Edge, Android), `updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` (Safari and
   iPhone/iPad Home Screen apps), or a host ending in `.push.apple.com` or `.notify.windows.com`. The same
@@ -418,7 +477,9 @@ service-account key. The full reference is `workers/push/README.md`.
 * KV namespace `TMA_PUSH` holds only `vapid:v1` (the key pair) and `relay:secret-sha256` (hex SHA-256
   of the registered secret, compared in constant time). No subscriptions, payloads or family data are
   stored. Logs show only the push service host and status.
-* **Free-plan limits**: about 10 ms of CPU per request (hence at most 5 messages per request from Apps
+* **Plans**: email needs **Workers Paid** ($5 a month: 3,000 emails included, then $0.35 per 1,000)
+  and `mytma.org` onboarded for Email Sending; push alone fits the free plan.
+* **Free-plan limits** (push): about 10 ms of CPU per request (hence at most 5 messages per request from Apps
   Script), 50 subrequests per request (10 messages are 10 fetches), 100,000 requests a day, and KV
   100,000 reads and 1,000 writes a day (each Worker instance caches what it read for 5 minutes; writes
   happen only at setup). One notification to every device costs one `/send` request per 5 devices.

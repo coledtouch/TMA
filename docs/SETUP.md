@@ -1,7 +1,9 @@
 # Setting up the TMA Family App
 
 This guide takes you from nothing to a working app for TMA families. It takes **about an hour**,
-costs **$0**, and needs no programming, just careful clicking. Do it on a computer, not a phone.
+costs **$0** (plus **$5 a month** if emails should come from `noreply@mytma.org`, see
+[Email from noreply@mytma.org](#email-from-noreplymytmaorg)), and needs no programming, just careful
+clicking. Do it on a computer, not a phone.
 
 | Step | What you'll do | Time |
 | --- | --- | --- |
@@ -11,6 +13,7 @@ costs **$0**, and needs no programming, just careful clicking. Do it on a comput
 | [3](#3-deploy-the-web-app-the-apps-server) | Deploy the web app (the app's server) | 5 min |
 | [4](#4-turn-on-the-schedules) | Turn on the schedules | 2 min |
 | [5](#5-push-notifications-cloudflare-free) | Push notifications (Cloudflare, free). Already running: just check it. | 2 min |
+| [Email](#email-from-noreplymytmaorg) | Email from `noreply@mytma.org` (Cloudflare Workers Paid, $5/month). Without it, email comes from the Google account. | 15 min |
 | [6](#6-online-payments-paypal) | Online payments (PayPal). Optional, can be done later. | 15 min plus PayPal's approval |
 | [7](#7-host-the-app-on-github-pages) | Put the app online (GitHub Pages) | 10 min |
 | [8](#8-optional-text-messages-twilio) | Text messages (Twilio). Optional, **costs money**. | 20 min plus carrier approval |
@@ -19,8 +22,9 @@ costs **$0**, and needs no programming, just careful clicking. Do it on a comput
 | [11](#11-troubleshooting) | Troubleshooting | |
 | [Test](#test-spreadsheet) | Optional: try the real app with the test spreadsheet first | 15 min |
 
-**How families sign in.** There are no passwords. A parent types their email, TMA's Gmail sends a
-6-digit code ("Your TMA sign-in code: 123456"), and they type it in. Codes expire after 10 minutes.
+**How families sign in.** There are no passwords. A parent types their email, the app emails them a
+6-digit code ("Your TMA sign-in code: 123456") from `noreply@mytma.org` (or from TMA's Gmail when that
+isn't set up), and they type it in. Codes expire after 10 minutes.
 A sign-in lasts 120 days on that phone. Anyone can sign in with any email and set up their household,
 but they see **no money information** until the treasurer verifies the household.
 
@@ -103,6 +107,7 @@ Open the **Settings** tab. Each row is a **Key**, a **Value** and a **Note**. A 
 | `OTHER_PAYMENT_INSTRUCTIONS` | Check the address and memo instructions. |
 | `DONATE_URL` | Check the link opens TMA's donation page. |
 | `EMAIL_ENABLED` | Leave `TRUE`, but read [Quotas](#quotas). |
+| `EMAIL_VIA` | Leave `cloudflare`: emails come from `noreply@mytma.org` once [that is set up](#email-from-noreplymytmaorg), and from this Google account until then. |
 
 Leave `APP_URL` (step 7) and the PayPal settings (step 6) for later.
 
@@ -262,6 +267,69 @@ this.
 10. Once everything works, delete the old Worker in the old account (*Workers & Pages → tma-push →
     Settings → Delete*).
 
+## Email from noreply@mytma.org
+
+Every email the app sends (sign-in codes, notifications, announcements and board alerts) comes from
+**Timberlane Music Association &lt;noreply@mytma.org&gt;**. The push Worker sends it with Cloudflare's
+**Email Sending** service (part of Cloudflare Email Service). When a family **replies**, the reply goes
+to the Settings key `SUPPORT_EMAIL` (default `timberlanemusictma@gmail.com`), not to `noreply@`.
+
+Nobody's personal Gmail address appears on the app's emails any more. Until this section is done,
+and whenever the Worker can't send a message for any reason, the script sends **that message with
+Gmail** instead, from the Google account that runs the script (with the same Reply-To). So sign-in
+codes always arrive.
+
+**What it costs.** Email Sending needs Cloudflare's **Workers Paid** plan on the Cloudflare account
+the push Worker runs in: **$5 a month**, which includes **3,000 emails a month**, then **$0.35 per
+1,000** more. TMA's sign-in codes and notification emails fit in the included 3,000 in a normal
+month; a few emailed announcements to every family add cents, not dollars. Push notifications stay
+free. (Check current prices on Cloudflare's
+[Email Service pricing](https://developers.cloudflare.com/email-service/platform/pricing/) page.)
+
+**A. Upgrade the Cloudflare account** (dash.cloudflare.com, signed in to the account the push Worker
+runs in): *Workers & Pages → Plans* → **Workers Paid** → add a payment method.
+
+**B. Onboard the domain.** `mytma.org` is already on that Cloudflare account (it hosts the app).
+*Compute → Email Service → Email Sending → **Onboard Domain*** → choose `mytma.org` → follow the
+steps. Cloudflare lists the DNS records that prove the emails really come from `mytma.org` (SPF and
+DKIM); since it already runs the domain's DNS, accept its offer to add them. Wait until the domain
+shows as verified. This can take a few minutes.
+
+**C. Deploy the Worker** with its email setup (only needed once, if it hasn't run since this
+feature was added): GitHub → *Actions → Deploy push Worker (Cloudflare) → Run workflow*. The Worker's
+`wrangler.toml` already has the email binding (`EMAIL`, allowed to send only from
+`noreply@mytma.org`) and the sender name. If that run fails with an error about `send_email` or Email
+Sending, finish A and B first and run it again. Until it succeeds, the Worker that's running keeps
+sending push notifications, and email keeps going out with Gmail.
+
+**D. Check it.** In the spreadsheet: **TMA App → Status**. The Email line should read:
+
+```
+Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓); Reply-To timberlanemusictma@gmail.com; Gmail fallback: 100 emails left today
+```
+
+Then **TMA App → Send me a test notification**. The dialog says which way the test email went:
+
+* *Email: sent from noreply@mytma.org through the push Worker (Cloudflare Email Sending).* Done.
+* *Email: sent with Gmail from this Google account instead of noreply@mytma.org, because …*: the
+  reason says what's missing. For example *mytma.org isn't verified for Cloudflare Email Sending
+  yet* (finish B, then wait 10 minutes: after that answer the script uses Gmail for 10 minutes
+  before asking the Worker again), *Cloudflare only sends to verified addresses* (finish A), or *the
+  push Worker has no Email Sending binding* (do C).
+
+Also check that the email arrived and didn't land in spam, and that **Reply** goes to `SUPPORT_EMAIL`.
+
+**The `EMAIL_VIA` setting** (Settings tab) chooses the way:
+
+| Value | What happens |
+| --- | --- |
+| `cloudflare` (default) | Send as `noreply@mytma.org` through the push Worker. If the Worker can't send a message, that message goes out with Gmail instead. |
+| `gmail` | Always send from the Google account that runs the script (the way the app worked before). The Worker isn't asked. |
+
+The Worker uses the same password (`PUSH_RELAY_SECRET`) for email as for push, so linking a different
+spreadsheet or rotating the keys ([5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys)) moves
+email along with push. Only the linked spreadsheet can send email through the Worker.
+
 ## 6. Online payments (PayPal)
 
 Optional, and it can be done any time later. Families can always pay by check, and **using
@@ -379,7 +447,8 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 
 - [ ] **TMA App → Status** shows: a web app URL, your `APP_URL`, both schedules ✓, `TOKEN_SECRET`
       and `PUSH_RELAY_SECRET` among the secrets set, the push Worker *reachable ✓, linked to a sheet ✓,
-      keys ✓*, push *configured*, PayPal as intended, email *on*.
+      keys ✓*, push *configured*, PayPal as intended, email *on* and *from noreply@mytma.org through
+      the push Worker (Cloudflare Email Sending ✓)* (see [Email](#email-from-noreplymytmaorg)).
 - [ ] The push Worker is linked to **this** spreadsheet, not the test one (see
       [Test spreadsheet](#test-spreadsheet)): *Send me a test notification* reaches your phone.
 - [ ] Settings: `ADMIN_EMAILS`, `SUPPORT_EMAIL`, `OTHER_PAYMENT_INSTRUCTIONS` and `DONATE_URL` are
@@ -476,8 +545,14 @@ using the previously deployed version until step 3. If Google asks for permissio
 
 * **The code email doesn't arrive.** Check the spam/promotions folder and mark it *Not spam*. Codes
   expire after 10 minutes, and each email can request at most 5 codes per hour.
+* **Emails come from the Google account instead of `noreply@mytma.org`.** Run **TMA App → Send me a
+  test notification**: the Email line says why the Worker didn't send it. See
+  [Email from noreply@mytma.org](#email-from-noreplymytmaorg), step D. The **Log** and
+  **Executions** show *Worker email failed* with a reason code (never an address).
+* **Replies to app emails.** They go to `SUPPORT_EMAIL` (Settings). Check that address is one TMA reads.
 * **"TMA has reached today's email limit."** The daily Gmail quota is used up (see [Quotas](#quotas)).
-  It resets within 24 hours.
+  It resets within 24 hours. With email going through the Worker this only happens when the Worker
+  couldn't send for a long stretch.
 * **"The TMA app isn't set up yet."** The `TOKEN_SECRET` script property is missing. Run
   **TMA App → Set up / repair tabs**.
 
@@ -545,8 +620,10 @@ is in that copy's `ADMIN_EMAILS`, so it can try *Board tools*). No real family's
 
 Now **`https://coledtouch.github.io/TMA/`** is the real app working on the test spreadsheet, and
 **`https://coledtouch.github.io/TMA/?demo`** still opens the demo with made-up families, for anyone
-who just wants to look around. While the test copy is connected, sign-in codes and notification
-emails come from the Google account that owns it.
+who just wants to look around. While the test copy is linked to the push Worker, sign-in codes and
+notification emails come from `noreply@mytma.org` through the Worker, with Reply-To set to the test
+copy's `SUPPORT_EMAIL` (see [Email from noreply@mytma.org](#email-from-noreplymytmaorg)). Only when the
+Worker can't send one does it come from the Google account that owns the test copy.
 
 **Moving to the real spreadsheet later.** Set up the real spreadsheet (steps 1 to 4), change
 `VITE_API_URL` to **its** `/exec` URL and run the Pages workflow again. Testers then have to sign in
@@ -566,7 +643,7 @@ keep spreadsheet editors to a minimum.
 | --- | --- | --- |
 | `TOKEN_SECRET` | Always (**created automatically** by setup) | Signs everyone's sign-in sessions. Don't share it. Changing it signs everyone out. If it's ever deleted, *TMA App → Set up / repair tabs* creates a new one. |
 | `PAYPAL_SECRET` | Online payments | The PayPal app's Secret, from the same app (sandbox or live) as `PAYPAL_CLIENT_ID`. |
-| `PUSH_RELAY_SECRET` | Push notifications (**created automatically** by setup) | The password the script uses with the push Worker (step 5). Don't share it. To replace it, follow [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys); just deleting it isn't enough. |
+| `PUSH_RELAY_SECRET` | Push notifications and email from `noreply@mytma.org` (**created automatically** by setup) | The password the script uses with the push Worker (step 5). Don't share it: it also lets the holder send email as `noreply@mytma.org`. To replace it, follow [step 5E](#e-linking-a-different-spreadsheet-or-rotating-the-keys); just deleting it isn't enough. |
 | `PUSH_PUBLIC_KEY` | Push notifications (**saved automatically** by setup) | The push Worker's public key, which phones subscribe with. Not secret. If `PUSH_RELAY_URL` changes, delete it and run *Set up / repair tabs*. |
 | `TWILIO_ACCOUNT_SID` | Text messages | From the Twilio console. |
 | `TWILIO_AUTH_TOKEN` | Text messages | From the Twilio console. |
@@ -576,7 +653,13 @@ keep spreadsheet editors to a minimum.
 
 ## Quotas
 
-Google limits how much a free script can do each day. For TMA's size, only **email** matters.
+Google limits how much a free script can do each day. For TMA's size, only **email** matters, and
+only for emails that go out **with Gmail**: when email goes through the push Worker as
+`noreply@mytma.org` ([Email](#email-from-noreplymytmaorg)), Google's email quota is just the fallback.
+Cloudflare's own limits apply instead (3,000 emails a month included, then $0.35 per 1,000; the
+sending rate grows with the account's history). If Cloudflare says *rate limited*, the script switches
+to Gmail for the rest of that run. Everything below about the Gmail quota applies when `EMAIL_VIA` is
+`gmail`, before email from `noreply@mytma.org` is set up, or while the Worker can't send.
 
 | Limit (per day) | Free Gmail account | Google Workspace (e.g. for Nonprofits) |
 | --- | --- | --- |

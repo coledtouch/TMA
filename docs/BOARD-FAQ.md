@@ -31,8 +31,9 @@ student emails or phone numbers, photos, grades or any school records.
 In **TMA's own Google Sheet, in TMA's Google account**. The app's server is a script attached to
 that sheet. It runs inside Google and can open **only that one spreadsheet**, not the rest of TMA's
 Google Drive. There is no other database. Push notifications pass through a small program TMA runs
-on Cloudflare's free plan (the "push Worker", see below) and then through Apple's, Google's,
-Mozilla's or Microsoft's notification service to the phone. Card payments happen entirely on PayPal.
+on Cloudflare (the "push Worker", see below) and then through Apple's, Google's, Mozilla's or
+Microsoft's notification service to the phone. The app's emails go out through the same Worker (see
+"Who sends the app's emails?"). Card payments happen entirely on PayPal.
 
 ### What does the Cloudflare push Worker store?
 
@@ -49,8 +50,28 @@ message so that only the receiving phone can read it (Apple, Google and the othe
 scrambled data), passes it on, and forgets it. It keeps no copies, and its logs show only which
 notification service answered, never names, addresses or message text.
 
-It runs on **Cloudflare's free Workers plan** (up to 100,000 requests a day). The script sends up to
-5 notifications per request, so even a notification to every family uses a tiny fraction of that.
+The app's emails pass through the Worker the same way: the script hands it one email at a time, the
+Worker passes it to Cloudflare's email service and forgets it. Its logs show only counts and error
+codes, never addresses or what an email says.
+
+Push runs fine on **Cloudflare's free Workers plan** (up to 100,000 requests a day). The script sends
+up to 5 notifications per request, so even a notification to every family uses a tiny fraction of
+that. Sending email from `noreply@mytma.org` needs the Workers Paid plan (see the cost question below).
+
+### Who sends the app's emails, and from where?
+
+Every email the app sends (sign-in codes, notifications, announcements and alerts to board members)
+comes from **Timberlane Music Association &lt;noreply@mytma.org&gt;**, TMA's own web address, not
+from any volunteer's personal email. The push Worker sends them with **Cloudflare Email Sending**, and
+Cloudflare signs them so mail providers can tell they really come from `mytma.org`.
+
+* **Replies** go to TMA's support address (the `SUPPORT_EMAIL` setting, normally
+  `timberlanemusictma@gmail.com`), so a parent who answers an email reaches TMA.
+* **Backup:** if Cloudflare can't send an email for any reason (not set up yet, an outage, a sending
+  limit), the script sends that email from TMA's Google account instead, so sign-in codes always
+  arrive. A setting (`EMAIL_VIA` = `gmail`) switches to Google-only sending at any time.
+* Only TMA's spreadsheet can ask the Worker to send email: it uses the same password as push
+  notifications, which is kept in the script's private settings.
 
 ### Who can see what?
 
@@ -73,7 +94,8 @@ It runs on **Cloudflare's free Workers plan** (up to 100,000 requests a day). Th
   PayPal, TMA's push Worker and Twilio, and run its own schedule.
 * **PayPal handles all card data.** TMA never sees or stores card numbers.
 * **Secrets** (the PayPal key and the push Worker password) are kept out of the spreadsheet, in the
-  script's private settings.
+  script's private settings. The push Worker password also lets its holder send email as
+  `noreply@mytma.org`, so it's rotated the same way if it ever leaks (SETUP.md, step 5E).
 
 ### What about children's privacy (COPPA)?
 
@@ -91,22 +113,30 @@ what's needed, and follow the music department's and district's guidance.
 
 ### What does it cost?
 
-**$0** to run: Google Sheet, Apps Script, Gmail, GitHub Pages and the push Worker (Cloudflare's free
-Workers plan) are all free at TMA's size. Online card/PayPal payments have per-payment fees, which families can choose
-to cover. Text messages are optional and cost about 1¢ each. Details:
-[PAYMENTS.md](PAYMENTS.md) and the [README](../README.md#what-it-costs).
+**$0** to run, plus **$5 a month** for email from `noreply@mytma.org`. Google Sheet, Apps Script,
+Gmail, GitHub Pages and push notifications are all free at TMA's size. Sending email from TMA's own
+address needs Cloudflare's **Workers Paid** plan: $5 a month, which includes 3,000 emails a month
+(more than TMA normally sends), then $0.35 per 1,000. Without it the app emails from TMA's Gmail
+instead, for free, but with Google's limit of about 100 emails a day on a free account. Online
+card/PayPal payments have per-payment fees, which families can choose to cover. Text messages are
+optional and cost about 1¢ each. Details: [PAYMENTS.md](PAYMENTS.md) and the
+[README](../README.md#what-it-costs).
 
 ### What if the volunteer developer leaves?
 
-Nothing stops working. There are **no servers to maintain** and **no subscriptions**. It is a
-Google Sheet plus a script inside TMA's account, and a website hosted for free. The code and
+Nothing stops working. There are **no servers to maintain**, and the only subscription is
+Cloudflare's $5-a-month plan for email from `noreply@mytma.org`. It is a Google Sheet plus a script
+inside TMA's account, and a website hosted for free. The code and
 step-by-step documentation are in the GitHub repository, so another volunteer can take over.
 Occasional updates may be needed if Google, PayPal or Apple change something.
 
 One piece lives outside Google: the **push Worker** on Cloudflare. Make sure TMA can sign in to the
 Cloudflare account it runs in, or move it to a TMA-owned account
-([SETUP.md, step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account)). If it ever stopped,
-the app would keep working and emails would still go out; only phone notifications would pause.
+([SETUP.md, step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account)), and that someone
+on the board can see its bill. If the $5 plan lapsed, emails would simply come from TMA's Google
+account again instead of `noreply@mytma.org`. If the Worker ever stopped altogether, the app would
+keep working and emails would still go out (from TMA's Google account); only phone notifications
+would pause.
 
 **To switch it off:** in the spreadsheet open *Extensions → Apps Script* → **Triggers** (delete
 the two schedules) and **Deploy → Manage deployments → Archive**. All the data stays in the

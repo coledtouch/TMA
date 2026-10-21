@@ -40,6 +40,10 @@ interface SentMessage {
 class FakeWorker {
   registered: string | null = SECRET;
   hasKeys = true;
+  /** The Worker's EMAIL binding is configured (GET /health "email"). */
+  emailBinding = true;
+  /** Bodies POSTed to /email that passed the secret check. */
+  readonly emailBodies: unknown[] = [];
   /** Per-message status by endpoint (default ok). */
   statusFor: (endpoint: string) => { status: string; reason?: string } = () => ({ status: 'ok' });
   /** Force an HTTP status for /send. */
@@ -53,7 +57,10 @@ class FakeWorker {
     const path = r.url.slice(BASE.length);
     this.paths.push(`${r.method.toUpperCase()} ${path}`);
     if (path === '/health') {
-      return { code: 200, body: { ok: true, name: 'tma-push', registered: this.registered !== null, hasKeys: this.hasKeys } };
+      return {
+        code: 200,
+        body: { ok: true, name: 'tma-push', registered: this.registered !== null, hasKeys: this.hasKeys, email: this.emailBinding },
+      };
     }
     if (path === '/vapid-public-key') {
       this.hasKeys = true;
@@ -80,6 +87,15 @@ class FakeWorker {
       this.sends.push(messages);
       if (!this.hasKeys) return { code: 200, body: { results: messages.map(() => ({ status: 'error', reason: 'no_keys' })) } };
       return { code: 200, body: { results: messages.map((m) => this.statusFor(m.subscription.endpoint)) } };
+    }
+    if (path === '/email') {
+      expect(r.method).toBe('post');
+      expect(r.contentType).toBe('application/json');
+      if (this.registered === null || r.headers.Authorization !== `Bearer ${this.registered}`) {
+        return { code: 401, body: { error: 'unauthorized' } };
+      }
+      this.emailBodies.push(JSON.parse(r.payload as string));
+      return { code: 200, body: { results: [{ status: 'ok', messageId: 'm-1' }] } };
     }
     return { code: 404, body: { error: 'not_found' } };
   }
@@ -385,10 +401,11 @@ describe('register / health', () => {
   });
 
   it('health reports the Worker state, or why it is unreachable', () => {
-    expect(sender().health()).toEqual({ reachable: true, registered: true, hasKeys: true });
+    expect(sender().health()).toEqual({ reachable: true, registered: true, hasKeys: true, email: true });
     worker.registered = null;
     worker.hasKeys = false;
-    expect(sender().health()).toEqual({ reachable: true, registered: false, hasKeys: false });
+    worker.emailBinding = false;
+    expect(sender().health()).toEqual({ reachable: true, registered: false, hasKeys: false, email: false });
     gas.fetch.handler = () => ({ code: 522, body: 'origin down' });
     expect(sender().health()).toMatchObject({ reachable: false, httpCode: 522 });
     gas.fetch.handler = () => {
@@ -396,6 +413,72 @@ describe('register / health', () => {
     };
     expect(sender().health()).toMatchObject({ reachable: false, error: 'Address unavailable' });
     relayUrl = '';
-    expect(sender().health()).toMatchObject({ reachable: false, error: expect.stringContaining('PUSH_RELAY_URL') });
+    expect(sender().health()).toMatchObject({ reachable: false, email: false, error: expect.stringContaining('PUSH_RELAY_URL') });
+  });
+});
+
+describe('authorizedPost (the way email reaches the Worker)', () => {
+  const BODY = { messages: [{ to: 'parent@example.com', subject: 'Hi', text: 'x' }] };
+
+  it('POSTs JSON with the relay secret as a bearer token and returns the answer', () => {
+    const answer = sender().authorizedPost('/email', BODY);
+    expect(answer.code).toBe(200);
+    expect(JSON.parse(answer.text)).toEqual({ results: [{ status: 'ok', messageId: 'm-1' }] });
+    const request = gas.fetch.requests[0];
+    expect(request).toMatchObject({ url: `${BASE}/email`, method: 'post', contentType: 'application/json', muteHttpExceptions: true });
+    expect(request.headers).toEqual({ Authorization: `Bearer ${SECRET}` });
+    expect(worker.emailBodies).toEqual([BODY]);
+  });
+
+  it('on 401 links this sheet again and retries, at most once per execution (shared with push)', () => {
+    worker.registered = null; // the Worker forgot this sheet (e.g. its KV was cleared)
+    const s = sender();
+    expect(s.authorizedPost('/email', BODY).code).toBe(200);
+    expect(worker.paths).toEqual(['POST /email', 'POST /register', 'POST /email']);
+
+    // Already linked again in this execution: a second 401 is returned as is, and push doesn't re-register either.
+    worker.registered = 'b'.repeat(64);
+    expect(s.authorizedPost('/email', BODY).code).toBe(401);
+    expect(s.send(tokens(1), MESSAGE)).toEqual(['error']);
+    expect(worker.paths.slice(3)).toEqual(['POST /email', 'POST /send']);
+  });
+
+  it('after push re-registered in this execution, a 401 for email is not linked again', () => {
+    worker.registered = null;
+    const s = sender();
+    expect(s.send(tokens(1), MESSAGE)).toEqual(['ok']);
+    worker.registered = 'b'.repeat(64);
+    expect(s.authorizedPost('/email', BODY).code).toBe(401);
+    expect(worker.paths).toEqual(['POST /send', 'POST /register', 'POST /send', 'POST /email']);
+  });
+
+  it('returns the 401 when linking again fails, and logs without the secret', () => {
+    worker.registered = 'c'.repeat(64); // another sheet's secret
+    const answer = sender().authorizedPost('/email', BODY);
+    expect(answer.code).toBe(401);
+    expect(worker.paths).toEqual(['POST /email', 'POST /register']);
+    const logged = JSON.stringify(logger.lines);
+    expect(logged).toContain(ALREADY_REGISTERED_MESSAGE);
+    expect(logged).not.toContain(SECRET);
+  });
+
+  it('throws when push is not configured or the Worker cannot be reached, never with the secret', () => {
+    gas.properties.setProperty('PUSH_RELAY_SECRET', '');
+    expect(() => sender().authorizedPost('/email', BODY)).toThrow(/PUSH_RELAY_SECRET is missing/);
+    gas.properties.setProperty('PUSH_RELAY_SECRET', SECRET);
+    relayUrl = 'off';
+    expect(() => sender().authorizedPost('/email', BODY)).toThrow(/PUSH_RELAY_URL/);
+    relayUrl = BASE;
+    gas.fetch.handler = () => {
+      throw new Error(`Timeout while sending Bearer ${SECRET}`);
+    };
+    let message = '';
+    try {
+      sender().authorizedPost('/email', BODY);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/Could not reach the push Worker/);
+    expect(message).not.toContain(SECRET);
   });
 });

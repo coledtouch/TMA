@@ -12,7 +12,9 @@ import type { App } from '../server/services';
 import { generateSecret } from '../server/setup';
 import { SETTING_DEFAULTS, type SecretName } from '../shared/schema';
 import type { ApiAction, ApiRequest, ApiResponse, SetupReport, TickReport } from '../shared/types';
+import { describeWorkerReason, replyToAddress, WORKER_EMAIL_FROM } from './mail';
 import { paypalEnv } from './paypal';
+import type { RelayHealth } from './push-relay';
 import { sendSelfTest, type SelfTestReport } from './self-test';
 import { createGasServices, type GasServices } from './services';
 import { describeError, escapeHtml, isRecord } from './util';
@@ -240,9 +242,18 @@ export function sendTestPushToMe(): SelfTestReport {
     lines.push(`Push: delivered to ${report.push} of ${report.devices} device(s).`);
     if (report.removed > 0) lines.push(`Removed ${report.removed} expired device(s).`);
   }
-  lines.push(`Email: ${report.emailSent ? 'sent' : 'not sent'}.`, ...report.notes);
+  lines.push(`Email: ${testEmailLine(report)}`, ...report.notes);
   alert('Test notification', lines.join('\n'));
   return report;
+}
+
+/** Which way the test email went: through the push Worker as noreply@mytma.org, or with Gmail (and why). */
+function testEmailLine(report: SelfTestReport): string {
+  if (!report.emailSent) return 'not sent.';
+  if (report.emailVia === 'cloudflare') return `sent from ${WORKER_EMAIL_FROM} through the push Worker (Cloudflare Email Sending).`;
+  if (!report.emailWorkerReason) return 'sent with Gmail from this Google account (Settings EMAIL_VIA is gmail).';
+  const code = report.emailWorkerCode ? `, ${report.emailWorkerCode}` : '';
+  return `sent with Gmail from this Google account instead of ${WORKER_EMAIL_FROM}, because ${describeWorkerReason(report.emailWorkerReason)}${code}.`;
 }
 
 /** Menu: configuration overview. Lists secret *names* only, never values. */
@@ -253,6 +264,8 @@ export function showTmaStatus(): string {
   const present = SECRET_NAMES.filter((name) => services.secrets.get(name) !== null);
   const missing = SECRET_NAMES.filter((name) => !present.includes(name));
   const yes = (on: boolean) => (on ? 'on' : 'off');
+  // One GET /health for both push and email.
+  const health = services.push.baseUrl() ? services.push.health() : null;
 
   const lines = [
     `Web app URL: ${url || 'not deployed yet (Deploy → New deployment → Web app)'}`,
@@ -263,9 +276,9 @@ export function showTmaStatus(): string {
     `Secrets set: ${present.join(', ') || 'none'}`,
     `Secrets not set: ${missing.join(', ') || 'none'}`,
     `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting('PAYPAL_ENV'))})` : 'not configured'}; online payments ${yes(services.flag('ONLINE_PAYMENTS'))}`,
-    ...pushStatus(services),
+    ...pushStatus(services, health),
     `Text messages (Twilio): ${services.sms.enabled() ? 'configured' : 'not configured'}; SMS setting ${yes(services.flag('SMS_ENABLED'))}`,
-    `Email: ${yes(services.flag('EMAIL_ENABLED'))}; ${safely(() => services.mailer.remainingQuota(), 0)} emails left today`,
+    emailStatus(services, health),
     `Version: ${VERSION}`,
   ];
   if (!present.includes('TOKEN_SECRET')) lines.push('', 'TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.');
@@ -275,11 +288,10 @@ export function showTmaStatus(): string {
 }
 
 /** Status lines for the push Worker. Never prints PUSH_RELAY_SECRET. */
-function pushStatus(services: GasServices): string[] {
+function pushStatus(services: GasServices, health: RelayHealth | null): string[] {
   const push = services.push;
   const base = push.baseUrl();
-  if (!base) return ['Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off'];
-  const health = push.health();
+  if (!base || !health) return ['Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off'];
   const setUp = ' (TMA App → Set up / repair tabs)';
   const healthLine = health.reachable
     ? `Push Worker health: reachable ✓, linked to a sheet ${health.registered ? '✓' : `✗${setUp}`}, keys ${health.hasKeys ? '✓' : `✗${setUp}`}`
@@ -291,6 +303,30 @@ function pushStatus(services: GasServices): string[] {
     `Push public key (PUSH_PUBLIC_KEY): ${keySaved ? 'saved ✓' : `not saved yet${setUp}`}`,
     `Push notifications: ${push.enabled() ? 'configured' : `not configured${setUp}`}`,
   ];
+}
+
+/**
+ * The "Email:" status line: on/off, the route (noreply@mytma.org through the
+ * push Worker, and whether the Worker has Email Sending; or Gmail, and why),
+ * the Reply-To address, and Gmail's quota left (the fallback).
+ */
+function emailStatus(services: GasServices, health: RelayHealth | null): string {
+  const on = services.flag('EMAIL_ENABLED') ? 'on' : 'notifications off (sign-in codes are still emailed)';
+  const route = safely(() => services.mailer.route(), null);
+  const quota = safely(() => services.mailer.gmailQuota(), 0);
+  const replyTo = `Reply-To ${replyToAddress(services.setting('SUPPORT_EMAIL'))}`;
+  if (route?.via === 'cloudflare') {
+    let worker = '';
+    if (health && !health.reachable) worker = '; Worker unreachable right now, so Gmail sends meanwhile';
+    else if (health?.email) worker = ' (Cloudflare Email Sending ✓)';
+    else if (health) worker = ' (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md)';
+    return `Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`;
+  }
+  const why =
+    !route || route.reason === 'setting'
+      ? 'Settings EMAIL_VIA is gmail'
+      : describeWorkerReason(route.detail ?? route.reason) + (route.reason === 'paused' ? ' (Gmail for up to 10 minutes, then the Worker is tried again)' : '');
+  return `Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`;
 }
 
 // ---------------------------------------------------------------------------

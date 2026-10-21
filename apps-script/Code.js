@@ -248,6 +248,8 @@ var TMA = (() => {
     PRIVACY_NOTE: "TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student's name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.",
     REMINDER_DAYS: "14, 7, 1",
     EMAIL_ENABLED: "TRUE",
+    /** "cloudflare": send as noreply@mytma.org through the push Worker (Gmail if that fails); "gmail": always MailApp. */
+    EMAIL_VIA: "cloudflare",
     SMS_ENABLED: "FALSE",
     PUSH_RELAY_URL: "https://tma-push.coleciprari.workers.dev",
     TOKEN_VERSION: "1",
@@ -1025,6 +1027,7 @@ var TMA = (() => {
     PRIVACY_NOTE: "Shown in the app under More > Privacy.",
     REMINDER_DAYS: "Send payment reminders this many days before a due date (comma-separated).",
     EMAIL_ENABLED: "TRUE sends email notifications to families who chose email.",
+    EMAIL_VIA: "cloudflare = send as noreply@mytma.org through the TMA Worker (falls back to Gmail if that fails); gmail = always send from the Google account that runs the script",
     SMS_ENABLED: "TRUE sends text messages to families who chose texts (needs Twilio; about 1 cent per text).",
     PUSH_RELAY_URL: "Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.",
     TOKEN_VERSION: "Change this number to sign everyone out of the app.",
@@ -4130,6 +4133,188 @@ var TMA = (() => {
     return text2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  // src/gas/mail.ts
+  var WORKER_EMAIL_FROM = "noreply@mytma.org";
+  var WORKER_DAILY_ALLOWANCE = 1e3;
+  var WORKER_PAUSE_SECONDS = 600;
+  var WORKER_PAUSE_CACHE_KEY = "email-worker:paused";
+  var MAX_WORKER_FAILURES_IN_A_ROW = 3;
+  var MAX_SUBJECT_CHARS = 300;
+  var PAUSE_REASONS = /* @__PURE__ */ new Set([
+    "sender_not_verified",
+    // mytma.org isn't onboarded/verified in Cloudflare Email Sending yet
+    "email_not_configured",
+    // the Worker has no EMAIL binding
+    "no_email_endpoint",
+    // the Worker is older than POST /email (404)
+    "unauthorized"
+    // the Worker is linked to another sheet, and linking again failed
+  ]);
+  var MESSAGE_REASONS = /* @__PURE__ */ new Set(["bad_message", "bad_to", "bad_reply_to", "bad_subject", "bad_content", "no_content", "content_too_large"]);
+  function emailVia(value) {
+    return String(value != null ? value : "").trim().toLowerCase() === "gmail" ? "gmail" : "cloudflare";
+  }
+  var PLAIN_ADDRESS = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
+  function oneLine2(text2) {
+    return String(text2 != null ? text2 : "").replace(/[\r\n\u0085\u2028\u2029]+/g, " ").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  }
+  function cleanCode(value) {
+    return typeof value === "string" ? clip(value.replace(/[^A-Za-z0-9_]/g, ""), 64) : "";
+  }
+  function replyToAddress(value) {
+    const email2 = String(value != null ? value : "").trim().toLowerCase();
+    return email2.length <= 254 && PLAIN_ADDRESS.test(email2) ? email2 : SETTING_DEFAULTS.SUPPORT_EMAIL;
+  }
+  function readEmailAnswer(code, text2) {
+    const body = parseJson(text2);
+    if (code === 401) return { ok: false, reason: "unauthorized", httpCode: code };
+    if (code === 404) return { ok: false, reason: "no_email_endpoint", httpCode: code };
+    if (code === 503 && pick(body, "error") === "email_not_configured") return { ok: false, reason: "email_not_configured", httpCode: code };
+    if (code !== 200) return { ok: false, reason: "http_error", httpCode: code };
+    const results = pick(body, "results");
+    if (!Array.isArray(results) || results.length !== 1 || !isRecord2(results[0])) return { ok: false, reason: "bad_answer", httpCode: code };
+    const result = results[0];
+    if (result.status === "ok") return { ok: true, messageId: typeof result.messageId === "string" ? clip(result.messageId, 200) : "" };
+    const reason = cleanCode(result.reason) || "send_failed";
+    const cfCode = cleanCode(result.code);
+    return cfCode ? { ok: false, reason, code: cfCode } : { ok: false, reason };
+  }
+  function describeWorkerReason(reason) {
+    switch (reason) {
+      case "sender_not_verified":
+        return "mytma.org isn't verified for Cloudflare Email Sending yet (finish onboarding it; see docs/SETUP.md, Email from noreply@mytma.org)";
+      case "recipient_not_allowed":
+        return "Cloudflare only sends to verified addresses until mytma.org is onboarded on the Workers Paid plan";
+      case "rate_limited":
+        return "Cloudflare's sending limit was reached";
+      case "email_not_configured":
+        return "the push Worker has no Email Sending binding (deploy it again from workers/push)";
+      case "no_email_endpoint":
+        return "the push Worker is an older version without email (deploy it again from workers/push)";
+      case "unauthorized":
+        return "the push Worker didn't accept this sheet's secret (another spreadsheet may be linked to it; see docs/SETUP.md step 5E)";
+      case "network":
+        return "the push Worker couldn't be reached";
+      case "no_worker":
+        return "Settings PUSH_RELAY_URL isn't an https:// address";
+      case "not_linked":
+        return "this sheet isn't linked to the push Worker yet (TMA App → Set up / repair tabs)";
+      default:
+        return `the push Worker couldn't send it (${cleanCode(reason) || "unknown"})`;
+    }
+  }
+  function createGasMailer(deps) {
+    const { relay, cache, logger } = deps;
+    let pausedMemo;
+    let stoppedReason = null;
+    let failuresInARow = 0;
+    let last = null;
+    let promisedWorkerAllowance = false;
+    let gmailSendsSincePromise = 0;
+    function pausedReason() {
+      if (pausedMemo === void 0) {
+        try {
+          pausedMemo = cache.get(WORKER_PAUSE_CACHE_KEY);
+        } catch {
+          pausedMemo = null;
+        }
+      }
+      return pausedMemo;
+    }
+    function route() {
+      if (emailVia(deps.via()) === "gmail") return { via: "gmail", reason: "setting" };
+      const base = relay.baseUrl();
+      if (!base) return { via: "gmail", reason: "no_worker" };
+      if (!relay.enabled()) return { via: "gmail", reason: "not_linked" };
+      if (stoppedReason !== null) return { via: "gmail", reason: "this_run", detail: stoppedReason };
+      const paused = pausedReason();
+      if (paused) return { via: "gmail", reason: "paused", detail: paused };
+      return { via: "cloudflare", from: WORKER_EMAIL_FROM, workerUrl: base };
+    }
+    function sendThroughWorker(email2) {
+      try {
+        const answer = relay.authorizedPost("/email", { messages: [email2] });
+        return readEmailAnswer(answer.code, answer.text);
+      } catch {
+        return { ok: false, reason: "network" };
+      }
+    }
+    function workerFailed(outcome) {
+      if (!MESSAGE_REASONS.has(outcome.reason)) failuresInARow += 1;
+      const details = { reason: outcome.reason };
+      if (outcome.httpCode !== void 0) details.httpCode = outcome.httpCode;
+      if (outcome.code) details.code = outcome.code;
+      logger.error("Worker email failed; sending this one with Gmail instead", details);
+      if (PAUSE_REASONS.has(outcome.reason)) {
+        pausedMemo = outcome.reason;
+        try {
+          cache.put(WORKER_PAUSE_CACHE_KEY, outcome.reason, WORKER_PAUSE_SECONDS);
+        } catch (error) {
+          logger.error("Could not pause Worker email", error);
+        }
+      } else if (outcome.reason === "rate_limited" || failuresInARow >= MAX_WORKER_FAILURES_IN_A_ROW) {
+        stoppedReason = outcome.reason;
+      }
+    }
+    function sendWithGmail(email2) {
+      if (promisedWorkerAllowance) {
+        if (gmailSendsSincePromise > 0 && MailApp.getRemainingDailyQuota() <= SIGN_IN_EMAIL_RESERVE) {
+          throw new Error(`Gmail fallback skipped: the last ${SIGN_IN_EMAIL_RESERVE} emails of today's Gmail quota are kept for sign-in codes`);
+        }
+        gmailSendsSincePromise += 1;
+      }
+      MailApp.sendEmail({
+        to: email2.to,
+        subject: email2.subject,
+        htmlBody: email2.html,
+        body: email2.text,
+        name: oneLine2(deps.senderName()),
+        replyTo: email2.replyTo
+      });
+    }
+    function send(msg) {
+      var _a, _b, _c, _d;
+      last = null;
+      const to = String((_a = msg.to) != null ? _a : "").trim();
+      if (!to || !to.includes("@")) throw new Error("Invalid email recipient");
+      const email2 = {
+        to,
+        subject: clip(oneLine2(msg.subject), MAX_SUBJECT_CHARS),
+        html: String((_b = msg.html) != null ? _b : ""),
+        text: String((_c = msg.text) != null ? _c : ""),
+        replyTo: replyToAddress(deps.replyTo())
+      };
+      const current = route();
+      if (current.via === "gmail") {
+        sendWithGmail(email2);
+        last = current.reason === "setting" ? { via: "gmail" } : { via: "gmail", workerReason: (_d = current.detail) != null ? _d : current.reason };
+        return;
+      }
+      const outcome = sendThroughWorker(email2);
+      if (outcome.ok) {
+        failuresInARow = 0;
+        last = { via: "cloudflare" };
+        return;
+      }
+      workerFailed(outcome);
+      sendWithGmail(email2);
+      last = outcome.code ? { via: "gmail", workerReason: outcome.reason, workerCode: outcome.code } : { via: "gmail", workerReason: outcome.reason };
+    }
+    return {
+      remainingQuota() {
+        if (route().via === "cloudflare") {
+          promisedWorkerAllowance = true;
+          return WORKER_DAILY_ALLOWANCE;
+        }
+        return MailApp.getRemainingDailyQuota();
+      },
+      send,
+      route,
+      lastDelivery: () => last,
+      gmailQuota: () => MailApp.getRemainingDailyQuota()
+    };
+  }
+
   // src/gas/paypal.ts
   var PAYPAL_API = {
     live: "https://api-m.paypal.com",
@@ -4333,6 +4518,7 @@ var TMA = (() => {
     return value === null || value === void 0 ? "" : String(value).trim();
   }
   function sendSelfTest(services, rawEmail) {
+    var _a;
     const email2 = normEmail2(rawEmail);
     const report = { email: email2, devices: 0, push: 0, removed: 0, emailSent: false, notes: [] };
     if (!email2) {
@@ -4372,16 +4558,24 @@ var TMA = (() => {
       report.notes.push("No emails left in today's Google quota.");
     } else {
       const orgName = services.setting("ORG_NAME");
-      services.mailer.send({
-        to: email2,
-        subject: `${orgName}: test notification`,
-        html: testEmailHtml(orgName),
-        text: `${TEST_MESSAGE.title}
+      try {
+        services.mailer.send({
+          to: email2,
+          subject: `${orgName}: test notification`,
+          html: testEmailHtml(orgName),
+          text: `${TEST_MESSAGE.title}
 
 Email from the TMA app is working.
 `
-      });
-      report.emailSent = true;
+        });
+        report.emailSent = true;
+        const delivery = services.mailer.lastDelivery();
+        report.emailVia = (_a = delivery == null ? void 0 : delivery.via) != null ? _a : "gmail";
+        if (delivery == null ? void 0 : delivery.workerReason) report.emailWorkerReason = delivery.workerReason;
+        if (delivery == null ? void 0 : delivery.workerCode) report.emailWorkerCode = delivery.workerCode;
+      } catch (error) {
+        report.notes.push(`The test email could not be sent: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     services.store.append("Log", [
       {
@@ -4559,7 +4753,7 @@ Email from the TMA app is working.
       }
     }
     function health() {
-      const down = { reachable: false, registered: false, hasKeys: false };
+      const down = { reachable: false, registered: false, hasKeys: false, email: false };
       const base = baseUrl();
       if (!base) return { ...down, error: "PUSH_RELAY_URL is not an https:// address" };
       try {
@@ -4567,10 +4761,40 @@ Email from the TMA app is working.
         const code = res.getResponseCode();
         const body = parseJson(res.getContentText());
         if (code !== 200 || pick(body, "ok") !== true) return { ...down, httpCode: code };
-        return { reachable: true, registered: pick(body, "registered") === true, hasKeys: pick(body, "hasKeys") === true };
+        return {
+          reachable: true,
+          registered: pick(body, "registered") === true,
+          hasKeys: pick(body, "hasKeys") === true,
+          email: pick(body, "email") === true
+        };
       } catch (error) {
         return { ...down, error: errorText(error, secretMemo) };
       }
+    }
+    function authorizedPost(path, body) {
+      const base = requireBase();
+      const secret = relaySecret();
+      if (!secret) throw new Error("PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.");
+      const payload = JSON.stringify(body);
+      const once = () => {
+        const res = fetchOrExplain(`${base}${path}`, {
+          method: "post",
+          contentType: "application/json",
+          headers: { Authorization: `Bearer ${secret}` },
+          payload
+        });
+        return { code: res.getResponseCode(), text: res.getContentText() };
+      };
+      const answer = once();
+      if (answer.code !== 401 || reRegistered) return answer;
+      reRegistered = true;
+      try {
+        register();
+      } catch (error) {
+        logger.error("Push Worker rejected this sheet and linking again failed", { message: errorText(error, secret) });
+        return answer;
+      }
+      return once();
     }
     function post(base, secret, chunks) {
       const outcomes = [];
@@ -4694,7 +4918,8 @@ Email from the TMA app is working.
       baseUrl,
       register,
       refreshPublicKey,
-      health
+      health,
+      authorizedPost
     };
   }
   function unique2(items) {
@@ -5111,6 +5336,7 @@ Email from the TMA app is working.
     const clock = { now: () => /* @__PURE__ */ new Date() };
     const secrets = createScriptSecrets();
     const logger = createConsoleLogger();
+    const push = createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting("PUSH_RELAY_URL") });
     return {
       mode: "production",
       store,
@@ -5120,9 +5346,16 @@ Email from the TMA app is working.
       clock,
       crypto: createGasCrypto(),
       secrets,
-      mailer: createMailAppMailer(() => setting("ORG_NAME")),
+      mailer: createGasMailer({
+        relay: push,
+        cache,
+        logger,
+        via: () => setting("EMAIL_VIA"),
+        senderName: () => setting("ORG_NAME"),
+        replyTo: () => setting("SUPPORT_EMAIL")
+      }),
       sms: createTwilioSender({ secrets, logger }),
-      push: createPushRelaySender({ secrets, cache, logger, relayUrl: () => setting("PUSH_RELAY_URL") }),
+      push,
       payments: createPayPalGateway({
         cache,
         logger,
@@ -5208,22 +5441,6 @@ Email from the TMA app is working.
       },
       set(name, value) {
         props().setProperty(name, value);
-      }
-    };
-  }
-  function createMailAppMailer(senderName) {
-    const oneLine2 = (s) => s.replace(/[\r\n]+/g, " ").trim();
-    return {
-      remainingQuota: () => MailApp.getRemainingDailyQuota(),
-      send(msg) {
-        if (!msg.to || !msg.to.includes("@")) throw new Error("Invalid email recipient");
-        MailApp.sendEmail({
-          to: msg.to,
-          subject: oneLine2(msg.subject),
-          htmlBody: msg.html,
-          body: msg.text,
-          name: oneLine2(senderName())
-        });
       }
     };
   }
@@ -5410,9 +5627,16 @@ ${next}`);
       lines.push(`Push: delivered to ${report.push} of ${report.devices} device(s).`);
       if (report.removed > 0) lines.push(`Removed ${report.removed} expired device(s).`);
     }
-    lines.push(`Email: ${report.emailSent ? "sent" : "not sent"}.`, ...report.notes);
+    lines.push(`Email: ${testEmailLine(report)}`, ...report.notes);
     alert("Test notification", lines.join("\n"));
     return report;
+  }
+  function testEmailLine(report) {
+    if (!report.emailSent) return "not sent.";
+    if (report.emailVia === "cloudflare") return `sent from ${WORKER_EMAIL_FROM} through the push Worker (Cloudflare Email Sending).`;
+    if (!report.emailWorkerReason) return "sent with Gmail from this Google account (Settings EMAIL_VIA is gmail).";
+    const code = report.emailWorkerCode ? `, ${report.emailWorkerCode}` : "";
+    return `sent with Gmail from this Google account instead of ${WORKER_EMAIL_FROM}, because ${describeWorkerReason(report.emailWorkerReason)}${code}.`;
   }
   function showTmaStatus() {
     const services = createGasServices();
@@ -5421,6 +5645,7 @@ ${next}`);
     const present = SECRET_NAMES.filter((name) => services.secrets.get(name) !== null);
     const missing = SECRET_NAMES.filter((name) => !present.includes(name));
     const yes = (on) => on ? "on" : "off";
+    const health = services.push.baseUrl() ? services.push.health() : null;
     const lines = [
       `Web app URL: ${url || "not deployed yet (Deploy → New deployment → Web app)"}`,
       `App link (Settings APP_URL): ${services.setting("APP_URL") || "not set"}`,
@@ -5428,9 +5653,9 @@ ${next}`);
       `Secrets set: ${present.join(", ") || "none"}`,
       `Secrets not set: ${missing.join(", ") || "none"}`,
       `PayPal: ${services.payments.enabled() ? `configured (${paypalEnv(services.setting("PAYPAL_ENV"))})` : "not configured"}; online payments ${yes(services.flag("ONLINE_PAYMENTS"))}`,
-      ...pushStatus(services),
+      ...pushStatus(services, health),
       `Text messages (Twilio): ${services.sms.enabled() ? "configured" : "not configured"}; SMS setting ${yes(services.flag("SMS_ENABLED"))}`,
-      `Email: ${yes(services.flag("EMAIL_ENABLED"))}; ${safely2(() => services.mailer.remainingQuota(), 0)} emails left today`,
+      emailStatus(services, health),
       `Version: ${VERSION}`
     ];
     if (!present.includes("TOKEN_SECRET")) lines.push("", "TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.");
@@ -5438,11 +5663,10 @@ ${next}`);
     alert("TMA App status", text2);
     return text2;
   }
-  function pushStatus(services) {
+  function pushStatus(services, health) {
     const push = services.push;
     const base = push.baseUrl();
-    if (!base) return ["Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off"];
-    const health = push.health();
+    if (!base || !health) return ["Push Worker: not set (Settings PUSH_RELAY_URL must be an https:// address); push notifications off"];
     const setUp = " (TMA App → Set up / repair tabs)";
     const healthLine = health.reachable ? `Push Worker health: reachable ✓, linked to a sheet ${health.registered ? "✓" : `✗${setUp}`}, keys ${health.hasKeys ? "✓" : `✗${setUp}`}` : `Push Worker health: unreachable (${health.httpCode ? `HTTP ${health.httpCode}` : health.error || "no answer"})`;
     const keySaved = canonicalP256Key(services.secrets.get("PUSH_PUBLIC_KEY")) !== null;
@@ -5452,6 +5676,22 @@ ${next}`);
       `Push public key (PUSH_PUBLIC_KEY): ${keySaved ? "saved ✓" : `not saved yet${setUp}`}`,
       `Push notifications: ${push.enabled() ? "configured" : `not configured${setUp}`}`
     ];
+  }
+  function emailStatus(services, health) {
+    var _a;
+    const on = services.flag("EMAIL_ENABLED") ? "on" : "notifications off (sign-in codes are still emailed)";
+    const route = safely2(() => services.mailer.route(), null);
+    const quota = safely2(() => services.mailer.gmailQuota(), 0);
+    const replyTo = `Reply-To ${replyToAddress(services.setting("SUPPORT_EMAIL"))}`;
+    if ((route == null ? void 0 : route.via) === "cloudflare") {
+      let worker = "";
+      if (health && !health.reachable) worker = "; Worker unreachable right now, so Gmail sends meanwhile";
+      else if (health == null ? void 0 : health.email) worker = " (Cloudflare Email Sending ✓)";
+      else if (health) worker = " (Cloudflare Email Sending ✗: not set up on the Worker yet, so Gmail sends meanwhile; see docs/SETUP.md)";
+      return `Email: ${on}; from ${route.from} through the push Worker${worker}; ${replyTo}; Gmail fallback: ${quota} emails left today`;
+    }
+    const why = !route || route.reason === "setting" ? "Settings EMAIL_VIA is gmail" : describeWorkerReason((_a = route.detail) != null ? _a : route.reason) + (route.reason === "paused" ? " (Gmail for up to 10 minutes, then the Worker is tried again)" : "");
+    return `Email: ${on}; with Gmail from this Google account, because ${why}; ${replyTo}; ${quota} emails left today`;
   }
   function errorMessage2(error) {
     return error instanceof Error ? error.message : String(error);

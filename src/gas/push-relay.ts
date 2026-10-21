@@ -12,6 +12,10 @@
  * so each /send request carries at most 5 messages, and the requests go out
  * in parallel with UrlFetchApp.fetchAll.
  *
+ * The same Worker also sends the app's email (POST /email, see mail.ts),
+ * with the same secret: `authorizedPost` is the shared way in, and a 401 from
+ * either links this sheet again at most once per execution.
+ *
  * Logs carry counts, HTTP codes and the Worker's reason codes only: never
  * the secret, payloads or subscription endpoints.
  */
@@ -52,6 +56,8 @@ export interface RelayHealth {
   registered: boolean;
   /** The Worker has its VAPID key pair. */
   hasKeys: boolean;
+  /** The Worker has its Cloudflare Email Sending binding (it can send as noreply@mytma.org). */
+  email: boolean;
   /** HTTP status when the Worker answered with something other than 200. */
   httpCode?: number;
   /** Why the Worker could not be reached (network error text). */
@@ -67,6 +73,20 @@ export interface PushRelaySender extends PushSender {
   refreshPublicKey(): string;
   /** GET /health. Never throws. */
   health(): RelayHealth;
+  /**
+   * POST JSON to an endpoint that takes `Authorization: Bearer PUSH_RELAY_SECRET`
+   * (e.g. "/email"). On a 401 it links this sheet again (POST /register, at most
+   * once per execution, shared with push) and retries once. Returns the HTTP
+   * code and body of the last answer. Throws when push isn't configured or the
+   * Worker can't be reached; the message never contains the secret.
+   */
+  authorizedPost(path: string, body: unknown): RelayAnswer;
+}
+
+/** An HTTP answer from the Worker. */
+export interface RelayAnswer {
+  code: number;
+  text: string;
 }
 
 /** One message in a /send body. */
@@ -282,7 +302,7 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
   }
 
   function health(): RelayHealth {
-    const down: RelayHealth = { reachable: false, registered: false, hasKeys: false };
+    const down: RelayHealth = { reachable: false, registered: false, hasKeys: false, email: false };
     const base = baseUrl();
     if (!base) return { ...down, error: 'PUSH_RELAY_URL is not an https:// address' };
     try {
@@ -290,10 +310,42 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
       const code = res.getResponseCode();
       const body = parseJson(res.getContentText());
       if (code !== 200 || pick(body, 'ok') !== true) return { ...down, httpCode: code };
-      return { reachable: true, registered: pick(body, 'registered') === true, hasKeys: pick(body, 'hasKeys') === true };
+      return {
+        reachable: true,
+        registered: pick(body, 'registered') === true,
+        hasKeys: pick(body, 'hasKeys') === true,
+        email: pick(body, 'email') === true,
+      };
     } catch (error) {
       return { ...down, error: errorText(error, secretMemo) };
     }
+  }
+
+  function authorizedPost(path: string, body: unknown): RelayAnswer {
+    const base = requireBase();
+    const secret = relaySecret();
+    if (!secret) throw new Error('PUSH_RELAY_SECRET is missing or too short: run TMA App → Set up / repair tabs.');
+    const payload = JSON.stringify(body);
+    const once = (): RelayAnswer => {
+      const res = fetchOrExplain(`${base}${path}`, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: `Bearer ${secret}` },
+        payload,
+      });
+      return { code: res.getResponseCode(), text: res.getContentText() };
+    };
+    const answer = once();
+    if (answer.code !== 401 || reRegistered) return answer;
+    // The Worker forgot this sheet (e.g. its KV was cleared): link again once, then retry.
+    reRegistered = true;
+    try {
+      register();
+    } catch (error) {
+      logger.error('Push Worker rejected this sheet and linking again failed', { message: errorText(error, secret) });
+      return answer;
+    }
+    return once();
   }
 
   /** POST each chunk to /send, REQUESTS_PER_FETCH_ALL requests per fetchAll. */
@@ -433,6 +485,7 @@ export function createPushRelaySender(deps: PushRelayDeps): PushRelaySender {
     register,
     refreshPublicKey,
     health,
+    authorizedPost,
   };
 }
 

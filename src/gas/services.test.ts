@@ -3,7 +3,6 @@ import {
   createConsoleLogger,
   createGasCrypto,
   createGasServices,
-  createMailAppMailer,
   createScriptCache,
   createScriptLock,
   createScriptSecrets,
@@ -150,13 +149,23 @@ describe('withLock', () => {
 });
 
 describe('mailer and logger', () => {
-  it('sends with MailApp using the org name and reports the quota', () => {
-    const mailer = createMailAppMailer(() => 'Timberlane Music Association');
+  it('wires the mailer to Settings: EMAIL_VIA, ORG_NAME as the Gmail name, SUPPORT_EMAIL as Reply-To (details in mail.test.ts)', () => {
+    gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail'], ['SUPPORT_EMAIL', 'help@example.org']]),
+    );
+    const mailer = createGasServices().mailer;
     gas.mail.quota = 7;
     expect(mailer.remainingQuota()).toBe(7);
     mailer.send({ to: 'parent@example.com', subject: 'Hi\nthere', html: '<p>x</p>', text: 'x' });
     expect(gas.mail.sent).toEqual([
-      { to: 'parent@example.com', subject: 'Hi there', htmlBody: '<p>x</p>', body: 'x', name: 'Timberlane Music Association' },
+      {
+        to: 'parent@example.com',
+        subject: 'Hi there',
+        htmlBody: '<p>x</p>',
+        body: 'x',
+        name: 'Timberlane Music Association',
+        replyTo: 'help@example.org',
+      },
     ]);
     expect(() => mailer.send({ to: '', subject: 's', html: '', text: '' })).toThrow(/recipient/);
   });
@@ -223,6 +232,12 @@ describe('createGasServices', () => {
     gas.properties.setProperty('PUSH_RELAY_SECRET', 'd'.repeat(64));
     expect(services.push.enabled()).toBe(true); // Settings PUSH_RELAY_URL defaults to the TMA Worker
     expect(services.push.baseUrl()).toBe('https://tma-push.coleciprari.workers.dev');
+    // Email goes through the same Worker by default (Settings EMAIL_VIA = cloudflare).
+    expect(services.mailer.route()).toEqual({
+      via: 'cloudflare',
+      from: 'noreply@mytma.org',
+      workerUrl: 'https://tma-push.coleciprari.workers.dev',
+    });
     expect(services.sms.enabled()).toBe(false);
     expect(services.clock.now()).toBeInstanceOf(Date);
   });

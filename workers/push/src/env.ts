@@ -7,12 +7,42 @@ export interface KVLike {
   put(key: string, value: string): Promise<void>;
 }
 
+/** An address with an optional display name, as Cloudflare Email Sending takes it. */
+export interface EmailAddressLike {
+  email: string;
+  name?: string;
+}
+
+/** The part of a Cloudflare Email Sending message this Worker builds (one recipient, no attachments). */
+export interface OutgoingEmail {
+  from: EmailAddressLike;
+  to: string;
+  subject: string;
+  html?: string;
+  text?: string;
+  replyTo?: string;
+}
+
+/**
+ * The `send_email` binding (Cloudflare Email Service, Email Sending). It
+ * throws an Error with a string `code` such as "E_SENDER_NOT_VERIFIED".
+ */
+export interface EmailBinding {
+  send(message: OutgoingEmail): Promise<{ messageId: string }>;
+}
+
 /** Bindings declared in wrangler.toml. */
 export interface Env {
   /** KV namespace holding the VAPID key pair and the relay secret hash. */
   TMA_PUSH: KVLike;
   /** VAPID "sub" claim, e.g. "mailto:someone@example.org". */
   VAPID_SUBJECT?: string;
+  /** Email Sending binding ([[send_email]] name = "EMAIL"). Missing until it is configured. */
+  EMAIL?: EmailBinding;
+  /** Sender address of every email (default "noreply@mytma.org"). Never taken from a request. */
+  EMAIL_FROM?: string;
+  /** Sender display name (default "Timberlane Music Association"). */
+  EMAIL_FROM_NAME?: string;
 }
 
 /** Byte array backed by a plain ArrayBuffer (what WebCrypto accepts). */

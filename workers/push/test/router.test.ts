@@ -74,12 +74,12 @@ describe('routing', () => {
   it('GET /health reports state', async () => {
     let res = await call(env, 'GET', '/health');
     expect(res.status).toBe(200);
-    expect(await jsonOf(res)).toEqual({ ok: true, name: 'tma-push', registered: false, hasKeys: false });
+    expect(await jsonOf(res)).toEqual({ ok: true, name: 'tma-push', registered: false, hasKeys: false, email: false });
 
     await register();
     await call(env, 'GET', '/vapid-public-key');
     res = await call(env, 'GET', '/health');
-    expect(await jsonOf(res)).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: true });
+    expect(await jsonOf(res)).toEqual({ ok: true, name: 'tma-push', registered: true, hasKeys: true, email: false });
   });
 
   it('404s unknown paths and 405s wrong methods, without CORS headers', async () => {
