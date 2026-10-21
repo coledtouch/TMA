@@ -40,7 +40,7 @@ function json(status: number, body: unknown, extra: Record<string, string> = {})
 const BAD_REQUEST = () => json(400, { error: 'bad_request' });
 const UNAUTHORIZED = () => json(401, { error: 'unauthorized' });
 
-/** Reads and parses a JSON body; null when it is not JSON or too large. */
+/** Reads and parses a JSON body: null when it is not JSON, 'too_large' over the limit. */
 async function readJson(request: Request): Promise<{ value: unknown } | 'too_large' | null> {
   const declared = Number(request.headers.get('Content-Length') ?? '0');
   if (declared > MAX_BODY_BYTES) return 'too_large';
