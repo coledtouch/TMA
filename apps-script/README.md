@@ -13,9 +13,12 @@ test notification, Set up / repair tabs, Install schedules, Status).
 
 **Set up / repair tabs** also links the sheet to the TMA push Worker (the
 Cloudflare Worker in [`workers/push`](../workers/push/README.md) that delivers
-push notifications): it creates the `PUSH_RELAY_SECRET` Script Property,
-registers it with the Worker at Settings `PUSH_RELAY_URL`, and saves the
-Worker's public key as `PUSH_PUBLIC_KEY`. **Status** shows whether that worked.
+push notifications): it creates the `PUSH_RELAY_SECRET` Script Property if it
+is missing, registers it with the Worker at Settings `PUSH_RELAY_URL`, and
+saves the Worker's public key as `PUSH_PUBLIC_KEY`. A Worker that can't be
+reached only adds a ⚠ line; setup still finishes. **Status** shows whether
+linking worked. To deliver notifications, the script hands the Worker 5 at a
+time (several requests in parallel), using `PUSH_RELAY_SECRET` as the password.
 
 Step-by-step setup (deploying the web app, Script Properties for PayPal and
 Twilio, schedules): see [`docs/SETUP.md`](../docs/SETUP.md).

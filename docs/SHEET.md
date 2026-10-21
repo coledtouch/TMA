@@ -302,7 +302,7 @@ app uses it on the next request. You don't need to redeploy.
 | `REMINDER_DAYS` | 14, 7, 1 | Send payment reminders this many days before an activity's Due Date (only to students with something left to pay). |
 | `EMAIL_ENABLED` | TRUE | `FALSE` stops notification emails (push still works). **Sign-in codes are always emailed.** |
 | `SMS_ENABLED` | FALSE | `TRUE` offers text messages (needs Twilio, which costs about 1¢ per text; see SETUP.md). |
-| `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker ([SETUP.md step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account)). After changing it, run *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
+| `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-the-worker-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
 | `TOKEN_VERSION` | 1 | Change it (e.g. to `2`) to **sign everyone out** of the app, for example after a board member leaves or a phone is lost. Everyone simply signs in again with a new code. |
 | `SESSION_DAYS` | 120 | How many days a sign-in lasts (1–400). |
 
@@ -316,7 +316,7 @@ them.** You can look at them with *View → Hidden sheets*.
 | Tab | What it holds |
 | --- | --- |
 | **Preferences** | Each parent's notification choices (schools, groups, topics, push/email/text). |
-| **Devices** | One row per phone or computer where a parent turned on notifications: the parent's email, household, the browser's **push subscription** (a web address at Apple, Google, Mozilla or Microsoft plus two keys that only that browser can use; not a phone number), the device type and when it was last seen. Rows that the push service reports as expired are removed automatically. |
+| **Devices** | One row per phone or computer where a parent turned on notifications: the parent's email, household, the browser's **push subscription** (a web address at Apple, Google, Mozilla or Microsoft, plus two keys used to lock each message so that only that browser can read it; not a phone number), the device type and when it was last seen. Rows that the push service reports as expired are removed automatically. |
 | **Log** | What the app did: notifications sent, approvals, errors. Board members also see the latest entries in the app under *Board tools → Recent activity*. |
 | **_Snapshot** | The last balance the app saw for each student, used to notice changes. |
 | **_Sent** | Which reminders were already sent, so nobody gets the same reminder twice. |

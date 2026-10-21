@@ -537,7 +537,10 @@ is in that copy's `ADMIN_EMAILS`, so it can try *Board tools*). No real family's
    changes and reminders go out by themselves.
 5. In the GitHub repository: *Settings → Secrets and variables → Actions → Variables* → set
    `VITE_API_URL` to that `/exec` URL (create it, or edit it with the pencil icon). Then *Actions →
-   Deploy to GitHub Pages → Run workflow* ([step 7](#7-host-the-app-on-github-pages)).
+   Deploy to GitHub Pages → Run workflow* ([step 7](#7-host-the-app-on-github-pages)). Pick the
+   branch that holds the app's current code: `main`, or the work-in-progress branch the site is
+   published from while that work isn't merged into `main` yet. Changing the variable alone doesn't
+   rebuild the site.
 6. In the test spreadsheet's Settings, set `APP_URL` to `https://coledtouch.github.io/TMA/`.
 
 Now **`https://coledtouch.github.io/TMA/`** is the real app working on the test spreadsheet, and
