@@ -410,7 +410,8 @@ describe('showTmaStatus', () => {
 
     const text = showTmaStatus();
 
-    expect(text).toContain('Web app URL: https://script.google.com/macros/s/FAKE/exec');
+    expect(text).toContain('Web app URL: Deploy → Manage deployments → Web app (the URL ending in /exec)');
+    expect(text).not.toContain('FAKE/exec');
     expect(text).toContain('Secrets set: TOKEN_SECRET, PAYPAL_SECRET, PUSH_RELAY_SECRET');
     expect(text).toContain('Secrets not set: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM');
     expect(text).toContain('PayPal: configured (sandbox); online payments on');
@@ -482,9 +483,7 @@ describe('showTmaStatus', () => {
   });
 
   it('points to setup when TOKEN_SECRET is missing', () => {
-    gas.scriptApp.serviceUrl = '';
     const text = showTmaStatus();
-    expect(text).toContain('not deployed yet');
     expect(text).toContain('TOKEN_SECRET is missing');
   });
 });
