@@ -212,6 +212,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
 | `admin.announce` | Refuse (`CONFLICT` "already sent N minutes ago") the same title and body sent within the last 15 minutes, so a retry after the app gave up waiting can't send it twice. Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. The app waits up to 6 minutes for this and for `admin.runSync` (30 s for everything else). |
 | `admin.runSync` | Run `syncTick()` and return its report. |
+| `admin.report` | Read-only, no write lock. Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
 
 ### 5.1 Bootstrap
 
@@ -260,6 +261,58 @@ For each Pending student, score Active/treasurer students that are not already i
 the last name must match (case-insensitive, letters only). Score = 0.6 for the last-name match + 0.3 if
 the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Alex"/"Alexander") +
 0.1 if the grade matches. Keep score ≥ 0.6 and return the top 3 by score, then by balance descending.
+
+### 5.4 Reports (src/server/reports.ts)
+
+Board members get read-only tables computed from the sheet: in the app (*Board tools → Reports*,
+`admin.report`, downloadable as CSV) and in the sheet (*TMA App → Reports*). Nothing is stored. Each
+report is built fresh from the same `Model` and `Books` the app uses, so its numbers always match what
+families and the dashboard see.
+
+* **Cells**: money in integer cents, dates `YYYY-MM-DD`, blanks `null`. `totals` sums the money and number
+  columns where a total makes sense. `containsContactInfo` is true for the roster, and for any report
+  whose cells hold an email address or phone number (trip balances and payments list parent and payer
+  emails; fund activity's *Entered by* is usually a board member's email), so the app can warn before a
+  download.
+* **Filters**: every filter given is checked, whatever the report: `activityId` must be in Activities,
+  `school`/`ensemble` in Settings `SCHOOLS`/`ENSEMBLES` (kept in the Settings spelling), `from`/`to` real
+  `YYYY-MM-DD` dates with `from ≤ to`, `includePaid` true or false. Anything else is `BAD_REQUEST` saying
+  which. Blank values (`''`, `null`) mean "all". Only the filters the report uses are kept, and
+  `report.filters` echoes them with their defaults. Dates default to the **school year** (Jul 1 – Jun 30)
+  of today in New York (§3 "Dates"). With only one date given, the other end comes from that date's
+  school year.
+* **Size**: at most `MAX_REPORT_ROWS` = 5,000 rows. Past that, the first 5,000 in sort order are returned,
+  a note says how many there were and how to narrow the report, and the totals still cover every row.
+* **Privacy**: admin-only. No push tokens, notification JSON or secrets ever appear. A roster request
+  (contact details) adds one Log row, `report` "Roster with contact details (<school, group or all
+  students>, N students) viewed by <admin email>", taking the write lock just for that row as auth's
+  rate-limit row does; if the lock is busy, only the row is skipped. Other reports log nothing.
+* Ledger and Payments rows with no date can't be placed in a date range: they are left out and counted
+  in a note.
+* A StudentID on two Students rows counts once, as its first row, as everywhere in the app. The
+  dashboard's total funds is the Ledger's sum, so a repeated row can't count a balance twice.
+
+| Report | Rows and sort order | Filters | Totals |
+| --- | --- | --- | --- |
+| `trip-balances` | One per enrollment with status Going, then Waitlist (Withdrawn left out, with a note when one had money paid), by activity name, then student last name, first name, StudentID. Cost, paid from funds, paid directly, **pending** (fund requests + payments still clearing), **left to pay** (`remainingCents`), deposit and its due date, final due date, parent (first guardian), and a status: `Owes`, `Deposit overdue` (deposit date passed and paid + clearing < deposit), `Past due` (final due date passed), `Paid in full`, `Paid (payment clearing)`, `No cost set` or `Waitlist`. | activity (default: **open activities only**), school, group, `includePaid` (default: only rows with something left to pay) | Going rows only |
+| `student-funds` | One per Active student (last name, first name): earned (Σ positive Ledger rows), applied (Σ negative rows), balance, pending requests, available, last Ledger date. Unfiltered, a note gives the funds of student IDs not listed (pending, inactive, unknown), so the total matches the dashboard. | school, group | every money column |
+| `fundraiser-totals` | Positive Ledger rows in the range grouped by Type + Description (capitals and extra spaces ignored): students credited, total, first and last date. By first date, type, description. | dates | total |
+| `fund-activity` | Every Ledger row in the range, oldest first, then sheet order: student, type, description, amount, activity, reference, entered by. | dates, activity | `credits`, `debits`, `net` (keys, not columns) |
+| `payments` | Every Payments row in the range, oldest first, then sheet order: amount, fee covered, gross, method, reference, payer email, status. | dates, activity | Completed rows only (a note says so) |
+| `roster` | One per Active student (last name, first name): grade, school, groups, instrument, household ID and status, member, both guardians' name, email and phone. | school, group | none |
+| `open-items` | Pending fund requests, Pending households, Pending students of verified households, then payments with Status Pending; oldest first within each. Names only, no emails. | none | none |
+| `app-usage` | A fixed list of counts: households (all, verified, pending), students, households that used the app (Pending, or a guardian with a Preferences or Devices row), devices, households getting push, email or texts (stored prefs or the defaults, as §6 decides), people with settings but no household. No names. | none | none |
+
+**In the sheet** (`src/gas/reports-sheet.ts`): *TMA App → Reports* has one item per report. Each writes
+the report with its default filters to a tab named `Report: <title>` (found by name, capitals ignored,
+or added at the end), cleared and rewritten on every run. No other tab is touched, and nothing is
+logged (whoever can run the menu can already open Families). Row 1 says "Generated <time> — rebuilt each
+time you run it; edit the other tabs, not this one."; row 2 is the bold header; rows 1–2 are frozen.
+Money is written in dollars formatted `$#,##0.00`, dates as sheet serial numbers formatted `m/d/yyyy`
+(no time zone can shift them), counts `#,##0`. A bold totals row follows, then the description, filters
+and notes. Text starting with `=`, `+`, `-`, `@` or `'` gets a leading apostrophe, so Sheets shows it as
+typed and never runs it as a formula. The app never reads these tabs: the Store finds its tables by
+their exact names (§9), and Set up only creates the tabs in `TABLE_ORDER`.
 
 ## 6. Notifications (src/server/notify.ts)
 
@@ -338,7 +391,9 @@ dashboard); the core doesn't know the route. In Apps Script it is `src/gas/mail.
 
 Logs carry reason codes and HTTP codes only, never addresses, subjects or bodies. In the demo and
 tests the mailer is an in-memory recorder.
-* Email: HTML with a maroon header bar showing the org name, the body paragraphs, a button "Open the TMA app"
+* Email: HTML with the TMA logo on top when APP_URL is https (`brand/tma-logo-email.png` next to the app
+  page APP_URL points at, fixed 120×93 with alt text, so nothing moves when images are blocked), a maroon
+  header bar showing the org name, the body paragraphs, a button "Open the TMA app"
   → `APP_URL + url` (button omitted if APP_URL empty), and a footer "You're receiving this because you
   signed up for TMA updates. Change what you get in the app under More → Notifications."
   Always include a plain-text alternative.
@@ -451,10 +506,12 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   target `es2019`, no minify, with a banner comment saying the file is generated) and appends top-level wrappers
   that Apps Script can see: `function doGet(e)`, `function doPost(e)`, `function onOpen()`,
   `function syncTick()`, `function dailyTick()`, `function setupTma()`, `function setupTmaWithSampleData()`,
-  `function installTriggers()`, `function sendTestPushToMe()`, `function showTmaStatus()`.
+  `function installTriggers()`, `function sendTestPushToMe()`, `function showTmaStatus()`, and one per
+  sheet report (`function reportTripBalances()` … `function reportAppUsage()`, §5.4). A menu item can
+  only call a top-level function, so a new report needs its name in this list too.
 * `doPost(e)`: parse `e.postData.contents`, call `app.handle`, and return
   `ContentService.createTextOutput(JSON.stringify(res)).setMimeType(JSON)`.
-* `doGet(e)`: `?action=health` → `{ok:true, data:{version, time}}`. Otherwise a tiny HTML page that links to APP_URL.
+* `doGet(e)`: `?action=health` → `{ok:true, data:{version, time}}`. Otherwise a few lines of plain text pointing to APP_URL. Never an HtmlService page: every page it served would give its visitors `google.script.run`, which calls any top-level function in Code.js as the owner.
 * SheetStore: `SpreadsheetApp.getActive()`. The script is **container-bound** (created from the sheet via
   Extensions → Apps Script), so it only ever touches that one spreadsheet. Read with one `getDataRange().getValues()` per table per request (memoize per execution).
   Header row → canonical map via normalizeHeader+aliases. append uses one `setValues` call. Hide `system` tabs.
@@ -526,9 +583,17 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   (and, for Gmail, the Worker's reason).
 * Twilio SMS (optional; costs about 1¢ per text): `TWILIO_*` secrets set → enabled. POST form to
   `https://api.twilio.com/2010-04-01/Accounts/<sid>/Messages.json` with basic auth.
-* `onOpen()` adds a sheet menu **TMA App**: Run sync now · Send me a test notification · Set up / repair tabs ·
-  Install schedules · Status. `installTriggers()` removes old triggers for these handlers and installs
+* `onOpen()` adds a sheet menu **TMA App**: Run sync now · Reports ▸ (one item per report, §5.4) · Send me a
+  test notification · Set up / repair tabs · Install schedules · Status. `installTriggers()` removes old triggers for these handlers and installs
   syncTick every 15 min and dailyTick at 8 AM.
+* An HtmlService page served by this script could call any top-level function in Code.js
+  (`google.script.run`), as the owner, for anyone who opens the `/exec` address. `doGet` therefore
+  serves plain text (no such page exists), and as a second guard the menu items check who is running
+  them first, and do nothing otherwise. The reports, Status and the test notification need the spreadsheet's UI
+  (`SpreadsheetApp.getUi()`, which a web request never has). Set up and Install schedules, also run from
+  the script editor, need the UI or a signed-in user (`Session.getActiveUser().getEmail()`, blank for a
+  web-app visitor under Execute as: Me). The reports and Status return nothing: their output stays in
+  the sheet or the dialog (Status shows the email key).
 * `appsscript.json`: timeZone `America/New_York`, runtime V8, webapp {executeAs USER_DEPLOYING,
   access ANYONE_ANONYMOUS}, oauthScopes (least privilege): `spreadsheets.currentonly`,
   `script.container.ui`, `script.send_mail`, `script.external_request` (PayPal, the push Worker,
@@ -698,7 +763,7 @@ export function PayPalCheckout(props: {
 
 ### Screens (bottom tab bar: Home · Funds · Trips · News · More)
 
-* **Sign in**: TMA banner logo, "Sign in with your email", code step, and a clear note that new families can
+* **Sign in**: the TMA logo (owl over music notes, TIMBERLANE MUSIC; lighter notes in dark mode), "Sign in with your email", code step, and a clear note that new families can
   sign up with any email. Demo mode shows a banner with one-tap "Try as a parent" (parent@example.com),
   "Try as the treasurer" (treasurer@example.com) and "Try as a new family" buttons, and auto-fills devCode.
   A live build adds a "See a demo with sample data" link; while a live build runs the demo, the demo
@@ -724,7 +789,20 @@ export function PayPalCheckout(props: {
 * **Admin** (visible when isAdmin; reachable from More and Home): stats tiles, pending fund requests
   (approve/deny with optional note), new households (approve, link to the existing student record via a
   candidate radio list, reject), compose announcement (title, body, link, audience checkboxes, channel
-  toggles, preview, send), run sync now, recent activity log.
+  toggles, preview, send), run sync now, recent activity log, and a **Reports** card.
+* **Reports** (`#/reports`, admins only; §5.4): a list of the 8 reports, then one report per address
+  (`#/reports?kind=trip-balances`), so Back works. Only the filters the report uses are shown (activity,
+  school, group, from/to dates starting at this school year, "Include paid in full"); the report runs again
+  400 ms after a filter changes, and an end date before the start date is explained, not sent. Results: the
+  description, the generated time, the filters in words, the notes, and a table whose student column (else
+  the first) comes first and stays in view while it scrolls sideways; totals at the bottom (fund activity:
+  Credits, Debits, Net). On wide screens a table with more than 3 columns may grow past the 640 px column.
+  **Download CSV** (`src/web/lib/csv.ts`): `tma-<kind>-<date>.csv`, UTF-8 with a byte-order mark, CRLF, the
+  same columns in the same order as the table, money as plain dollars, dates `YYYY-MM-DD`, then the totals,
+  title, description, generated time, filters and notes. Text starting with `=`, `+`, `-`, `@`, a tab or a
+  carriage return gets a leading apostrophe. When `containsContactInfo`, the screen says so and the download
+  asks first ("This file has people's email addresses …. Keep it private."). **Print** shows only the report,
+  landscape, header row repeated on each page.
 
 ### UX rules
 
@@ -739,15 +817,20 @@ export function PayPalCheckout(props: {
   headings (Georgia/"Times New Roman") echo the logo; system UI font for body. Light + dark themes via
   tokens on `:root` with `@media (prefers-color-scheme: dark)`. Respect `prefers-reduced-motion`.
   Layout max-width 640px centered, 16px gutters, safe-area insets for the bottom bar.
+* Logo and icons: all made by `npm run icons` (scripts/make-icons.mjs) from the official artwork
+  `public/brand/tma-music-logo-source.webp`. The sign-in logo is transparent (`brand/tma-logo-light.webp`,
+  `brand/tma-logo-dark.webp`), the header shows the owl on a white disc (`brand/tma-owl-mark.png`), app
+  icons show the whole logo on white, and the favicons (32, 64) and notification badge show just the owl.
 
 ### Service worker (src/web/sw.ts, vite-plugin-pwa injectManifest)
 
 * `precacheAndRoute(self.__WB_MANIFEST)`; `cleanupOutdatedCaches()`; navigation route → precached `index.html`.
+  The precache leaves out the two brand files the app never shows (the logo source and the email logo).
 * Runtime: images StaleWhileRevalidate (`tma-images`, max 60). **Never cache API calls** (POST anyway).
 * `push`: the payload is the JSON `PushMessage` Apps Script sent through the Worker
   (`{title, body, url, tag, topic}`); plain text becomes the body. Parse robustly. **Always** show a
   notification (iOS requires it) with icon `icons/icon-192.png`, badge `icons/badge-96.png` (transparent
-  silhouette; Android uses only its alpha), tag, and `data.url`. Fallback title "TMA update". Also post
+  owl silhouette; Android uses only its alpha), tag, and `data.url`. Fallback title "TMA update". Also post
   `{type:'push', message}` to open app windows (in-app banner and refresh).
 * `pushsubscriptionchange` (mostly Firefox, when the push service expires or replaces a subscription):
   post `{type:'pushsubscriptionchange'}` to open app windows. Subscribing again needs the server's key
@@ -839,7 +922,10 @@ export function PayPalCheckout(props: {
   `no_keys` recovery). `src/gas/bundle.test.ts` checks the generated `apps-script/Code.js` itself (plain
   script, no service calls at load time, every entry point) and drives it end to end against those fakes,
   including setup linking the Worker, `push.register` and a sync push; it is skipped until
-  `npm run build:gas` has run.
+  `npm run build:gas` has run. `src/gas/reports-sheet.test.ts` checks the report tabs: layout, number
+  formats, formula-looking text kept as text, no other tab touched, and Set up and the sync leaving them alone.
+* `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
+  status and filter, validation messages, admin-only, the row cap and the roster's Log row.
 * `workers/push`: its own Vitest config (`workers/push/vitest.config.ts`), run by `npm test` after the
   app's tests, by `npm run test:worker` alone, and by the Worker's deploy workflow; `npm run typecheck`
   includes `workers/push/tsconfig.json`. It checks the RFC 8291 Appendix A vector

@@ -21,9 +21,13 @@ export default defineConfig({
       filename: 'sw.ts',
       registerType: 'prompt',
       injectRegister: false, // registered manually in src/web/lib/sw-register.ts
-      includeAssets: ['icons/*.png', 'brand/*'],
+      // Not brand/* whole: see globIgnores below.
+      includeAssets: ['icons/*.png', 'brand/tma-logo-*.webp', 'brand/tma-owl-mark.png'],
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,png,svg,webp,jpg,woff2}'],
+        // Published but never shown in the app, so phones don't store them: the artwork
+        // `npm run icons` starts from, and the logo emails load from the site.
+        globIgnores: ['brand/tma-music-logo-source.webp', 'brand/tma-logo-email.png'],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
       },
       devOptions: { enabled: false, type: 'module' },

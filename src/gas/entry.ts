@@ -8,16 +8,19 @@
  */
 import { createApp } from '../server/app';
 import { canonicalP256Key } from '../server/push-subscription';
+import { REPORT_TITLES } from '../server/reports';
 import type { App } from '../server/services';
 import { generateSecret } from '../server/setup';
+import { plural } from '../server/util';
 import { SETTING_DEFAULTS, type SecretName } from '../shared/schema';
-import type { ApiAction, ApiRequest, ApiResponse, SetupReport, TickReport } from '../shared/types';
+import type { ApiAction, ApiRequest, ApiResponse, ReportKind, SetupReport, TickReport } from '../shared/types';
 import { describeWorkerReason, pauseSeconds, replyToAddress, WORKER_EMAIL_FROM } from './mail';
 import { paypalEnv } from './paypal';
 import type { RelayHealth } from './push-relay';
+import { runSheetReport, SHEET_REPORTS } from './reports-sheet';
 import { sendSelfTest, type SelfTestReport } from './self-test';
 import { createGasServices, type GasServices } from './services';
-import { describeError, escapeHtml, isRecord } from './util';
+import { describeError, isRecord } from './util';
 
 declare const __APP_VERSION__: string | undefined;
 
@@ -38,7 +41,6 @@ const SECRET_NAMES: readonly SecretName[] = [
 ];
 
 type TextOutput = GoogleAppsScript.Content.TextOutput;
-type HtmlOutput = GoogleAppsScript.HTML.HtmlOutput;
 
 function boot(): { services: GasServices; app: App } {
   const services = createGasServices();
@@ -93,7 +95,7 @@ export function doPost(e?: GoogleAppsScript.Events.DoPost): TextOutput {
 }
 
 /** `?action=health` for monitoring; otherwise a small page pointing people to the app. */
-export function doGet(e?: GoogleAppsScript.Events.DoGet): TextOutput | HtmlOutput {
+export function doGet(e?: GoogleAppsScript.Events.DoGet): TextOutput {
   if (e?.parameter?.action === 'health') {
     return json({ ok: true, data: { version: VERSION, time: new Date().toISOString() } });
   }
@@ -106,34 +108,28 @@ export function doGet(e?: GoogleAppsScript.Events.DoGet): TextOutput | HtmlOutpu
   } catch (error) {
     console.error('doGet could not read Settings', describeError(error));
   }
-  return HtmlService.createHtmlOutput(landingPage(orgName, appUrl))
-    .setTitle(orgName)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  // Plain text, never an HtmlService page: every HtmlService page this script serves gives its
+  // visitor google.script.run, which can call any top-level function in Code.js as the owner.
+  return ContentService.createTextOutput(landingText(orgName, appUrl)).setMimeType(ContentService.MimeType.TEXT);
 }
 
-export function landingPage(orgName: string, appUrl: string): string {
-  const name = escapeHtml(orgName);
-  const link = /^https?:\/\/[^\s"'<>]+$/i.test(appUrl)
-    ? `<p><a href="${escapeHtml(appUrl)}" target="_top" style="display:inline-block;background:#5a0f13;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Open the TMA app</a></p>`
-    : '<p>Ask TMA for the app link.</p>';
-  return [
-    '<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;margin:40px auto;padding:0 16px;color:#141010">',
-    `<h1 style="font-family:Georgia,'Times New Roman',serif;color:#5a0f13;font-size:24px">${name}</h1>`,
-    '<p>This address is the TMA app\'s server. Families use the app instead:</p>',
-    link,
-    '</div>',
-  ].join('');
+export function landingText(orgName: string, appUrl: string): string {
+  const link = /^https?:\/\/[^\s"'<>]+$/i.test(appUrl) ? `Families use the app at ${appUrl}` : 'Ask TMA for the app link.';
+  return `${orgName}\n\nThis address is the TMA app's server. ${link}\n`;
 }
 
 // ---------------------------------------------------------------------------
 // Sheet menu + scheduled work
 // ---------------------------------------------------------------------------
 
-/** Simple trigger: adds the TMA App menu to the sheet. */
+/** Simple trigger: adds the TMA App menu (with its Reports sub-menu) to the sheet. */
 export function onOpen(): void {
-  SpreadsheetApp.getUi()
-    .createMenu(MENU_TITLE)
+  const ui = SpreadsheetApp.getUi();
+  const reports = ui.createMenu('Reports');
+  for (const r of SHEET_REPORTS) reports.addItem(REPORT_TITLES[r.kind], r.fn);
+  ui.createMenu(MENU_TITLE)
     .addItem('Run sync now', 'syncTick')
+    .addSubMenu(reports)
     .addItem('Send me a test notification', 'sendTestPushToMe')
     .addItem('Set up / repair tabs', 'setupTma')
     .addItem('Install schedules', 'installTriggers')
@@ -159,16 +155,18 @@ export function dailyTick(e?: GoogleAppsScript.Events.TimeDriven): TickReport {
   return report;
 }
 
-export function setupTma(): SetupReport {
+/** Menu or script editor (SETUP.md step 1). Null when refused (see allowed()). */
+export function setupTma(): SetupReport | null {
   return runSetup(false);
 }
 
 /** Like setupTma, and fills empty tabs with the fictional demo households. */
-export function setupTmaWithSampleData(): SetupReport {
+export function setupTmaWithSampleData(): SetupReport | null {
   return runSetup(true);
 }
 
-function runSetup(seedSampleData: boolean): SetupReport {
+function runSetup(seedSampleData: boolean): SetupReport | null {
+  if (!allowed('Set up', false)) return null;
   const { services, app } = boot();
   const report = services.withLock(() => {
     const result = app.setup({ seedSampleData });
@@ -225,8 +223,61 @@ export function linkPushWorker(services: GasServices): string[] {
   return lines;
 }
 
+// TMA App → Reports → …: each writes its report, with the default filters, to its own
+// "Report: <title>" tab (src/gas/reports-sheet.ts). scripts/build-gas.mjs lists these names too.
+// They return nothing: the report stays in the sheet (see allowed()).
+
+export function reportTripBalances(): void {
+  sheetReport('trip-balances');
+}
+
+export function reportStudentFunds(): void {
+  sheetReport('student-funds');
+}
+
+export function reportFundraiserTotals(): void {
+  sheetReport('fundraiser-totals');
+}
+
+export function reportFundActivity(): void {
+  sheetReport('fund-activity');
+}
+
+export function reportPayments(): void {
+  sheetReport('payments');
+}
+
+export function reportRoster(): void {
+  sheetReport('roster');
+}
+
+export function reportOpenItems(): void {
+  sheetReport('open-items');
+}
+
+export function reportAppUsage(): void {
+  sheetReport('app-usage');
+}
+
+/**
+ * Write one report tab and show it. Not logged, unlike the roster in the app: whoever can run this
+ * menu can already open the Families tab, and the report must not touch any other tab.
+ */
+function sheetReport(kind: ReportKind): void {
+  if (!allowed(`Report ${kind}`, true)) return;
+  try {
+    const { report, sheet } = runSheetReport(createGasServices(), SpreadsheetApp.getActive(), kind);
+    sheet.activate();
+    toast(`${sheet.getName()}: ${plural(report.rows.length, 'row')}. Run it again any time for fresh numbers.`);
+  } catch (error) {
+    console.error(`Report ${kind} failed`, describeError(error));
+    alert('Report not written', errorMessage(error));
+  }
+}
+
 /** Replace this project's syncTick/dailyTick triggers with fresh ones. */
-export function installTriggers(): { removed: number; created: number } {
+export function installTriggers(): { removed: number; created: number } | null {
+  if (!allowed('Install schedules', false)) return null;
   let removed = 0;
   for (const trigger of ScriptApp.getProjectTriggers()) {
     if (SCHEDULED_HANDLERS.includes(trigger.getHandlerFunction())) {
@@ -241,7 +292,8 @@ export function installTriggers(): { removed: number; created: number } {
 }
 
 /** Menu: push + email test to the signed-in Google user's own devices. */
-export function sendTestPushToMe(): SelfTestReport {
+export function sendTestPushToMe(): SelfTestReport | null {
+  if (!allowed('Send me a test notification', true)) return null;
   const report = sendSelfTest(createGasServices(), activeUserEmail());
   const lines = report.email ? [`Sent to ${report.email}:`] : [];
   if (report.devices > 0) {
@@ -262,8 +314,12 @@ function testEmailLine(report: SelfTestReport): string {
   return `sent with Gmail from this Google account instead of ${WORKER_EMAIL_FROM}, because ${describeWorkerReason(report.emailWorkerReason)}${code}.`;
 }
 
-/** Menu: configuration overview. Lists secret *names* only, never values. */
-export function showTmaStatus(): string {
+/**
+ * Menu: configuration overview. Lists secret *names* only, never values. Shown, never returned:
+ * it holds the email key (see allowed()).
+ */
+export function showTmaStatus(): void {
+  if (!allowed('Status', true)) return;
   const services = createGasServices();
   const handlers = safely(() => ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()), [] as string[]);
   const present = SECRET_NAMES.filter((name) => services.secrets.get(name) !== null);
@@ -289,9 +345,7 @@ export function showTmaStatus(): string {
     `Version: ${VERSION}`,
   ];
   if (!present.includes('TOKEN_SECRET')) lines.push('', 'TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.');
-  const text = lines.join('\n');
-  alert('TMA App status', text);
-  return text;
+  alert('TMA App status', lines.join('\n'));
 }
 
 /** Status lines for the push Worker. Never prints PUSH_RELAY_SECRET. */
@@ -363,6 +417,23 @@ export function summarizeTick(report: TickReport): string {
   if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
   if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
   return `${parts.join(' · ')}.`;
+}
+
+/**
+ * A page served with HtmlService would let anyone who opens the /exec address call every top-level
+ * function in Code.js (google.script.run) as the sheet's owner. doGet serves plain text so there is
+ * no such page; the menu items still check first, in case one is ever added. `menuOnly` ones need the spreadsheet's UI, which a web request never has.
+ * The others (also run from the script editor) need to know who is running them, which a web-app
+ * visitor never shows (Execute as: Me hides their email).
+ */
+function allowed(what: string, menuOnly: boolean): boolean {
+  if (hasSheetUi() || (!menuOnly && activeUserEmail() !== '')) return true;
+  console.warn(`${what} runs only from the TMA App menu in the spreadsheet${menuOnly ? '' : ' or from the script editor'}.`);
+  return false;
+}
+
+function hasSheetUi(): boolean {
+  return safely(() => SpreadsheetApp.getUi() !== null, false);
 }
 
 function activeUserEmail(): string {

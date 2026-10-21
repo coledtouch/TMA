@@ -2,8 +2,9 @@
  * Defensive parameter parsing for API calls. Every helper either returns a
  * clean value or throws BAD_REQUEST with a message a parent can act on.
  */
+import type { IsoDate } from '../shared/types';
 import { badRequest } from './errors';
-import { cleanText, isEmail, isRecord, MAX_AMOUNT_CENTS, normEmail, safeUrl } from './util';
+import { cleanText, isEmail, isRecord, MAX_AMOUNT_CENTS, normEmail, parseDate, safeUrl } from './util';
 
 export type Params = Record<string, unknown>;
 
@@ -75,6 +76,13 @@ export function cents(value: unknown, label: string, min: number): number {
   if (value > MAX_AMOUNT_CENTS) badRequest(`${label} is too large.`);
   if (value < min) badRequest(`${label} is too small.`);
   return value;
+}
+
+/** A calendar date written YYYY-MM-DD (a real day, years 1900–2200). */
+export function isoDate(value: unknown, label: string): IsoDate {
+  const s = typeof value === 'string' ? value.trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return badRequest(`${label} must be a date like 2026-07-01.`);
+  return parseDate(s) ?? badRequest(`${label} is not a real date.`);
 }
 
 export function bool(value: unknown, label: string, fallback?: boolean): boolean {

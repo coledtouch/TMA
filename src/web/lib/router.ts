@@ -5,7 +5,16 @@
  */
 import { useSyncExternalStore } from 'react';
 
-export type RouteName = 'home' | 'funds' | 'trips' | 'news' | 'more' | 'household' | 'notifications' | 'admin';
+export type RouteName =
+  | 'home'
+  | 'funds'
+  | 'trips'
+  | 'news'
+  | 'more'
+  | 'household'
+  | 'notifications'
+  | 'admin'
+  | 'reports';
 
 export interface Route {
   name: RouteName;
@@ -21,6 +30,7 @@ const PATHS: Record<RouteName, string> = {
   household: '/household',
   notifications: '/notifications',
   admin: '/admin',
+  reports: '/reports',
 };
 
 const BY_PATH = new Map<string, RouteName>(

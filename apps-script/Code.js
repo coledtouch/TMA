@@ -29,10 +29,18 @@ var TMA = (() => {
     doGet: () => doGet,
     doPost: () => doPost,
     installTriggers: () => installTriggers,
-    landingPage: () => landingPage,
+    landingText: () => landingText,
     linkPushWorker: () => linkPushWorker,
     onOpen: () => onOpen,
     parseApiRequest: () => parseApiRequest,
+    reportAppUsage: () => reportAppUsage,
+    reportFundActivity: () => reportFundActivity,
+    reportFundraiserTotals: () => reportFundraiserTotals,
+    reportOpenItems: () => reportOpenItems,
+    reportPayments: () => reportPayments,
+    reportRoster: () => reportRoster,
+    reportStudentFunds: () => reportStudentFunds,
+    reportTripBalances: () => reportTripBalances,
     sendTestPushToMe: () => sendTestPushToMe,
     setupTma: () => setupTma,
     setupTmaWithSampleData: () => setupTmaWithSampleData,
@@ -1826,30 +1834,30 @@ var TMA = (() => {
       tag: `bal-${studentId}`
     };
   }
-  function redemptionApprovedNotice(firstName, amountCents, activityName, remainingCents, requestId) {
+  function redemptionApprovedNotice(firstName, amountCents, activityName2, remainingCents, requestId) {
     return {
       topic: "payments",
-      title: `Funds applied to ${activityName}`,
-      body: `${formatCents(amountCents)} of ${firstName}'s activity funds was applied to ${activityName}. Remaining: ${formatCents(remainingCents)}.`,
+      title: `Funds applied to ${activityName2}`,
+      body: `${formatCents(amountCents)} of ${firstName}'s activity funds was applied to ${activityName2}. Remaining: ${formatCents(remainingCents)}.`,
       url: "#/trips",
       tag: `red-${requestId}`
     };
   }
-  function redemptionDeniedNotice(amountCents, activityName, adminNote, requestId) {
+  function redemptionDeniedNotice(amountCents, activityName2, adminNote, requestId) {
     const note = adminNote ? ` Note: ${adminNote}` : "";
     return {
       topic: "payments",
       title: "Funds request not approved",
-      body: `Your request to apply ${formatCents(amountCents)} to ${activityName} was not approved.${note}`,
+      body: `Your request to apply ${formatCents(amountCents)} to ${activityName2} was not approved.${note}`,
       url: "#/trips",
       tag: `red-${requestId}`
     };
   }
-  function paymentReceivedNotice(firstName, amountCents, activityName, remainingCents, paymentId) {
+  function paymentReceivedNotice(firstName, amountCents, activityName2, remainingCents, paymentId) {
     return {
       topic: "payments",
       title: "Payment received – thank you!",
-      body: `${formatCents(amountCents)} toward ${activityName} for ${firstName}. Remaining: ${formatCents(remainingCents)}.`,
+      body: `${formatCents(amountCents)} toward ${activityName2} for ${firstName}. Remaining: ${formatCents(remainingCents)}.`,
       url: "#/trips",
       tag: `pay-${paymentId}`
     };
@@ -1921,38 +1929,38 @@ var TMA = (() => {
       tag: `signup-${familyId}`
     };
   }
-  function fundsRequestNotice(parentName, amountCents, firstName, activityName, requestId) {
+  function fundsRequestNotice(parentName, amountCents, firstName, activityName2, requestId) {
     return {
       topic: "admin",
       title: `Funds request: ${formatCents(amountCents)}`,
-      body: `${parentName} asked to apply ${formatCents(amountCents)} from ${firstName}'s funds to ${activityName}.`,
+      body: `${parentName} asked to apply ${formatCents(amountCents)} from ${firstName}'s funds to ${activityName2}.`,
       url: "#/admin",
       tag: `req-${requestId}`
     };
   }
-  function paymentReviewNotice(firstName, activityName, reference) {
+  function paymentReviewNotice(firstName, activityName2, reference) {
     return {
       topic: "admin",
       title: "Payment needs review",
-      body: `A PayPal payment for ${firstName} (${activityName}) did not match the expected amount, so the app did not record it. Check PayPal capture ${reference} and add it to the Payments tab.`,
+      body: `A PayPal payment for ${firstName} (${activityName2}) did not match the expected amount, so the app did not record it. Check PayPal capture ${reference} and add it to the Payments tab.`,
       url: "#/admin",
       tag: `payreview-${reference}`
     };
   }
-  function paymentUnconfirmedNotice(firstName, activityName, grossCents, orderId) {
+  function paymentUnconfirmedNotice(firstName, activityName2, grossCents, orderId) {
     return {
       topic: "admin",
       title: "Payment needs review",
-      body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName}) went through, so the app has not recorded it yet. The app asks PayPal again, and if it then records the payment you'll get a "Payment recorded" message. Otherwise look up PayPal order ${orderId}: if it was captured and the Payments tab has no row with its transaction ID, add one so the family isn't asked to pay again.`,
+      body: `PayPal did not confirm whether a ${formatCents(grossCents)} payment for ${firstName} (${activityName2}) went through, so the app has not recorded it yet. The app asks PayPal again, and if it then records the payment you'll get a "Payment recorded" message. Otherwise look up PayPal order ${orderId}: if it was captured and the Payments tab has no row with its transaction ID, add one so the family isn't asked to pay again.`,
       url: "#/admin",
       tag: `payreview-${orderId}`
     };
   }
-  function paymentRecordedAfterReviewNotice(firstName, activityName, grossCents, orderId, reference, pending) {
+  function paymentRecordedAfterReviewNotice(firstName, activityName2, grossCents, orderId, reference, pending) {
     return {
       topic: "admin",
       title: "Payment recorded",
-      body: `The ${formatCents(grossCents)} PayPal payment for ${firstName} (${activityName}) that needed review (order ${orderId}) went through after all: the app recorded it in the Payments tab as ${reference}${pending ? " (Pending while PayPal finishes processing it)" : ""}. Don't add it by hand.`,
+      body: `The ${formatCents(grossCents)} PayPal payment for ${firstName} (${activityName2}) that needed review (order ${orderId}) went through after all: the app recorded it in the Payments tab as ${reference}${pending ? " (Pending while PayPal finishes processing it)" : ""}. Don't add it by hand.`,
       url: "#/admin",
       tag: `payreview-${orderId}`
     };
@@ -2094,22 +2102,22 @@ var TMA = (() => {
   }
   function rateLimit(ctx, key, limit, windowSeconds, message) {
     const nowMs = ctx.now.getTime();
-    let count = 0;
+    let count2 = 0;
     let resetAt = nowMs + windowSeconds * 1e3;
     const raw = ctx.s.cache.get(key);
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
         if (typeof parsed.n === "number" && typeof parsed.r === "number" && parsed.r > nowMs) {
-          count = parsed.n;
+          count2 = parsed.n;
           resetAt = parsed.r;
         }
       } catch {
       }
     }
-    if (count >= limit) throw new ApiError("RATE_LIMITED", message);
+    if (count2 >= limit) throw new ApiError("RATE_LIMITED", message);
     const ttl = Math.max(1, Math.ceil((resetAt - nowMs) / 1e3));
-    ctx.s.cache.put(key, JSON.stringify({ n: count + 1, r: resetAt }), ttl);
+    ctx.s.cache.put(key, JSON.stringify({ n: count2 + 1, r: resetAt }), ttl);
   }
 
   // src/server/email.ts
@@ -2119,6 +2127,8 @@ var TMA = (() => {
   var CREAM = "#faf7f5";
   var SERIF = "Georgia,'Times New Roman',serif";
   var SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+  var LOGO_PATH = "brand/tma-logo-email.png";
+  var LOGO_ALT = "Timberlane Music Association";
   function escapeHtml(text2) {
     return text2.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
@@ -2128,6 +2138,13 @@ var TMA = (() => {
     if (!path) return base;
     return path.startsWith("#") && base.includes("#") ? base.slice(0, base.indexOf("#")) + path : base + path;
   }
+  function logoUrl(appUrl) {
+    const base = safeUrl(appUrl);
+    const match = base ? /^(https:\/\/[^/?#]+)([^?#]*)/i.exec(base) : null;
+    if (!match) return "";
+    const folder = (match[2] || "/").replace(/[^/]*$/, "");
+    return `${match[1]}${folder}${LOGO_PATH}`;
+  }
   function paragraphs(body) {
     return body.split(/\n{2,}/).map((p) => p.trim()).filter((p) => p !== "").map((p) => `<p style="margin:0 0 14px;">${escapeHtml(p).replace(/\n/g, "<br>")}</p>`).join("");
   }
@@ -2135,6 +2152,7 @@ var TMA = (() => {
     var _a;
     const buttonUrl = appLink(input.appUrl, input.path);
     const link = safeUrl(input.link);
+    const logo = logoUrl(input.appUrl);
     const footer = (_a = input.footer) != null ? _a : NOTIFICATION_FOOTER;
     const html = [
       '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>',
@@ -2142,6 +2160,8 @@ var TMA = (() => {
       `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${CREAM};padding:24px 12px;">`,
       '<tr><td align="center">',
       `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:10px;overflow:hidden;font-family:${SANS};color:${INK};">`,
+      // Fixed size, so the layout holds when images are blocked (the alt text shows instead).
+      logo ? `<tr><td align="center" style="background:#ffffff;padding:20px 24px 16px;"><img src="${escapeHtml(logo)}" width="120" height="93" alt="${LOGO_ALT}" style="display:block;margin:0 auto;width:120px;height:93px;border:0;outline:none;text-decoration:none;font-family:${SERIF};font-size:14px;color:${MAROON};"></td></tr>` : "",
       `<tr><td style="background:${MAROON};color:#ffffff;padding:16px 24px;font-family:${SERIF};font-size:20px;font-weight:bold;">${escapeHtml(input.orgName)}</td></tr>`,
       '<tr><td style="padding:24px;font-size:16px;line-height:1.5;">',
       `<h1 style="margin:0 0 14px;font-family:${SERIF};font-size:22px;line-height:1.3;color:${INK};">${escapeHtml(input.title)}</h1>`,
@@ -2275,10 +2295,10 @@ var TMA = (() => {
     const emails = unique(recipients.map(normEmail).filter(isEmail));
     if (emails.length === 0) return null;
     const settings = ctx.m.settings();
-    const allowed = { push: true, email: true, sms: true, ...opts.channels };
-    const pushOn = allowed.push && safely(ctx, "push.enabled", () => ctx.s.push.enabled(), false);
-    const emailOn = allowed.email && settings.emailEnabled;
-    const smsOn = allowed.sms && settings.smsSetting && safely(ctx, "sms.enabled", () => ctx.s.sms.enabled(), false);
+    const allowed2 = { push: true, email: true, sms: true, ...opts.channels };
+    const pushOn = allowed2.push && safely(ctx, "push.enabled", () => ctx.s.push.enabled(), false);
+    const emailOn = allowed2.email && settings.emailEnabled;
+    const smsOn = allowed2.sms && settings.smsSetting && safely(ctx, "sms.enabled", () => ctx.s.sms.enabled(), false);
     const tokens = [];
     const mailTo = [];
     const smsTo = [];
@@ -2520,6 +2540,12 @@ var TMA = (() => {
     if (value < min) badRequest(`${label} is too small.`);
     return value;
   }
+  function isoDate2(value, label) {
+    var _a;
+    const s = typeof value === "string" ? value.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return badRequest(`${label} must be a date like 2026-07-01.`);
+    return (_a = parseDate(s)) != null ? _a : badRequest(`${label} is not a real date.`);
+  }
   function bool(value, label, fallback) {
     if (typeof value === "boolean") return value;
     if ((value === void 0 || value === null) && fallback !== void 0) return fallback;
@@ -2531,9 +2557,9 @@ var TMA = (() => {
     if (!url) badRequest(`${label} must be a web address starting with https://`);
     return url;
   }
-  function oneOf(value, label, allowed) {
-    if (typeof value === "string" && allowed.includes(value)) return value;
-    return badRequest(`${label} must be one of: ${allowed.join(", ")}.`);
+  function oneOf(value, label, allowed2) {
+    if (typeof value === "string" && allowed2.includes(value)) return value;
+    return badRequest(`${label} must be one of: ${allowed2.join(", ")}.`);
   }
 
   // src/server/admin.ts
@@ -2619,9 +2645,7 @@ var TMA = (() => {
     const families = m.families();
     const students = m.students().filter((s) => s.status !== "Inactive");
     let totalFunds = 0;
-    for (const s of m.students()) totalFunds += books.balance(s.id);
-    const known = new Set(m.students().map((s) => idKey(s.id)));
-    for (const key of books.ledgerStudentKeys()) if (!known.has(key)) totalFunds += books.balance(key);
+    for (const key of books.ledgerStudentKeys()) totalFunds += books.balance(key);
     let emailQuota = 0;
     let emailRelay = null;
     try {
@@ -3208,10 +3232,10 @@ var TMA = (() => {
     m.snapshot().forEach((snap) => ids.push(snap.studentId));
     return ids;
   }
-  function newStudentIds(ctx, count) {
+  function newStudentIds(ctx, count2) {
     const existing = referencedStudentIds(ctx);
     const ids = [];
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count2; i++) {
       const id2 = nextSequentialId("S", existing.concat(ids));
       ids.push(id2);
     }
@@ -3511,14 +3535,14 @@ var TMA = (() => {
     const student2 = ctx.m.studentById(order.studentId);
     const activity = ctx.m.activityById(order.activityId);
     const firstName = (_a = student2 == null ? void 0 : student2.firstName) != null ? _a : order.studentId;
-    const activityName = (_b = activity == null ? void 0 : activity.name) != null ? _b : order.activityId;
+    const activityName2 = (_b = activity == null ? void 0 : activity.name) != null ? _b : order.activityId;
     if (!order.captureId && !order.unconfirmed) {
       const left = (_d = (_c = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _c.remainingCents) != null ? _d : 0;
       if (order.amountCents > left) {
         ctx.log("payment", `${orderId}: not captured; ${formatCents(order.amountCents)} is more than the ${formatCents(left)} left for ${order.studentId} / ${order.activityId}`);
         fail(
           "PAYMENT_FAILED",
-          left > 0 ? `Part of this was paid in the meantime and only ${formatCents(left)} is left, so this payment was stopped and you were not charged. Please start again with the new amount.` : `${activityName} was paid in the meantime, so this payment was stopped and you were not charged.`
+          left > 0 ? `Part of this was paid in the meantime and only ${formatCents(left)} is left, so this payment was stopped and you were not charged. Please start again with the new amount.` : `${activityName2} was paid in the meantime, so this payment was stopped and you were not charged.`
         );
       }
     }
@@ -3537,7 +3561,7 @@ var TMA = (() => {
       const detail = `${orderId}: PayPal did not confirm the capture of ${formatCents(order.grossCents)} (${(_e = result.message) != null ? _e : "no answer"}); check PayPal (${email2}, ${order.studentId}, ${order.activityId})`;
       ctx.log("payment-error", detail);
       ctx.s.logger.error("Capture outcome unknown", detail);
-      if (!order.unconfirmed) notifyAdmins(ctx, paymentUnconfirmedNotice(firstName, activityName, order.grossCents, orderId));
+      if (!order.unconfirmed) notifyAdmins(ctx, paymentUnconfirmedNotice(firstName, activityName2, order.grossCents, orderId));
       fail(
         "INTERNAL",
         "We couldn't confirm the payment with PayPal. If PayPal emailed you a receipt, it went through and TMA will record it. Please don't pay again until it shows in the app."
@@ -3554,7 +3578,7 @@ var TMA = (() => {
         const detail = `${orderId}/${captureId != null ? captureId : "?"}: PayPal captured ${result.grossCents === void 0 ? "an unknown amount" : formatCents(result.grossCents)}, expected ${formatCents(order.grossCents)} (${email2}, ${order.studentId}, ${order.activityId})`;
         ctx.log("payment-error", detail);
         ctx.s.logger.error("Capture amount mismatch", detail);
-        notifyAdmins(ctx, paymentReviewNotice(firstName, activityName, captureId != null ? captureId : orderId));
+        notifyAdmins(ctx, paymentReviewNotice(firstName, activityName2, captureId != null ? captureId : orderId));
         fail("PAYMENT_FAILED", "PayPal reported a different amount than expected. TMA will check it and contact you.");
       }
     } else if (result.status !== "PENDING") {
@@ -3580,13 +3604,13 @@ var TMA = (() => {
     ctx.log("payment", `${reference}: ${formatCents(order.grossCents)} via PayPal from ${email2} for ${order.studentId} / ${order.activityId} (${status})`);
     const recorded = findPayment(ctx, [reference]);
     if (!recorded) throw new Error(`Payment ${reference} was not saved`);
-    if (order.unconfirmed) notifyAdmins(ctx, paymentRecordedAfterReviewNotice(firstName, activityName, order.grossCents, orderId, reference, status === "Pending"));
+    if (order.unconfirmed) notifyAdmins(ctx, paymentRecordedAfterReviewNotice(firstName, activityName2, order.grossCents, orderId, reference, status === "Pending"));
     if (status === "Completed") {
       const remaining = (_g = (_f = ctx.m.books().account(order.studentId, order.activityId)) == null ? void 0 : _f.remainingCents) != null ? _g : 0;
       notifyFamily(
         ctx,
         ctx.m.familyById(order.familyId),
-        paymentReceivedNotice(firstName, order.amountCents, activityName, remaining, reference)
+        paymentReceivedNotice(firstName, order.amountCents, activityName2, remaining, reference)
       );
     }
     return { payment: toPayment(recorded) };
@@ -3709,12 +3733,12 @@ var TMA = (() => {
     const student2 = ctx.m.studentById(rec.studentId);
     const activity = ctx.m.activityById(rec.activityId);
     if (!family || family.status !== "Active" || !student2) return { push: 0, email: 0, sms: 0 };
-    const activityName = (_a = activity == null ? void 0 : activity.name) != null ? _a : rec.activityId;
+    const activityName2 = (_a = activity == null ? void 0 : activity.name) != null ? _a : rec.activityId;
     if (rec.status === "Approved") {
       const remaining = (_c = (_b = ctx.m.books().account(student2.id, rec.activityId)) == null ? void 0 : _b.remainingCents) != null ? _c : 0;
-      return notifyFamily(ctx, family, redemptionApprovedNotice(student2.firstName, rec.amountCents, activityName, remaining, rec.id));
+      return notifyFamily(ctx, family, redemptionApprovedNotice(student2.firstName, rec.amountCents, activityName2, remaining, rec.id));
     }
-    return notifyFamily(ctx, family, redemptionDeniedNotice(rec.amountCents, activityName, rec.adminNote, rec.id));
+    return notifyFamily(ctx, family, redemptionDeniedNotice(rec.amountCents, activityName2, rec.adminNote, rec.id));
   }
   function decideRedemption(ctx, adminEmail, params) {
     var _a, _b, _c, _d;
@@ -3753,6 +3777,764 @@ var TMA = (() => {
     notifyDecision(ctx, updated);
     return { redemption: toRedemption(updated) };
   }
+
+  // src/server/reports.ts
+  var REPORT_KINDS = [
+    "trip-balances",
+    "student-funds",
+    "fundraiser-totals",
+    "fund-activity",
+    "payments",
+    "roster",
+    "open-items",
+    "app-usage"
+  ];
+  var REPORT_TITLES = {
+    "trip-balances": "Trip balances",
+    "student-funds": "Student funds",
+    "fundraiser-totals": "Fundraiser totals",
+    "fund-activity": "Fund activity",
+    payments: "Payments",
+    roster: "Roster",
+    "open-items": "Open items",
+    "app-usage": "App usage"
+  };
+  var MAX_REPORT_ROWS = 5e3;
+  var FILTERS_FOR = {
+    "trip-balances": ["activityId", "school", "ensemble", "includePaid"],
+    "student-funds": ["school", "ensemble"],
+    "fundraiser-totals": ["from", "to"],
+    "fund-activity": ["from", "to", "activityId"],
+    payments: ["from", "to", "activityId"],
+    roster: ["school", "ensemble"],
+    "open-items": [],
+    "app-usage": []
+  };
+  var col = (key, label, type = "text") => ({ key, label, type });
+  function runReport(ctx, adminEmail, params) {
+    const kind = oneOf(params.kind, "Report", REPORT_KINDS);
+    const report = buildReport(ctx, kind, params.filters);
+    const options = reportOptions(ctx);
+    if (kind === "roster") logContactReport(ctx, adminEmail, report);
+    return { report, options };
+  }
+  function buildReport(ctx, kind, filters) {
+    const k = oneOf(kind, "Report", REPORT_KINDS);
+    const applied = reportFilters(ctx, k, filters);
+    return finish(ctx, k, applied, BUILDERS[k](ctx, applied));
+  }
+  function reportOptions(ctx) {
+    const settings = ctx.m.settings().pub;
+    const seen = /* @__PURE__ */ new Set();
+    const activities = [];
+    for (const a of ctx.m.activities()) {
+      if (seen.has(idKey(a.id))) continue;
+      seen.add(idKey(a.id));
+      activities.push({ id: a.id, name: a.name, open: a.status === "Open" });
+    }
+    activities.sort((a, b) => Number(b.open) - Number(a.open) || cmpText(a.name, b.name) || cmpText(a.id, b.id));
+    return { activities, schools: settings.schools.slice(), ensembles: settings.ensembles.slice() };
+  }
+  function logContactReport(ctx, adminEmail, report) {
+    const scope = [report.filters.school, report.filters.ensemble].filter(Boolean).join(", ") || "all students";
+    const detail = `Roster with contact details (${scope}, ${plural(report.rows.length, "student")}) viewed by ${adminEmail}`;
+    try {
+      inWriteLock(ctx, () => ctx.log("report", detail));
+    } catch (err) {
+      ctx.s.logger.error("Could not write the Log row", errorMessage(err));
+    }
+  }
+  function schoolYear(date) {
+    const year = parseInt(date.slice(0, 4), 10);
+    const start = parseInt(date.slice(5, 7), 10) >= 7 ? year : year - 1;
+    return { from: `${start}-07-01`, to: `${start + 1}-06-30` };
+  }
+  function reportFilters(ctx, kind, raw) {
+    var _a;
+    const input = raw === void 0 || raw === null ? {} : obj(raw, "Filters");
+    const given = (key) => !isBlank(input[key]);
+    const settings = ctx.m.settings().pub;
+    let activityId;
+    if (given("activityId")) {
+      const id2 = id(input.activityId, "Activity");
+      const activity = ctx.m.activityById(id2);
+      if (!activity) badRequest(`Activity "${id2}" is not in the Activities tab.`);
+      activityId = activity.id;
+    }
+    const school = given("school") ? listed(input.school, "School", settings.schools, "SCHOOLS") : void 0;
+    const ensemble = given("ensemble") ? listed(input.ensemble, "Group", settings.ensembles, "ENSEMBLES") : void 0;
+    const from = given("from") ? isoDate2(input.from, "From") : void 0;
+    const to = given("to") ? isoDate2(input.to, "To") : void 0;
+    if (from && to && from > to) badRequest("The start date must be on or before the end date.");
+    const includePaid = bool(input.includePaid, "Include paid", false);
+    const uses = FILTERS_FOR[kind];
+    const out = {};
+    if (uses.includes("from")) {
+      const year = schoolYear((_a = from != null ? from : to) != null ? _a : ctx.today);
+      out.from = from != null ? from : year.from;
+      out.to = to != null ? to : year.to;
+    }
+    if (activityId && uses.includes("activityId")) out.activityId = activityId;
+    if (school && uses.includes("school")) out.school = school;
+    if (ensemble && uses.includes("ensemble")) out.ensemble = ensemble;
+    if (uses.includes("includePaid")) out.includePaid = includePaid;
+    return out;
+  }
+  function listed(value, label, known, setting) {
+    const s = text(value, label, LIMITS.name);
+    if (!isKnown(s, known)) badRequest(`${label} "${s}" is not in Settings ${setting}.`);
+    return canonical(s, known);
+  }
+  function studentMatches(student2, f) {
+    if (f.school && (!student2 || !isKnown(student2.school, [f.school]))) return false;
+    if (f.ensemble && (!student2 || !isKnown(f.ensemble, student2.ensembles))) return false;
+    return true;
+  }
+  function inRange(date, f) {
+    var _a, _b;
+    return date >= ((_a = f.from) != null ? _a : "") && date <= ((_b = f.to) != null ? _b : "9999-12-31");
+  }
+  function cmpText(a, b) {
+    const x = a.toLowerCase();
+    const y = b.toLowerCase();
+    return x < y ? -1 : x > y ? 1 : 0;
+  }
+  function cmpStudent(a, aId, b, bId) {
+    return cmpText(a ? a.lastName : aId, b ? b.lastName : bId) || cmpText(a ? a.firstName : "", b ? b.firstName : "") || cmpText(aId, bId);
+  }
+  function uniqueStudents(ctx) {
+    return ctx.m.students().filter((s) => ctx.m.studentById(s.id) === s);
+  }
+  function activeStudents(ctx, f) {
+    return uniqueStudents(ctx).filter((s) => s.status === "Active" && studentMatches(s, f)).sort((a, b) => cmpStudent(a, a.id, b, b.id));
+  }
+  function nameOf(ctx, studentId) {
+    const s = ctx.m.studentById(studentId);
+    return s ? studentName(s) || s.id : studentId;
+  }
+  function activityName(ctx, activityId) {
+    var _a, _b;
+    if (!activityId) return null;
+    return (_b = (_a = ctx.m.activityById(activityId)) == null ? void 0 : _a.name) != null ? _b : activityId;
+  }
+  function sum(rows, keys, include = () => true) {
+    const totals = {};
+    for (const key of keys) totals[key] = 0;
+    for (const row of rows) {
+      if (!include(row)) continue;
+      for (const key of keys) {
+        const value = row[key];
+        if (typeof value === "number") totals[key] += value;
+      }
+    }
+    return totals;
+  }
+  function count(n) {
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
+  function groupKey(text2) {
+    return text2.toLowerCase().replace(/\s+/g, " ").trim();
+  }
+  var EMAIL_IN_TEXT = /[^\s@<>()"']+@[^\s@<>()"']+\.[a-z]{2,}/i;
+  function hasContactInfo(columns, rows) {
+    for (const row of rows) {
+      for (const c of columns) {
+        const value = row[c.key];
+        if (value === null || value === "") continue;
+        if (c.type === "email" || c.type === "phone") return true;
+        if (typeof value === "string" && EMAIL_IN_TEXT.test(value)) return true;
+      }
+    }
+    return false;
+  }
+  function finish(ctx, kind, filters, table) {
+    var _a;
+    const notes = table.notes.slice();
+    let rows = table.rows;
+    if (rows.length > MAX_REPORT_ROWS) {
+      const totals = table.totals ? " (the totals include all of them)" : "";
+      notes.push(`Showing the first ${count(MAX_REPORT_ROWS)} of ${count(rows.length)} rows${totals}. ${table.narrow}`);
+      rows = rows.slice(0, MAX_REPORT_ROWS);
+    }
+    const report = {
+      kind,
+      title: REPORT_TITLES[kind],
+      description: table.description,
+      generatedAt: ctx.now.toISOString(),
+      filters,
+      columns: table.columns,
+      rows,
+      containsContactInfo: (_a = table.contactInfo) != null ? _a : hasContactInfo(table.columns, rows)
+    };
+    if (table.totals) report.totals = table.totals;
+    if (notes.length > 0) report.notes = notes;
+    return report;
+  }
+  function tripStatus(a, today) {
+    var _a;
+    if (a.enrollmentStatus === "Waitlist") return "Waitlist";
+    if (a.costCents <= 0) return "No cost set";
+    const clearing = (_a = a.pendingPaymentCents) != null ? _a : 0;
+    if (a.remainingCents <= 0) return a.paidCents >= a.costCents ? "Paid in full" : "Paid (payment clearing)";
+    if (a.dueDate && a.dueDate < today) return "Past due";
+    if (a.depositCents && a.depositDueDate && a.depositDueDate < today && a.paidCents + clearing < a.depositCents) {
+      return "Deposit overdue";
+    }
+    return "Owes";
+  }
+  function tripBalances(ctx, f) {
+    const m = ctx.m;
+    const books = m.books();
+    const pairs = /* @__PURE__ */ new Map();
+    for (const e of m.enrollments()) pairs.set(`${idKey(e.studentId)}|${idKey(e.activityId)}`, e);
+    const entries = [];
+    let unknownActivity = 0;
+    let closed = 0;
+    let paidUp = 0;
+    let withdrawnPaid = 0;
+    pairs.forEach((e) => {
+      const activity = m.activityById(e.activityId);
+      if (!activity) {
+        if (!f.activityId) unknownActivity += 1;
+        return;
+      }
+      if (f.activityId && idKey(activity.id) !== idKey(f.activityId)) return;
+      const student2 = m.studentById(e.studentId);
+      if (!studentMatches(student2, f)) return;
+      if (!f.activityId && activity.status !== "Open") {
+        if (e.status !== "Withdrawn") closed += 1;
+        return;
+      }
+      const account = books.account(e.studentId, activity.id);
+      if (!account) return;
+      if (account.enrollmentStatus === "Withdrawn") {
+        if (account.paidCents > 0) withdrawnPaid += 1;
+        return;
+      }
+      if (account.remainingCents <= 0 && !f.includePaid) {
+        paidUp += 1;
+        return;
+      }
+      entries.push({ account, activity, student: student2 });
+    });
+    const rank = (x) => x.account.enrollmentStatus === "Waitlist" ? 1 : 0;
+    entries.sort(
+      (a, b) => cmpText(a.activity.name, b.activity.name) || cmpText(a.activity.id, b.activity.id) || rank(a) - rank(b) || cmpStudent(a.student, a.account.studentId, b.student, b.account.studentId)
+    );
+    const rows = entries.map(({ account: a, activity, student: student2 }) => {
+      var _a, _b, _c, _d, _e, _f;
+      const family = student2 ? m.familyById(student2.familyId) : null;
+      const parent = family == null ? void 0 : family.guardians[0];
+      return {
+        activity: activity.name,
+        activityId: activity.id,
+        student: student2 ? studentName(student2) || student2.id : a.studentId,
+        studentId: (_a = student2 == null ? void 0 : student2.id) != null ? _a : a.studentId,
+        familyId: (_b = student2 == null ? void 0 : student2.familyId) != null ? _b : null,
+        parentName: (parent == null ? void 0 : parent.name) || null,
+        parentEmail: (parent == null ? void 0 : parent.email) || null,
+        school: (student2 == null ? void 0 : student2.school) || null,
+        enrollment: a.enrollmentStatus,
+        cost: a.costCents,
+        paidFromFunds: a.paidFromFundsCents,
+        paidDirect: a.paidDirectCents,
+        pending: a.pendingRedemptionCents + ((_c = a.pendingPaymentCents) != null ? _c : 0),
+        remaining: a.remainingCents,
+        deposit: (_d = a.depositCents) != null ? _d : null,
+        depositDue: (_e = a.depositDueDate) != null ? _e : null,
+        dueDate: (_f = a.dueDate) != null ? _f : null,
+        status: tripStatus(a, ctx.today)
+      };
+    });
+    const notes = [
+      "Pending = fund requests waiting for approval plus payments still clearing. Left to pay already takes off payments still clearing."
+    ];
+    if (rows.some((r) => r.enrollment === "Waitlist")) {
+      notes.push("Waitlisted students are listed after those going and are not counted in the totals.");
+    }
+    if (paidUp > 0) notes.push(`${plural(paidUp, "student")} with nothing left to pay ${paidUp === 1 ? "is" : "are"} not listed.`);
+    if (closed > 0) notes.push(`${plural(closed, "enrollment")} in closed activities ${closed === 1 ? "is" : "are"} not listed; pick the activity to see ${closed === 1 ? "it" : "them"}.`);
+    if (withdrawnPaid > 0) {
+      notes.push(`${plural(withdrawnPaid, "withdrawn student")} had money paid toward the activity and ${withdrawnPaid === 1 ? "is" : "are"} not listed: check whether a refund is owed.`);
+    }
+    if (unknownActivity > 0) {
+      notes.push(`${plural(unknownActivity, "Enrollments row")} name${unknownActivity === 1 ? "s" : ""} an ActivityID that isn't in the Activities tab and ${unknownActivity === 1 ? "is" : "are"} not listed.`);
+    }
+    return {
+      description: "One row per student going on a trip or activity: cost, paid from activity funds, paid directly, pending, and what is left to pay, the same numbers families see in the app.",
+      columns: [
+        col("activity", "Activity"),
+        col("activityId", "Activity ID"),
+        col("student", "Student"),
+        col("studentId", "Student ID"),
+        col("familyId", "Family ID"),
+        col("parentName", "Parent"),
+        col("parentEmail", "Parent email", "email"),
+        col("school", "School"),
+        col("enrollment", "Enrollment"),
+        col("cost", "Cost", "money"),
+        col("paidFromFunds", "Paid from funds", "money"),
+        col("paidDirect", "Paid directly", "money"),
+        col("pending", "Pending", "money"),
+        col("remaining", "Left to pay", "money"),
+        col("deposit", "Deposit", "money"),
+        col("depositDue", "Deposit due", "date"),
+        col("dueDate", "Final due", "date"),
+        col("status", "Status")
+      ],
+      rows,
+      totals: sum(rows, ["cost", "paidFromFunds", "paidDirect", "pending", "remaining"], (r) => r.enrollment === "Going"),
+      notes,
+      narrow: "Pick one activity, school or group to see the rest."
+    };
+  }
+  function studentFunds(ctx, f) {
+    var _a, _b, _c, _d, _e;
+    const m = ctx.m;
+    const books = m.books();
+    const earned = /* @__PURE__ */ new Map();
+    const applied = /* @__PURE__ */ new Map();
+    const lastDate = /* @__PURE__ */ new Map();
+    for (const l of m.ledger()) {
+      const key = idKey(l.studentId);
+      const into = l.amountCents > 0 ? earned : applied;
+      into.set(key, ((_a = into.get(key)) != null ? _a : 0) + l.amountCents);
+      if (l.date && ((_b = lastDate.get(key)) != null ? _b : "") < l.date) lastDate.set(key, l.date);
+    }
+    const students = activeStudents(ctx, f);
+    const listedKeys = /* @__PURE__ */ new Set();
+    const rows = [];
+    for (const s of students) {
+      const key = idKey(s.id);
+      listedKeys.add(key);
+      const family = m.familyById(s.familyId);
+      rows.push({
+        student: studentName(s) || s.id,
+        studentId: s.id,
+        familyId: s.familyId,
+        parent: family ? guardianNames(family) : null,
+        school: s.school || null,
+        groups: joinList(s.ensembles) || null,
+        earned: (_c = earned.get(key)) != null ? _c : 0,
+        applied: (_d = applied.get(key)) != null ? _d : 0,
+        balance: books.balance(s.id),
+        pending: books.pending(s.id),
+        available: books.available(s.id),
+        lastActivity: (_e = lastDate.get(key)) != null ? _e : null
+      });
+    }
+    const notes = ["Applied is what was used for trips and other activities (negative Ledger rows), so Earned + Applied = Balance."];
+    if (!f.school && !f.ensemble) {
+      let elsewhere = 0;
+      let ids = 0;
+      for (const key of books.ledgerStudentKeys()) {
+        if (listedKeys.has(key) || books.balance(key) === 0) continue;
+        elsewhere += books.balance(key);
+        ids += 1;
+      }
+      if (ids > 0) {
+        notes.push(`${formatCents(elsewhere)} more belongs to ${plural(ids, "student ID")} that ${ids === 1 ? "is" : "are"} not an active student (pending, inactive, or not in the Students tab).`);
+      }
+    }
+    return {
+      description: "One row per active student: activity funds earned, applied to trips and activities, the balance, requests waiting for approval, and what is available.",
+      columns: [
+        col("student", "Student"),
+        col("studentId", "Student ID"),
+        col("familyId", "Family ID"),
+        col("parent", "Parents"),
+        col("school", "School"),
+        col("groups", "Groups"),
+        col("earned", "Earned", "money"),
+        col("applied", "Applied", "money"),
+        col("balance", "Balance", "money"),
+        col("pending", "Pending requests", "money"),
+        col("available", "Available", "money"),
+        col("lastActivity", "Last fund activity", "date")
+      ],
+      rows,
+      totals: sum(rows, ["earned", "applied", "balance", "pending", "available"]),
+      notes,
+      narrow: "Pick a school or group to see the rest."
+    };
+  }
+  function fundraiserTotals(ctx, f) {
+    const groups = /* @__PURE__ */ new Map();
+    let undated = 0;
+    for (const l of ctx.m.ledger()) {
+      if (l.amountCents <= 0) continue;
+      if (!l.date) {
+        undated += 1;
+        continue;
+      }
+      if (!inRange(l.date, f)) continue;
+      const key = `${groupKey(l.type)}|${groupKey(l.description)}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { type: l.type, description: l.description, students: /* @__PURE__ */ new Set(), total: 0, first: l.date, last: l.date };
+        groups.set(key, g);
+      }
+      g.students.add(idKey(l.studentId));
+      g.total += l.amountCents;
+      if (l.date < g.first) g.first = l.date;
+      if (l.date > g.last) g.last = l.date;
+    }
+    const sorted = Array.from(groups.values()).sort(
+      (a, b) => cmpText(a.first, b.first) || cmpText(a.type, b.type) || cmpText(a.description, b.description)
+    );
+    const rows = sorted.map((g) => ({
+      type: g.type,
+      description: g.description || null,
+      students: g.students.size,
+      total: g.total,
+      firstDate: g.first,
+      lastDate: g.last
+    }));
+    const notes = ["Only credits (positive Ledger rows) are counted. Fund activity lists every row, including funds used."];
+    if (undated > 0) notes.push(`${plural(undated, "credit")} with no date in the Ledger ${undated === 1 ? "is" : "are"} not counted.`);
+    return {
+      description: "Fund credits in the date range (positive Ledger rows: fundraisers, donations, refunds), grouped by Type and Description.",
+      columns: [
+        col("type", "Type"),
+        col("description", "Description"),
+        col("students", "Students credited", "number"),
+        col("total", "Total", "money"),
+        col("firstDate", "First date", "date"),
+        col("lastDate", "Last date", "date")
+      ],
+      rows,
+      totals: sum(rows, ["total"]),
+      notes,
+      narrow: "Pick a shorter date range to see the rest."
+    };
+  }
+  function fundActivity(ctx, f) {
+    const enteredBy = /* @__PURE__ */ new Map();
+    for (const row of ctx.db.rows("Ledger")) {
+      const who = row.data["Entered By"];
+      if (!isBlank(who)) enteredBy.set(row.rowNumber, String(who).trim());
+    }
+    let undated = 0;
+    const entries = ctx.m.ledger().filter((l) => {
+      if (f.activityId && (!l.activityId || idKey(l.activityId) !== idKey(f.activityId))) return false;
+      if (!l.date) {
+        undated += 1;
+        return false;
+      }
+      return inRange(l.date, f);
+    });
+    entries.sort((a, b) => cmpText(a.date, b.date) || a.row - b.row);
+    const rows = entries.map((l) => {
+      var _a, _b;
+      return {
+        date: l.date,
+        student: nameOf(ctx, l.studentId),
+        studentId: l.studentId,
+        type: l.type,
+        description: l.description || null,
+        amount: l.amountCents,
+        activity: activityName(ctx, l.activityId),
+        reference: (_a = l.reference) != null ? _a : null,
+        enteredBy: (_b = enteredBy.get(l.row)) != null ? _b : null
+      };
+    });
+    let credits = 0;
+    let debits = 0;
+    for (const l of entries) {
+      if (l.amountCents > 0) credits += l.amountCents;
+      else debits += l.amountCents;
+    }
+    const notes = ["Credits add to students' funds; debits (negative amounts) are funds used or taken off."];
+    if (undated > 0) notes.push(`${plural(undated, "Ledger row")} with no date ${undated === 1 ? "is" : "are"} not listed.`);
+    return {
+      description: "Every Ledger row in the date range: credits add to a student's activity funds, negative rows spend them.",
+      columns: [
+        col("date", "Date", "date"),
+        col("student", "Student"),
+        col("studentId", "Student ID"),
+        col("type", "Type"),
+        col("description", "Description"),
+        col("amount", "Amount", "money"),
+        col("activity", "Activity"),
+        col("reference", "Reference"),
+        col("enteredBy", "Entered by")
+      ],
+      rows,
+      totals: { credits, debits, net: credits + debits },
+      notes,
+      narrow: "Pick a shorter date range or one activity to see the rest."
+    };
+  }
+  function paymentsReport(ctx, f) {
+    let undated = 0;
+    const payments = ctx.m.payments().filter((p) => {
+      if (f.activityId && idKey(p.activityId) !== idKey(f.activityId)) return false;
+      if (!p.date) {
+        undated += 1;
+        return false;
+      }
+      return inRange(p.date, f);
+    });
+    payments.sort((a, b) => cmpText(a.date, b.date) || a.row - b.row);
+    const rows = payments.map((p) => {
+      var _a;
+      return {
+        date: p.date,
+        student: nameOf(ctx, p.studentId),
+        studentId: p.studentId,
+        activity: activityName(ctx, p.activityId),
+        amount: p.amountCents,
+        fee: p.feeCents,
+        gross: p.grossCents,
+        method: p.method,
+        reference: p.reference || null,
+        payerEmail: (_a = p.payerEmail) != null ? _a : null,
+        status: p.status
+      };
+    });
+    const notes = ["Totals count Completed payments only; Pending (still clearing), Refunded and Failed rows are listed but not counted."];
+    if (undated > 0) notes.push(`${plural(undated, "payment")} with no date ${undated === 1 ? "is" : "are"} not listed.`);
+    return {
+      description: "Every Payments row in the date range: checks, cash and online payments toward trips and activities.",
+      columns: [
+        col("date", "Date", "date"),
+        col("student", "Student"),
+        col("studentId", "Student ID"),
+        col("activity", "Activity"),
+        col("amount", "Amount", "money"),
+        col("fee", "Fee covered", "money"),
+        col("gross", "Gross", "money"),
+        col("method", "Method"),
+        col("reference", "Reference"),
+        col("payerEmail", "Payer email", "email"),
+        col("status", "Status")
+      ],
+      rows,
+      totals: sum(rows, ["amount", "fee", "gross"], (r) => r.status === "Completed"),
+      notes,
+      narrow: "Pick a shorter date range or one activity to see the rest."
+    };
+  }
+  function roster(ctx, f) {
+    const m = ctx.m;
+    const students = activeStudents(ctx, f);
+    const rows = students.map((s) => {
+      var _a, _b;
+      const family = m.familyById(s.familyId);
+      const [p1, p2] = family ? family.slots : [null, null];
+      return {
+        student: studentName(s) || s.id,
+        studentId: s.id,
+        grade: s.grade || null,
+        school: s.school || null,
+        groups: joinList(s.ensembles) || null,
+        instrument: (_a = s.instrument) != null ? _a : null,
+        familyId: s.familyId,
+        familyStatus: (_b = family == null ? void 0 : family.status) != null ? _b : null,
+        member: family ? family.member ? "Yes" : "No" : null,
+        parent1Name: (p1 == null ? void 0 : p1.name) || null,
+        parent1Email: (p1 == null ? void 0 : p1.email) || null,
+        parent1Phone: (p1 == null ? void 0 : p1.phone) || null,
+        parent2Name: (p2 == null ? void 0 : p2.name) || null,
+        parent2Email: (p2 == null ? void 0 : p2.email) || null,
+        parent2Phone: (p2 == null ? void 0 : p2.phone) || null
+      };
+    });
+    return {
+      description: "Active students with their grade, school, groups and instrument, and their parents' contact details.",
+      columns: [
+        col("student", "Student"),
+        col("studentId", "Student ID"),
+        col("grade", "Grade"),
+        col("school", "School"),
+        col("groups", "Groups"),
+        col("instrument", "Instrument"),
+        col("familyId", "Family ID"),
+        col("familyStatus", "Household status"),
+        col("member", "TMA member"),
+        col("parent1Name", "Parent 1"),
+        col("parent1Email", "Parent 1 email", "email"),
+        col("parent1Phone", "Parent 1 phone", "phone"),
+        col("parent2Name", "Parent 2"),
+        col("parent2Email", "Parent 2 email", "email"),
+        col("parent2Phone", "Parent 2 phone", "phone")
+      ],
+      rows,
+      notes: ["Contains parents' emails and phone numbers: keep it private, and delete downloaded copies when you are done."],
+      contactInfo: true,
+      narrow: "Pick a school or group to see the rest."
+    };
+  }
+  function openItems(ctx) {
+    var _a, _b;
+    const m = ctx.m;
+    const items = [];
+    const dateOf = (timestamp) => timestamp ? nyDate(new Date(timestamp)) : null;
+    const requests = m.redemptions().filter((r) => r.status === "Pending");
+    for (const r of requests) {
+      const family = m.familyById(r.familyId);
+      const asker = r.email ? ` (asked by ${guardianName(family, r.email)})` : "";
+      const note = r.note ? ` Note: "${truncate(r.note, 200)}"` : "";
+      items.push({
+        order: 0,
+        sheetRow: r.row,
+        row: {
+          kind: "Fund request",
+          date: dateOf(r.requestedAt),
+          who: `${nameOf(ctx, r.studentId)}${asker}`,
+          detail: `Apply to ${(_a = activityName(ctx, r.activityId)) != null ? _a : "an activity"}.${note}`,
+          amount: r.amountCents,
+          reference: r.id
+        }
+      });
+    }
+    let households = 0;
+    let newStudents = 0;
+    for (const family of m.families()) {
+      if (family.status === "Inactive") continue;
+      const pending = m.studentsOfFamily(family.id).filter((s) => s.status === "Pending");
+      if (family.status === "Pending") {
+        households += 1;
+        const names = pending.map((s) => studentName(s) || s.id);
+        items.push({
+          order: 1,
+          sheetRow: family.row,
+          row: {
+            kind: "New household",
+            date: dateOf(family.createdAt),
+            who: guardianNames(family),
+            detail: names.length > 0 ? `${plural(names.length, "student")} to review: ${names.join(", ")}` : "No students yet",
+            amount: null,
+            reference: family.id
+          }
+        });
+        continue;
+      }
+      for (const s of pending) {
+        newStudents += 1;
+        items.push({
+          order: 2,
+          sheetRow: s.row,
+          row: {
+            kind: "New student",
+            date: null,
+            who: studentName(s) || s.id,
+            detail: `Added to ${guardianNames(family)} (${family.id}), which is already verified`,
+            amount: null,
+            reference: s.id
+          }
+        });
+      }
+    }
+    const clearing = m.payments().filter((p) => p.status === "Pending");
+    for (const p of clearing) {
+      const reference = p.reference ? ` · ${p.reference}` : "";
+      items.push({
+        order: 3,
+        sheetRow: p.row,
+        row: {
+          kind: "Payment clearing",
+          date: p.date || null,
+          who: nameOf(ctx, p.studentId),
+          detail: `${(_b = activityName(ctx, p.activityId)) != null ? _b : "No activity"} · ${p.method}${reference}`,
+          amount: p.amountCents,
+          reference: p.id
+        }
+      });
+    }
+    items.sort(
+      (a, b) => {
+        var _a2, _b2;
+        return a.order - b.order || cmpText(String((_a2 = a.row.date) != null ? _a2 : "9999-12-31"), String((_b2 = b.row.date) != null ? _b2 : "9999-12-31")) || a.sheetRow - b.sheetRow;
+      }
+    );
+    const summary = [
+      plural(requests.length, "fund request"),
+      plural(households, "new household"),
+      plural(newStudents, "new student"),
+      plural(clearing.length, "payment") + " still clearing"
+    ];
+    return {
+      description: "What is waiting on the treasurer: fund requests to approve or deny, households and students to review, and payments still clearing.",
+      columns: [
+        col("kind", "Item"),
+        col("date", "Date", "date"),
+        col("who", "Who"),
+        col("detail", "Detail"),
+        col("amount", "Amount", "money"),
+        col("reference", "ID / reference")
+      ],
+      rows: items.map((i) => i.row),
+      notes: [`${summary.join(", ")}. Decide requests and review households in the app under Board tools.`],
+      narrow: "Work through the oldest items first."
+    };
+  }
+  function appUsage(ctx) {
+    const m = ctx.m;
+    const settings = m.settings();
+    const families = m.families().filter((f) => f.status !== "Inactive");
+    const prefs = m.preferences();
+    const devices = m.devices();
+    const withDevice = new Set(devices.map((d) => d.email).filter((e) => e !== ""));
+    const students = uniqueStudents(ctx);
+    let used = 0;
+    let push = 0;
+    let email2 = 0;
+    let sms = 0;
+    const guardianEmails = /* @__PURE__ */ new Set();
+    for (const f of families) {
+      const emails = f.guardians.map((g) => g.email).filter(isEmail);
+      emails.forEach((e) => guardianEmails.add(e));
+      const choices = emails.map((e) => ({ email: e, prefs: prefsFor(ctx, e) }));
+      if (f.status === "Pending" || emails.some((e) => prefs.has(e) || withDevice.has(e))) used += 1;
+      if (choices.some((c) => c.prefs.channels.push && withDevice.has(c.email))) push += 1;
+      if (choices.some((c) => c.prefs.channels.email)) email2 += 1;
+      if (choices.some((c) => c.prefs.channels.sms)) sms += 1;
+    }
+    const noHousehold = /* @__PURE__ */ new Set();
+    prefs.forEach((_, e) => {
+      if (!guardianEmails.has(e)) noHousehold.add(e);
+    });
+    withDevice.forEach((e) => {
+      if (!guardianEmails.has(e)) noHousehold.add(e);
+    });
+    const metrics = [
+      ["Households (not counting inactive ones)", families.length],
+      ["Households verified by TMA", families.filter((f) => f.status === "Active").length],
+      ["Households waiting for review", families.filter((f) => f.status === "Pending").length],
+      ["Active students", students.filter((s) => s.status === "Active").length],
+      ["Students waiting for review", students.filter((s) => s.status === "Pending").length],
+      ["Households that have used the app (signed up, saved settings or turned on notifications)", used],
+      ["Phones and computers with notifications on", devices.length],
+      ["Households getting phone notifications", push],
+      ["Households getting email", email2],
+      ["Households getting text messages", sms],
+      ["Parents who changed their notification settings", prefs.size],
+      ["People who signed in but have no household yet", noHousehold.size]
+    ];
+    const notes = [
+      "Signing in leaves no trace in the sheet, so more households may use the app than counted here.",
+      "Parents who never changed their settings get phone notifications (on phones where they turned them on) and email."
+    ];
+    if (!settings.emailEnabled) notes.push("Email notifications are switched off in Settings (EMAIL_ENABLED), so nobody gets them right now.");
+    return {
+      description: "How many households use the app and how they get notifications. Counts only, no names.",
+      columns: [col("metric", "What"), col("value", "Count", "number")],
+      rows: metrics.map(([metric, value]) => ({ metric, value })),
+      notes,
+      narrow: ""
+    };
+  }
+  var BUILDERS = {
+    "trip-balances": tripBalances,
+    "student-funds": studentFunds,
+    "fundraiser-totals": fundraiserTotals,
+    "fund-activity": fundActivity,
+    payments: paymentsReport,
+    roster,
+    "open-items": (ctx) => openItems(ctx),
+    "app-usage": (ctx) => appUsage(ctx)
+  };
 
   // src/server/sample-data.ts
   var TREASURER = "treasurer@example.com";
@@ -4395,8 +5177,8 @@ var TMA = (() => {
     "admin.reviewHousehold": { admin: true, write: true, run: reviewHousehold },
     "admin.announce": { admin: true, write: true, run: announce },
     "admin.runSync": { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
-    // Placeholder until src/server/reports.ts lands.
-    "admin.report": { admin: true, run: () => fail("NOT_CONFIGURED", "Reports are not available yet.") }
+    // Read-only (no lock); the roster alone takes the lock briefly for its Log row.
+    "admin.report": { admin: true, run: runReport }
   };
   var GENERIC_ERROR = "Something went wrong. Please try again.";
   function dispatch(services, request) {
@@ -4960,7 +5742,7 @@ var TMA = (() => {
     const email2 = String(value != null ? value : "").trim().toLowerCase();
     return email2.length <= 254 && PLAIN_ADDRESS.test(email2) ? email2 : SETTING_DEFAULTS.SUPPORT_EMAIL;
   }
-  function readEmailBatchAnswer(code, text2, count) {
+  function readEmailBatchAnswer(code, text2, count2) {
     const body = parseJson(text2);
     const error = pick(body, "error");
     const failed = (reason) => ({ kind: "failed", outcome: { ok: false, reason, httpCode: code } });
@@ -4972,7 +5754,7 @@ var TMA = (() => {
     if (code === 413) return failed("too_large");
     if (code !== 200) return failed("http_error");
     const results = pick(body, "results");
-    if (!Array.isArray(results) || results.length !== count || !results.every(isRecord2)) return failed("bad_answer");
+    if (!Array.isArray(results) || results.length !== count2 || !results.every(isRecord2)) return failed("bad_answer");
     return {
       kind: "results",
       outcomes: results.map((result) => {
@@ -5475,6 +6257,132 @@ var TMA = (() => {
     };
   }
 
+  // src/gas/reports-sheet.ts
+  var REPORT_TAB_PREFIX = "Report: ";
+  var SHEET_REPORTS = [
+    { kind: "trip-balances", fn: "reportTripBalances" },
+    { kind: "student-funds", fn: "reportStudentFunds" },
+    { kind: "fundraiser-totals", fn: "reportFundraiserTotals" },
+    { kind: "fund-activity", fn: "reportFundActivity" },
+    { kind: "payments", fn: "reportPayments" },
+    { kind: "roster", fn: "reportRoster" },
+    { kind: "open-items", fn: "reportOpenItems" },
+    { kind: "app-usage", fn: "reportAppUsage" }
+  ];
+  var FORMATS = {
+    money: "$#,##0.00",
+    date: "m/d/yyyy",
+    number: "#,##0"
+  };
+  var MAX_CELL_CHARS = 5e4;
+  var FORMULA_START = /^[=+\-@']/;
+  var SHEETS_EPOCH = "1899-12-30";
+  var ISO_DATE2 = /^\d{4}-\d{2}-\d{2}$/;
+  var MONTHS2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  function sheetText(value) {
+    const text2 = value.length > MAX_CELL_CHARS - 1 ? value.slice(0, MAX_CELL_CHARS - 1) : value;
+    return FORMULA_START.test(text2) ? `'${text2}` : text2;
+  }
+  function sheetCell(type, value) {
+    if (value === null || value === void 0) return "";
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "";
+      return type === "money" ? centsToDollars(value) : value;
+    }
+    if (type === "date" && ISO_DATE2.test(value)) return daysBetween(SHEETS_EPOCH, value);
+    return sheetText(value);
+  }
+  function nyTimestamp(at) {
+    const p = nyParts(new Date(at));
+    const hour = p.hour % 12 === 0 ? 12 : p.hour % 12;
+    return `${MONTHS2[p.month - 1]} ${p.day}, ${p.year} ${hour}:${String(p.minute).padStart(2, "0")} ${p.hour < 12 ? "AM" : "PM"}`;
+  }
+  function usDate(date) {
+    const [y, m, d] = date.split("-").map((n) => parseInt(n, 10));
+    return `${m}/${d}/${y}`;
+  }
+  function filtersLine(report) {
+    const f = report.filters;
+    const parts = [];
+    if (f.from && f.to) parts.push(`dates ${usDate(f.from)} to ${usDate(f.to)}`);
+    if (f.activityId) parts.push(`activity ${f.activityId}`);
+    else if (report.kind === "trip-balances") parts.push("open activities");
+    if (f.school) parts.push(`school ${f.school}`);
+    if (f.ensemble) parts.push(`group ${f.ensemble}`);
+    if (f.includePaid !== void 0) {
+      parts.push(f.includePaid ? "including students who have paid in full" : "students with something left to pay");
+    }
+    return parts.length > 0 ? `Showing ${parts.join("; ")}.` : "";
+  }
+  function reportLayout(report) {
+    var _a, _b;
+    const columns = report.columns;
+    const width = Math.max(1, columns.length);
+    const line = (first) => {
+      const row = [];
+      for (let i = 0; i < width; i += 1) row.push("");
+      row[0] = sheetText(first);
+      return row;
+    };
+    const menuPath = `TMA App → Reports → ${report.title}`;
+    const values = [
+      line(`Generated ${nyTimestamp(report.generatedAt)} — rebuilt each time you run it; edit the other tabs, not this one. (${menuPath})`),
+      columns.length > 0 ? columns.map((c) => sheetText(c.label)) : line("")
+    ];
+    const headerRow = values.length;
+    const boldRows = [headerRow];
+    if (report.rows.length === 0) values.push(line("Nothing to show."));
+    for (const row of report.rows) values.push(columns.map((c) => sheetCell(c.type, row[c.key])));
+    const totals = (_a = report.totals) != null ? _a : {};
+    if (report.rows.length > 0 && columns.some((c) => hasOwn(totals, c.key))) {
+      values.push(columns.map((c, i) => hasOwn(totals, c.key) ? sheetCell(c.type, totals[c.key]) : i === 0 ? "Total" : ""));
+      boldRows.push(values.length);
+    }
+    const extra = Object.keys(totals).filter((key) => !columns.some((c) => c.key === key));
+    const money = columns.findIndex((c) => c.type === "money");
+    const at = money > 0 ? money : Math.min(1, width - 1);
+    for (const key of report.rows.length > 0 ? extra : []) {
+      const row = line(key.charAt(0).toUpperCase() + key.slice(1));
+      row[at] = sheetCell(money >= 0 ? "money" : "number", totals[key]);
+      values.push(row);
+      boldRows.push(values.length);
+    }
+    const formattedRows = values.length - headerRow;
+    values.push(line(""), line(report.description));
+    const filters = filtersLine(report);
+    if (filters) values.push(line(filters));
+    for (const note of (_b = report.notes) != null ? _b : []) values.push(line(`Note: ${note}`));
+    const formats = [];
+    columns.forEach((c, i) => {
+      const format = FORMATS[c.type];
+      if (format) formats.push({ column: i + 1, format });
+    });
+    return { values, width, headerRow, firstDataRow: headerRow + 1, formattedRows, boldRows, formats };
+  }
+  function reportTab(spreadsheet, name) {
+    const wanted = name.toLowerCase();
+    const existing = spreadsheet.getSheets().find((s) => s.getName().trim().toLowerCase() === wanted);
+    if (!existing) return spreadsheet.insertSheet(name, spreadsheet.getNumSheets());
+    existing.clear();
+    return existing;
+  }
+  function writeReportTab(spreadsheet, report) {
+    const layout = reportLayout(report);
+    const sheet = reportTab(spreadsheet, `${REPORT_TAB_PREFIX}${report.title}`);
+    const rows = layout.values.length;
+    if (rows > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), rows - sheet.getMaxRows());
+    if (layout.width > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), layout.width - sheet.getMaxColumns());
+    sheet.getRange(1, 1, rows, layout.width).setValues(layout.values);
+    for (const f of layout.formats) sheet.getRange(layout.firstDataRow, f.column, layout.formattedRows, 1).setNumberFormat(f.format);
+    for (const row of layout.boldRows) sheet.getRange(row, 1, 1, layout.width).setFontWeight("bold");
+    sheet.setFrozenRows(layout.headerRow);
+    return sheet;
+  }
+  function runSheetReport(services, spreadsheet, kind) {
+    const report = buildReport(createCtx(services), kind);
+    return { report, sheet: writeReportTab(spreadsheet, report) };
+  }
+
   // src/gas/self-test.ts
   var TEST_MESSAGE = {
     title: "Test notification ✅",
@@ -5600,8 +6508,8 @@ Email from the TMA app is working.
   }
 
   // src/gas/sheet-store.ts
-  var MAX_CELL_CHARS = 5e4;
-  var FORMULA_START = /^[=+\-@']/;
+  var MAX_CELL_CHARS2 = 5e4;
+  var FORMULA_START2 = /^[=+\-@']/;
   var NUMERIC_TEXT = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
   var WALL_CLOCK_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS";
   var WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/;
@@ -5638,10 +6546,10 @@ Email from the TMA app is working.
     if (typeof value === "number") return Number.isFinite(value) ? value : "";
     if (typeof value === "boolean") return value;
     const text2 = String(value);
-    if (FORMULA_START.test(text2) && !NUMERIC_TEXT.test(text2)) {
-      return `'${text2.slice(0, MAX_CELL_CHARS - 1)}`;
+    if (FORMULA_START2.test(text2) && !NUMERIC_TEXT.test(text2)) {
+      return `'${text2.slice(0, MAX_CELL_CHARS2 - 1)}`;
     }
-    return text2.length > MAX_CELL_CHARS ? text2.slice(0, MAX_CELL_CHARS) : text2;
+    return text2.length > MAX_CELL_CHARS2 ? text2.slice(0, MAX_CELL_CHARS2) : text2;
   }
   function isBlank2(value) {
     return value === null || value === void 0 || typeof value === "string" && value.trim() === "";
@@ -6177,21 +7085,20 @@ Email from the TMA app is working.
     } catch (error) {
       console.error("doGet could not read Settings", describeError(error));
     }
-    return HtmlService.createHtmlOutput(landingPage(orgName, appUrl)).setTitle(orgName).addMetaTag("viewport", "width=device-width, initial-scale=1");
+    return ContentService.createTextOutput(landingText(orgName, appUrl)).setMimeType(ContentService.MimeType.TEXT);
   }
-  function landingPage(orgName, appUrl) {
-    const name = escapeHtml2(orgName);
-    const link = /^https?:\/\/[^\s"'<>]+$/i.test(appUrl) ? `<p><a href="${escapeHtml2(appUrl)}" target="_top" style="display:inline-block;background:#5a0f13;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none">Open the TMA app</a></p>` : "<p>Ask TMA for the app link.</p>";
-    return [
-      '<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:480px;margin:40px auto;padding:0 16px;color:#141010">',
-      `<h1 style="font-family:Georgia,'Times New Roman',serif;color:#5a0f13;font-size:24px">${name}</h1>`,
-      "<p>This address is the TMA app's server. Families use the app instead:</p>",
-      link,
-      "</div>"
-    ].join("");
+  function landingText(orgName, appUrl) {
+    const link = /^https?:\/\/[^\s"'<>]+$/i.test(appUrl) ? `Families use the app at ${appUrl}` : "Ask TMA for the app link.";
+    return `${orgName}
+
+This address is the TMA app's server. ${link}
+`;
   }
   function onOpen() {
-    SpreadsheetApp.getUi().createMenu(MENU_TITLE).addItem("Run sync now", "syncTick").addItem("Send me a test notification", "sendTestPushToMe").addItem("Set up / repair tabs", "setupTma").addItem("Install schedules", "installTriggers").addItem("Status", "showTmaStatus").addToUi();
+    const ui = SpreadsheetApp.getUi();
+    const reports = ui.createMenu("Reports");
+    for (const r of SHEET_REPORTS) reports.addItem(REPORT_TITLES[r.kind], r.fn);
+    ui.createMenu(MENU_TITLE).addItem("Run sync now", "syncTick").addSubMenu(reports).addItem("Send me a test notification", "sendTestPushToMe").addItem("Set up / repair tabs", "setupTma").addItem("Install schedules", "installTriggers").addItem("Status", "showTmaStatus").addToUi();
   }
   function syncTick(e) {
     const { services, app } = boot();
@@ -6215,6 +7122,7 @@ Email from the TMA app is working.
   }
   function runSetup2(seedSampleData) {
     var _a;
+    if (!allowed("Set up", false)) return null;
     const { services, app } = boot();
     const report = services.withLock(() => {
       const result = app.setup({ seedSampleData });
@@ -6258,7 +7166,43 @@ ${next}`);
     }
     return lines;
   }
+  function reportTripBalances() {
+    sheetReport("trip-balances");
+  }
+  function reportStudentFunds() {
+    sheetReport("student-funds");
+  }
+  function reportFundraiserTotals() {
+    sheetReport("fundraiser-totals");
+  }
+  function reportFundActivity() {
+    sheetReport("fund-activity");
+  }
+  function reportPayments() {
+    sheetReport("payments");
+  }
+  function reportRoster() {
+    sheetReport("roster");
+  }
+  function reportOpenItems() {
+    sheetReport("open-items");
+  }
+  function reportAppUsage() {
+    sheetReport("app-usage");
+  }
+  function sheetReport(kind) {
+    if (!allowed(`Report ${kind}`, true)) return;
+    try {
+      const { report, sheet } = runSheetReport(createGasServices(), SpreadsheetApp.getActive(), kind);
+      sheet.activate();
+      toast(`${sheet.getName()}: ${plural(report.rows.length, "row")}. Run it again any time for fresh numbers.`);
+    } catch (error) {
+      console.error(`Report ${kind} failed`, describeError(error));
+      alert("Report not written", errorMessage2(error));
+    }
+  }
   function installTriggers() {
+    if (!allowed("Install schedules", false)) return null;
     let removed = 0;
     for (const trigger of ScriptApp.getProjectTriggers()) {
       if (SCHEDULED_HANDLERS.includes(trigger.getHandlerFunction())) {
@@ -6272,6 +7216,7 @@ ${next}`);
     return { removed, created: SCHEDULED_HANDLERS.length };
   }
   function sendTestPushToMe() {
+    if (!allowed("Send me a test notification", true)) return null;
     const report = sendSelfTest(createGasServices(), activeUserEmail());
     const lines = report.email ? [`Sent to ${report.email}:`] : [];
     if (report.devices > 0) {
@@ -6290,6 +7235,7 @@ ${next}`);
     return `sent with Gmail from this Google account instead of ${WORKER_EMAIL_FROM}, because ${describeWorkerReason(report.emailWorkerReason)}${code}.`;
   }
   function showTmaStatus() {
+    if (!allowed("Status", true)) return;
     const services = createGasServices();
     const handlers = safely2(() => ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()), []);
     const present = SECRET_NAMES.filter((name) => services.secrets.get(name) !== null);
@@ -6311,9 +7257,7 @@ ${next}`);
       `Version: ${VERSION}`
     ];
     if (!present.includes("TOKEN_SECRET")) lines.push("", "TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.");
-    const text2 = lines.join("\n");
-    alert("TMA App status", text2);
-    return text2;
+    alert("TMA App status", lines.join("\n"));
   }
   function pushStatus(services, health) {
     const push = services.push;
@@ -6368,6 +7312,14 @@ ${next}`);
     if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
     if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
     return `${parts.join(" · ")}.`;
+  }
+  function allowed(what, menuOnly) {
+    if (hasSheetUi() || !menuOnly && activeUserEmail() !== "") return true;
+    console.warn(`${what} runs only from the TMA App menu in the spreadsheet${menuOnly ? "" : " or from the script editor"}.`);
+    return false;
+  }
+  function hasSheetUi() {
+    return safely2(() => SpreadsheetApp.getUi() !== null, false);
   }
   function activeUserEmail() {
     return safely2(() => Session.getActiveUser().getEmail(), "");
@@ -6436,4 +7388,36 @@ function sendTestPushToMe(e) {
 
 function showTmaStatus(e) {
   return TMA.showTmaStatus(e);
+}
+
+function reportTripBalances(e) {
+  return TMA.reportTripBalances(e);
+}
+
+function reportStudentFunds(e) {
+  return TMA.reportStudentFunds(e);
+}
+
+function reportFundraiserTotals(e) {
+  return TMA.reportFundraiserTotals(e);
+}
+
+function reportFundActivity(e) {
+  return TMA.reportFundActivity(e);
+}
+
+function reportPayments(e) {
+  return TMA.reportPayments(e);
+}
+
+function reportRoster(e) {
+  return TMA.reportRoster(e);
+}
+
+function reportOpenItems(e) {
+  return TMA.reportOpenItems(e);
+}
+
+function reportAppUsage(e) {
+  return TMA.reportAppUsage(e);
 }

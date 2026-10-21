@@ -141,11 +141,10 @@ export function adminOverview(ctx: Ctx): AdminOverview {
   const families = m.families();
   const students = m.students().filter((s) => s.status !== 'Inactive');
 
+  // The Ledger's sum: each StudentID once, even one with two Students rows, and funds recorded for
+  // IDs that have no Students row still belong to TMA's earmarked total.
   let totalFunds = 0;
-  for (const s of m.students()) totalFunds += books.balance(s.id);
-  // Funds recorded for IDs that have no Students row still belong to TMA's earmarked total.
-  const known = new Set(m.students().map((s) => idKey(s.id)));
-  for (const key of books.ledgerStudentKeys()) if (!known.has(key)) totalFunds += books.balance(key);
+  for (const key of books.ledgerStudentKeys()) totalFunds += books.balance(key);
 
   let emailQuota = 0;
   let emailRelay: { from: string; backupRemaining: number } | null = null;

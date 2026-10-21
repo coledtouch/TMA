@@ -30,7 +30,9 @@ student emails or phone numbers, photos, grades or any school records.
 
 In **TMA's own Google Sheet, in TMA's Google account**. The app's server is a script attached to
 that sheet. It runs inside Google and can open **only that one spreadsheet**, not the rest of TMA's
-Google Drive. There is no other database. Families open the app at **https://mytma.org**, TMA's own
+Google Drive. There is no other database. Reports are worked out from that sheet each time a board
+member opens one, and the app keeps no copy; the sheet's *TMA App → Reports* menu writes them into
+`Report: …` tabs in the same spreadsheet. Families open the app at **https://mytma.org**, TMA's own
 web address, where a second small program on Cloudflare hands out the app's files and stores nothing.
 Push notifications pass through a small program TMA runs
 on Cloudflare (the "push Worker", see below) and then through Apple's, Google's, Mozilla's or
@@ -88,7 +90,8 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
   treasurer has verified the household. Anyone can sign up, but a new sign-up sees nothing
   financial until it's approved.
 * **Board members** listed in the sheet's Settings (`ADMIN_EMAILS`) get *Board tools* in the app:
-  fund requests, new sign-ups, announcements and an activity log.
+  fund requests, new sign-ups, announcements, an activity log and reports. One report, the roster,
+  lists parents' emails and phone numbers; each time someone opens it in the app, the Log tab says who.
 * **People who can open the spreadsheet** see everything, just as today. Keep that list short.
 
 ### How is it secured?
@@ -206,3 +209,5 @@ volunteers whether or not TMA uses this app.
 5. Once a year, mark graduated students and departed families `Inactive`, and delete data you no
    longer need.
 6. Adopt the written activity-fund policy above.
+7. A report downloaded as a CSV file is a copy on that person's computer. Download the roster only
+   when you need it, keep it private, and delete it when you're done.

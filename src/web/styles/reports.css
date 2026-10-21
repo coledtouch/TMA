@@ -1,0 +1,346 @@
+/*
+ * Board tools → Reports (src/web/screens/Reports.tsx). Mobile-first: the table
+ * scrolls sideways inside its card with the first column pinned, and prints on
+ * its own (landscape) without the app's header, tab bar or the filters.
+ * Colors come from tokens.css, so both themes follow. This file loads before
+ * app.css, so rules that change an app.css class start with .reports-screen.
+ */
+
+.reports-screen .back-link {
+  align-self: flex-start;
+  gap: 4px;
+  margin-inline-start: -4px;
+  text-decoration: none;
+}
+
+.reports-screen .screen-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Title beside the "run again" button; the button lines its glyph up with the gutter. */
+.report-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.report-heading > :first-child {
+  min-width: 0;
+}
+
+.report-heading .icon-button {
+  margin-inline-end: -10px;
+}
+
+.reports-screen .print-only {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- filters */
+
+.report-dates-hint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+}
+
+.report-dates-hint .btn-link {
+  min-height: 0;
+  padding-block: 2px;
+}
+
+/* ---------------------------------------------------------------- results */
+
+.report-updating {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.report-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+/* While a filter change runs, the old numbers fade so nobody reads them as the new ones. */
+.report-body.is-updating {
+  opacity: 0.55;
+}
+
+.report-about {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--ink-2);
+}
+
+.report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.report-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 18px;
+  color: var(--ink-2);
+}
+
+/* ---------------------------------------------------------------- table */
+
+.report-table-wrap {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* Tabbing to a link scrolls it beside the pinned first column, not under it. A table that
+     scrolls has that column at its narrowest: the .cell-lead minimum, 24px padding, 1px line. */
+  scroll-padding-inline-start: calc(min(8.5rem, 30vw) + 26px);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+/* A first column of long text (.cell-wrap) is at least 11rem. */
+.report-table-wrap:has(tbody th > .cell-wrap) {
+  scroll-padding-inline-start: calc(11rem + 26px);
+}
+
+/* On wide screens a table with many columns may grow past the 640px column of
+   text, centred on it. One with few columns (app usage) stays in the column.
+   Screen only: a printed page is wide too, and print keeps the table in its margins. */
+@media screen and (min-width: 760px) {
+  .report-table-wrap.is-wide {
+    margin-inline: calc(50% - min(50vw - var(--gutter) - 12px, 560px));
+  }
+}
+
+.report-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--text-sm);
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-table th,
+.report-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+}
+
+.report-table thead th {
+  background: var(--card-2);
+  color: var(--ink-2);
+  font-weight: 700;
+  font-size: var(--text-xs);
+  letter-spacing: 0.01em;
+  vertical-align: bottom;
+  border-bottom-color: var(--line-strong);
+}
+
+.report-table tbody tr:nth-child(even) > * {
+  background: var(--card-2);
+}
+
+.report-table tbody th {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.report-table .num {
+  text-align: right;
+}
+
+/* The first column stays in view while the rest scrolls sideways. */
+.report-table tr > :first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  white-space: normal;
+  box-shadow: inset -1px 0 0 var(--line-strong);
+}
+
+/* Table cells ignore min/max widths, so the cell's content carries them: names in
+   the pinned column wrap past 8.5rem, long text (details, notes, the app-usage
+   questions) wraps between 11 and 18rem instead of word by word. */
+.report-table .cell-lead,
+.report-table .cell-wrap {
+  display: block;
+  white-space: normal;
+}
+
+.report-table .cell-lead {
+  min-width: min(8.5rem, 30vw);
+  max-width: 8.5rem;
+}
+
+.report-table .cell-wrap {
+  min-width: 11rem;
+  max-width: 18rem;
+}
+
+/* With few columns there is room, so long text uses the whole width before it wraps. */
+.report-table-wrap:not(.is-wide) .cell-wrap {
+  max-width: none;
+}
+
+.report-table a {
+  color: var(--brand-ink);
+}
+
+.report-table tfoot th,
+.report-table tfoot td {
+  background: var(--brand-tint);
+  color: var(--brand-tint-ink);
+  font-weight: 750;
+  border-bottom: 0;
+}
+
+.report-table tfoot tr:first-child > * {
+  border-top: 2px solid var(--line-strong);
+}
+
+@media (min-width: 640px) {
+  .report-table .cell-lead {
+    max-width: 14rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .report-body {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------- print */
+
+/* Landscape for the report only (other screens keep the printer's default). */
+@page tma-report {
+  size: landscape;
+  margin: 12mm;
+}
+
+@media print {
+  /* Only when the Reports screen is showing: no header, banners, tab bar or toasts. */
+  body:has(.reports-screen) {
+    background: #fff;
+    color: #000;
+  }
+
+  body:has(.reports-screen) #root > :not(.app),
+  body:has(.reports-screen) .app > :not(main),
+  body:has(.reports-screen) .toasts,
+  .reports-screen .no-print {
+    display: none !important;
+  }
+
+  body:has(.reports-screen) .app-main {
+    max-width: none;
+    padding: 0;
+  }
+
+  .reports-screen {
+    page: tma-report;
+    gap: 8px;
+    color: #000;
+  }
+
+  .reports-screen .print-only {
+    display: block;
+  }
+
+  .reports-screen .screen-title {
+    font-size: 16pt;
+  }
+
+  .reports-screen .screen-sub,
+  .reports-screen .eyebrow,
+  .report-about,
+  .report-notes {
+    color: #000;
+  }
+
+  .report-body.is-updating {
+    opacity: 1;
+  }
+
+  .report-result .callout {
+    background: none;
+    color: #000;
+    padding: 0;
+  }
+
+  .report-table-wrap {
+    overflow: visible;
+    margin-inline: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .report-table {
+    font-size: 8pt;
+  }
+
+  .report-table thead {
+    display: table-header-group; /* repeat the header on every page */
+  }
+
+  .report-table tfoot {
+    display: table-row-group; /* totals once, at the end */
+  }
+
+  .report-table tr {
+    break-inside: avoid;
+  }
+
+  .report-table th,
+  .report-table td,
+  .report-table tr > :first-child,
+  .report-table thead th,
+  .report-table tbody tr:nth-child(even) > *,
+  .report-table tfoot th,
+  .report-table tfoot td {
+    position: static;
+    padding: 3px 5px;
+    white-space: normal;
+    background: none;
+    color: #000;
+    box-shadow: none;
+    border-bottom: 0.5pt solid #999;
+  }
+
+  .report-table .cell-lead,
+  .report-table .cell-wrap {
+    min-width: 0;
+    max-width: none;
+  }
+
+  .report-table .num,
+  .report-table .nowrap {
+    white-space: nowrap;
+  }
+
+  .report-table tfoot tr:first-child > * {
+    border-top: 1.5pt solid #000;
+  }
+
+  .report-table a {
+    color: #000;
+    text-decoration: none;
+  }
+}

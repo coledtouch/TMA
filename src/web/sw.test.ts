@@ -130,7 +130,7 @@ describe('caching', () => {
       { options: { cacheName: string; plugins: Array<{ options: { maxEntries: number } }> } },
     ];
     const image = { destination: 'image' };
-    expect(match({ request: image, url: new URL(`${SCOPE}brand/tma-banner.jpg`) })).toBe(true);
+    expect(match({ request: image, url: new URL(`${SCOPE}brand/tma-logo-light.webp`) })).toBe(true);
     expect(match({ request: image, url: new URL('https://other.example/pic.png') })).toBe(false);
     expect(match({ request: { destination: '' }, url: new URL(`${SCOPE}api`) })).toBe(false);
     expect(strategy.options.cacheName).toBe('tma-images');

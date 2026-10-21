@@ -26,6 +26,15 @@ const ENTRY_FUNCTIONS = [
   'installTriggers',
   'sendTestPushToMe',
   'showTmaStatus',
+  // TMA App → Reports (src/gas/reports-sheet.ts SHEET_REPORTS)
+  'reportTripBalances',
+  'reportStudentFunds',
+  'reportFundraiserTotals',
+  'reportFundActivity',
+  'reportPayments',
+  'reportRoster',
+  'reportOpenItems',
+  'reportAppUsage',
 ];
 
 const BANNER = '// GENERATED FILE — do not edit. Built from src/ by `npm run build:gas`.';

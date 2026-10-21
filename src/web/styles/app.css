@@ -240,11 +240,14 @@ button {
   text-decoration: none;
 }
 
-.brand-shield {
-  width: 36px;
-  height: 36px;
-  object-fit: contain;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.3));
+/* The owl on its own white disc (scripts/make-icons.mjs), so its black
+   outlines show on the maroon and the near-black header alike. */
+.brand-mark {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 .brand-text {
@@ -2008,8 +2011,8 @@ ul.callout {
   gap: 16px;
 }
 
-/* Transparent banner art: black notes in light mode, cream notes in dark mode
-   (see scripts/make-banner.py). The logo's own white panel stays as drawn. */
+/* Transparent logo (scripts/make-icons.mjs): grey notes in light mode, lighter
+   notes in dark mode. Sized to leave the sign-in form in view on small phones. */
 .signin-logo {
   display: block;
   padding: 4px 0;
@@ -2017,8 +2020,9 @@ ul.callout {
 
 .signin-logo img {
   display: block;
-  width: 100%;
+  width: min(100%, 240px);
   height: auto;
+  margin: 0 auto;
 }
 
 .signin-card form {

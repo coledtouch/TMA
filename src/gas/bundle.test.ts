@@ -148,7 +148,11 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
 
       const health = JSON.parse((g.doGet({ parameter: { action: 'health' } }) as FakeOutput).getContent());
       expect(health).toMatchObject({ ok: true, data: { version: expect.any(String) } });
-      expect((g.doGet({ parameter: {} }) as FakeOutput).getContent()).toContain('<h1');
+      const landing = g.doGet({ parameter: {} }) as FakeOutput;
+      expect(landing.mimeType).toBe('TEXT');
+      expect(landing.getContent()).toContain("This address is the TMA app's server.");
+      // No HtmlService page anywhere: one would hand its visitors google.script.run.
+      expect(code).not.toMatch(/HtmlService\s*\./);
     });
 
     it('adds the TMA App menu and installs the schedules', () => {
@@ -162,6 +166,33 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
 
       g.installTriggers();
       expect(gas.scriptApp.triggers.map((t) => t.handler).sort()).toEqual(['dailyTick', 'syncTick']);
+    });
+
+    it("writes the menu's reports to their tabs, and gives a web-app visitor nothing (google.script.run)", () => {
+      // From the menu: the tab is written and shown, and nothing comes back.
+      expect(g.reportRoster()).toBeUndefined();
+      expect(gas.spreadsheet.getSheetByName('Report: Roster')?.dump()[2][0]).toBe('Ethan Nguyen');
+
+      // The web app's own page can call any top-level function, as the sheet owner. A web request
+      // has no spreadsheet UI, and Execute as: Me hides the visitor's email.
+      gas.uiAvailable = false;
+      gas.session.email = '';
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const tabs = gas.spreadsheet.getSheets().length;
+      const alerts = gas.ui.alerts.length;
+      try {
+        for (const fn of ['reportRoster', 'reportTripBalances', 'reportPayments', 'reportStudentFunds', 'showTmaStatus']) {
+          expect(g[fn](), fn).toBeUndefined();
+        }
+        expect(g.setupTmaWithSampleData()).toBeNull();
+        expect(gas.spreadsheet.getSheets()).toHaveLength(tabs);
+        expect(gas.spreadsheet.getSheetByName('Report: Trip balances')).toBeNull();
+        expect(gas.ui.alerts).toHaveLength(alerts);
+      } finally {
+        gas.uiAvailable = true;
+        gas.session.email = 'treasurer@example.com';
+        warn.mockRestore();
+      }
     });
 
     it('signs a parent in with an emailed code and returns their household', () => {

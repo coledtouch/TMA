@@ -53,6 +53,13 @@ describe('admin.overview', () => {
     expect(Array.isArray(o.recentLog)).toBe(true);
   });
 
+  it("counts a student's funds once, even when the Students tab has their row twice", () => {
+    const h = harness();
+    const students = h.services.db.tables.Students ?? [];
+    students.push({ ...students.find((r) => r.StudentID === 'S0002')! });
+    expect(h.ok('admin.overview', {}, h.signIn(TREASURER)).stats.totalFundsCents).toBe(64000 + 8500 + 41000 + 3500 + 52000);
+  });
+
   it('scores candidates by last name, first name (exact or prefix) and grade, best first', () => {
     const h = harness();
     const students = h.services.db.tables.Students ?? [];

@@ -1,4 +1,4 @@
-/** Header with the Timberlane shield, the page area, and the bottom tab bar. */
+/** Header with the TMA owl, the page area, and the bottom tab bar. */
 import { useEffect, useRef, type ReactNode } from 'react';
 import { href, tabFor, type RouteName, type TabName } from '../lib/router';
 import { Icon, type IconName } from './Icon';
@@ -17,11 +17,11 @@ export function Header({ busy }: { busy?: boolean }) {
       <div className="app-header-inner">
         <a className="brand" href={href('home')} aria-label="TMA home">
           <img
-            className="brand-shield"
-            src={`${import.meta.env.BASE_URL}brand/timberlane-shield.png`}
+            className="brand-mark"
+            src={`${import.meta.env.BASE_URL}brand/tma-owl-mark.png`}
             alt=""
-            width={36}
-            height={36}
+            width={38}
+            height={38}
           />
           <span className="brand-text">
             <span className="brand-name">Timberlane Music Association</span>

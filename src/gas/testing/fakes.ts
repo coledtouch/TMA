@@ -247,6 +247,13 @@ export class FakeRange {
     return this;
   }
 
+  setNumberFormat(format: string): FakeRange {
+    for (let c = 0; c < this.numColumns; c += 1) {
+      for (let r = 0; r < this.numRows; r += 1) this.sheet.numberFormats.set(`${this.row + r},${this.column + c}`, format);
+    }
+    return this;
+  }
+
   private a1(): string {
     return `R${this.row}C${this.column}:${this.numRows}x${this.numColumns}`;
   }
@@ -257,10 +264,13 @@ export class FakeSheet {
   readonly cells: Cell[][] = [];
   readonly notes = new Map<string, string>();
   readonly fontWeights = new Map<string, string>();
+  /** "row,column" -> number format, e.g. "$#,##0.00". */
+  readonly numberFormats = new Map<string, string>();
   /** Log of write operations, e.g. "setValues R5C1:1x8". */
   readonly ops: string[] = [];
   frozenRows = 0;
   hidden = false;
+  active = false;
   maxRows = 1000;
   maxColumns = 26;
 
@@ -352,6 +362,20 @@ export class FakeSheet {
     this.frozenRows = rows;
   }
 
+  /** Like Sheet.clear(): contents and formats go; frozen rows and notes stay. */
+  clear(): FakeSheet {
+    this.ops.push('clear');
+    this.cells.length = 0;
+    this.fontWeights.clear();
+    this.numberFormats.clear();
+    return this;
+  }
+
+  activate(): FakeSheet {
+    this.active = true;
+    return this;
+  }
+
   getFrozenRows(): number {
     return this.frozenRows;
   }
@@ -421,6 +445,8 @@ export class FakeUi {
   readonly alerts: Array<{ title: string; message: string }> = [];
   readonly menus: Array<{ name: string; items: Array<[string, string]> }> = [];
   readonly ButtonSet = { OK: 'OK', OK_CANCEL: 'OK_CANCEL', YES_NO: 'YES_NO', YES_NO_CANCEL: 'YES_NO_CANCEL' };
+  /** Menu builders handed out by createMenu, so addSubMenu can find a sub-menu's items. */
+  private readonly built = new WeakMap<object, { name: string; items: Array<[string, string]> }>();
 
   alert(title: string, message?: string): string {
     this.alerts.push({ title, message: message ?? '' });
@@ -435,10 +461,18 @@ export class FakeUi {
         return builder;
       },
       addSeparator: () => builder,
+      /** A sub-menu's items are listed in the parent menu as "Sub-menu › Item". */
+      addSubMenu: (sub: object) => {
+        const child = this.built.get(sub);
+        if (!child) throw new Error('FakeUi: addSubMenu needs a menu made with createMenu');
+        for (const [caption, fn] of child.items) menu.items.push([`${child.name} › ${caption}`, fn]);
+        return builder;
+      },
       addToUi: () => {
         this.menus.push(menu);
       },
     };
+    this.built.set(builder, menu);
     return builder;
   }
 }

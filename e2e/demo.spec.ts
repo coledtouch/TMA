@@ -1,11 +1,13 @@
 /**
  * Smoke test of the demo build at phone size (ARCHITECTURE.md §11): a parent
  * asks to use activity funds and pays online, the treasurer approves and posts
- * a fundraiser credit, and the parent's "phone" gets the notification.
+ * a fundraiser credit, and the parent's "phone" gets the notification. A board
+ * member runs a report and downloads it as CSV.
  * (The README screenshots come from screenshots.spec.ts: `npm run screenshots`.)
  *
  * Run `npm run build:web` first; playwright.config.ts serves dist with vite preview.
  */
+import { readFile } from 'node:fs/promises';
 import { expect, test, type Page } from '@playwright/test';
 
 test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, contextOptions: { reducedMotion: 'reduce' } });
@@ -96,4 +98,62 @@ test('parent pays and redeems, treasurer approves, parent is notified', async ({
   await expect(page.getByText('Pizza Night fundraiser').first()).toBeVisible();
 
   expect(problems).toEqual([]);
+});
+
+test('treasurer runs a report and downloads it, warned first about contact details', async ({ page }) => {
+  await page.goto('./');
+  await page.getByRole('button', { name: /Try as the treasurer/ }).click();
+  await page.goto('./#/admin');
+  await page.getByRole('link', { name: /Reports/ }).click();
+  await page.getByRole('link', { name: /Trip balances/ }).click();
+
+  const table = page.getByRole('table', { name: /Trip balances: \d+ rows?/ });
+  await expect(table).toBeVisible();
+  await expect(table.getByRole('row', { name: /^Total/ })).toBeVisible();
+
+  // Trip balances list parents' emails, so the download asks first.
+  await page.getByRole('button', { name: 'Download CSV' }).click();
+  const warning = page.getByRole('alertdialog');
+  await expect(warning).toContainText("This file has people's email addresses. Keep it private.");
+  const [download] = await Promise.all([page.waitForEvent('download'), warning.getByRole('button', { name: 'Download CSV' }).click()]);
+  expect(download.suggestedFilename()).toMatch(/^tma-trip-balances-\d{4}-\d{2}-\d{2}\.csv$/);
+  const csv = await readFile((await download.path())!);
+  expect(csv.subarray(0, 3).toString('hex')).toBe('efbbbf'); // UTF-8 BOM, so Excel reads it right
+  // Same columns, in the same order, as the table on screen (the student first).
+  const header = (await table.locator('thead th').allTextContents()).join(',');
+  expect(csv.subarray(3).toString('utf8').split('\r\n')[0]).toBe(header);
+  expect(header).toMatch(/^Student,Activity,Activity ID,/);
+
+  await page.getByRole('link', { name: /All reports/ }).click();
+  await page.getByRole('link', { name: /Student funds/ }).click();
+  await expect(page.getByRole('table', { name: /Student funds/ })).toBeVisible();
+  const [plain] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download CSV' }).click()]);
+  expect(plain.suggestedFilename()).toMatch(/^tma-student-funds-/);
+});
+
+test('keyboard focus in a report table never sits under the pinned student column', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto('./');
+  await page.getByRole('button', { name: /Try as the treasurer/ }).click();
+  await page.goto('./#/reports?kind=roster');
+  const table = page.getByRole('region', { name: /^Roster: \d+ rows/ });
+  await expect(table).toBeVisible();
+  const links = await table.locator('a').count();
+  expect(links).toBeGreaterThan(4);
+  // How far the focused link starts right of the pinned column (negative: under it).
+  const clearance = () =>
+    page.evaluate(() => {
+      const link = document.activeElement!;
+      const pinned = link.closest('tr')!.firstElementChild!.getBoundingClientRect();
+      return link.getBoundingClientRect().left - pinned.right;
+    });
+  await table.focus();
+  for (let i = 0; i < links; i += 1) {
+    await page.keyboard.press('Tab');
+    expect(await clearance()).toBeGreaterThan(0);
+  }
+  for (let i = 1; i < links; i += 1) {
+    await page.keyboard.press('Shift+Tab');
+    expect(await clearance()).toBeGreaterThan(0);
+  }
 });

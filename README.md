@@ -1,6 +1,9 @@
 # TMA Family App
 
-![Timberlane Music Association](public/brand/tma-banner.jpg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="public/brand/tma-logo-dark.webp">
+  <img src="public/brand/tma-logo-light.webp" alt="Timberlane Music Association" width="240">
+</picture>
 
 A free phone app for the families of the
 [Timberlane Music Association](https://sites.google.com/view/timberlanemusicassociation/home) (TMA),
@@ -38,6 +41,9 @@ keeps balances straight and notifies families when something changes.
 * **Approve fund requests** and **verify new households** in the app (*More → Board tools*) or
   in the sheet.
 * **Send announcements** to everyone or only to some schools and groups, by push, email or text.
+* **Reports**: trip balances, student funds, fundraiser totals, payments, a roster and more, in the
+  app (*Board tools → Reports*, download as CSV or print) or in the sheet (*TMA App → Reports*).
+  Each one is worked out from the sheet when you open it.
 * Automatic **payment-due reminders** and **"concert tomorrow"** reminders.
 
 ## Try the demo
@@ -87,7 +93,7 @@ Demo data is saved in your browser, so you can come back to it later.
 
 | Board tools | Sign in | Dark theme |
 | --- | --- | --- |
-| ![Treasurer's dashboard and fund requests to approve](docs/screenshots/admin.png) | ![Signing in with an email code, with the demo shortcuts](docs/screenshots/signin.png) | ![Home screen in the dark theme](docs/screenshots/home-dark.png) |
+| ![Treasurer's dashboard, the Reports link and fund requests to approve](docs/screenshots/admin.png) | ![Signing in with an email code, with the demo shortcuts](docs/screenshots/signin.png) | ![Home screen in the dark theme](docs/screenshots/home-dark.png) |
 
 The screenshots are taken from the demo at iPhone 13 size by `npm run screenshots`.
 
@@ -158,7 +164,7 @@ The full design, including every API action, notification message and scheduled 
 * **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
   student emails or phone numbers, or any school records.
 * **Where it lives:** in TMA's own Google Sheet, in TMA's Google account. There is no separate
-  database. The push Worker on Cloudflare keeps no family information. Card payments are handled
+  database, and reports are worked out from the sheet each time, never stored elsewhere. The push Worker on Cloudflare keeps no family information. Card payments are handled
   entirely by PayPal, so TMA never sees card numbers.
 * **Who sees what:** a parent sees only their own household. Balances and trips appear only after
   the treasurer verifies the household. Board members listed in the sheet's Settings tab see what
@@ -179,7 +185,7 @@ More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
 | `npm run preview` | Serve the built `dist/` locally. |
 | `npm run e2e` | Playwright tests at phone size: the demo walkthrough, and the demo inside a live build (`?demo`, Exit demo), which it builds into `dist-live/` itself. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
 | `npm run screenshots` | Retake the README screenshots in `docs/screenshots/` from the demo build (after `npm run build:web`). Look at them before committing. |
-| `npm run icons` | Regenerate the app icons (and the notification badge) from `public/brand/timberlane-shield-source.webp`. |
+| `npm run icons` | Regenerate the logo files in `public/brand/` and the app icons, favicons and notification badge in `public/icons/` from the official logo, `public/brand/tma-music-logo-source.webp`. Look at them before committing. |
 
 The app connects to a real backend through one build-time variable, `VITE_API_URL` (the Apps Script
 `/exec` URL). Without it, a local build is only the demo; with it, `?demo` still opens the demo. The

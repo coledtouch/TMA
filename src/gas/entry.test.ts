@@ -1,4 +1,5 @@
 import * as nodeCrypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { App, Services } from '../server/services';
 import type { ApiRequest, ApiResponse, SetupReport, TickReport } from '../shared/types';
 import {
@@ -6,9 +7,11 @@ import {
   doGet,
   doPost,
   installTriggers,
-  landingPage,
+  landingText,
   onOpen,
   parseApiRequest,
+  reportOpenItems,
+  reportPayments,
   sendTestPushToMe,
   setupTma,
   setupTmaWithSampleData,
@@ -16,6 +19,8 @@ import {
   summarizeTick,
   syncTick,
 } from './entry';
+import * as entry from './entry';
+import { SHEET_REPORTS } from './reports-sheet';
 import { storedToken, testSubscription } from '../server/test-helpers';
 import { FakeOutput, FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
 
@@ -112,30 +117,40 @@ describe('doGet', () => {
     expect(Number.isNaN(Date.parse(body.data.time))).toBe(false);
   });
 
-  it('otherwise renders a small page linking to APP_URL from Settings', () => {
+  it('otherwise answers in plain text pointing to APP_URL, never with an HtmlService page (google.script.run)', () => {
     gas.spreadsheet.addSheet(
       FakeSheet.withRows('Settings', [['Key', 'Value'], ['APP_URL', 'https://tma.example.org/app/'], ['ORG_NAME', 'TMA <Test>']]),
     );
+    const html = vi.spyOn(globalThis.HtmlService, 'createHtmlOutput');
     const out = doGet({ parameter: {} } as unknown as GoogleAppsScript.Events.DoGet) as unknown as FakeOutput;
-    expect(out.title).toBe('TMA <Test>');
-    expect(out.getContent()).toContain('href="https://tma.example.org/app/" target="_top"');
-    expect(out.getContent()).toContain('TMA &lt;Test&gt;');
+    expect(out.mimeType).toBe('TEXT');
+    expect(out.getContent()).toContain('TMA <Test>');
+    expect(out.getContent()).toContain('Families use the app at https://tma.example.org/app/');
+    expect(html).not.toHaveBeenCalled();
   });
 
-  it('never links to a non-http(s) APP_URL', () => {
-    expect(landingPage('TMA', 'javascript:alert(1)')).not.toContain('href');
-    expect(landingPage('TMA', '')).toContain('Ask TMA for the app link');
+  it('never points to a non-http(s) APP_URL', () => {
+    expect(landingText('TMA', 'javascript:alert(1)')).not.toContain('javascript');
+    expect(landingText('TMA', '')).toContain('Ask TMA for the app link');
   });
 });
 
 describe('sheet menu and schedules', () => {
-  it('onOpen adds the TMA App menu', () => {
+  it('onOpen adds the TMA App menu, with one Reports item per report', () => {
     onOpen();
     expect(gas.ui.menus).toEqual([
       {
         name: 'TMA App',
         items: [
           ['Run sync now', 'syncTick'],
+          ['Reports › Trip balances', 'reportTripBalances'],
+          ['Reports › Student funds', 'reportStudentFunds'],
+          ['Reports › Fundraiser totals', 'reportFundraiserTotals'],
+          ['Reports › Fund activity', 'reportFundActivity'],
+          ['Reports › Payments', 'reportPayments'],
+          ['Reports › Roster', 'reportRoster'],
+          ['Reports › Open items', 'reportOpenItems'],
+          ['Reports › App usage', 'reportAppUsage'],
           ['Send me a test notification', 'sendTestPushToMe'],
           ['Set up / repair tabs', 'setupTma'],
           ['Install schedules', 'installTriggers'],
@@ -244,7 +259,7 @@ describe('sheet menu and schedules', () => {
     it('keeps an existing secret and reports a sheet that is already linked', () => {
       gas.properties.setProperty('PUSH_RELAY_SECRET', 'e'.repeat(64));
       worker(() => 'e'.repeat(64));
-      const report = setupTma();
+      const report = setupTma()!;
       expect(report.secretsInitialized).toEqual(['TOKEN_SECRET']);
       expect(gas.properties.getProperty('PUSH_RELAY_SECRET')).toBe('e'.repeat(64));
       expect(gas.ui.alerts[0].message).toContain(`Push: this sheet is linked to the push Worker (${DEFAULT_WORKER}).`);
@@ -276,6 +291,65 @@ describe('sheet menu and schedules', () => {
       expect(gas.fetch.requests).toHaveLength(0);
       expect(gas.ui.alerts[0].message).toContain('Push notifications are off: Settings PUSH_RELAY_URL');
     });
+  });
+
+  it('every Reports item is an exported entry point with a top-level wrapper in Code.js', () => {
+    const build = readFileSync(new URL('../../scripts/build-gas.mjs', import.meta.url), 'utf8');
+    const exported = entry as unknown as Record<string, unknown>;
+    for (const { fn } of SHEET_REPORTS) {
+      expect(typeof exported[fn], fn).toBe('function');
+      expect(build, fn).toContain(`'${fn}'`);
+    }
+  });
+
+  it('a Reports item writes its tab, shows it and says how many rows it has', () => {
+    expect(reportOpenItems()).toBeUndefined(); // the report stays in the sheet
+    const sheet = gas.spreadsheet.getSheetByName('Report: Open items');
+    expect(sheet?.active).toBe(true);
+    expect(sheet?.dump()[2][0]).toBe('Nothing to show.');
+    expect(gas.spreadsheet.toasts).toEqual(['Report: Open items: 0 rows. Run it again any time for fresh numbers.']);
+    // Read-only apart from its own tab: no lock, no Log row.
+    expect(gas.lock.calls).toEqual([]);
+    expect(gas.spreadsheet.getSheetByName('Log')).toBeNull();
+  });
+
+  it('a Reports item that fails says why instead of throwing', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(gas.spreadsheet, 'insertSheet').mockImplementation(() => {
+      throw new Error('You do not have permission to add a sheet.');
+    });
+    reportPayments();
+    expect(gas.ui.alerts.at(-1)).toEqual({ title: 'Report not written', message: 'You do not have permission to add a sheet.' });
+    expect(error).toHaveBeenCalled();
+  });
+
+  it('refuses every menu item for a web-app visitor (google.script.run): nothing written, sent or returned', () => {
+    // A web request: no spreadsheet UI, and Execute as: Me hides the visitor's email.
+    gas.uiAvailable = false;
+    gas.session.email = '';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    gas.properties.setProperty('PUSH_RELAY_SECRET', 'f'.repeat(64));
+    const exported = entry as unknown as Record<string, () => unknown>;
+    for (const { fn } of SHEET_REPORTS) expect(exported[fn](), fn).toBeUndefined();
+    expect(showTmaStatus()).toBeUndefined();
+    expect(sendTestPushToMe()).toBeNull();
+    expect(setupTma()).toBeNull();
+    expect(setupTmaWithSampleData()).toBeNull();
+    expect(installTriggers()).toBeNull();
+    expect(gas.spreadsheet.getSheets()).toEqual([]);
+    expect(gas.ui.alerts).toEqual([]);
+    expect(gas.fetch.requests).toEqual([]);
+    expect(gas.scriptApp.triggers).toEqual([]);
+    expect(core.setup).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith('Report roster runs only from the TMA App menu in the spreadsheet.');
+    expect(warn).toHaveBeenCalledWith('Set up runs only from the TMA App menu in the spreadsheet or from the script editor.');
+  });
+
+  it('runs setup and schedules from the script editor (no UI, but signed in)', () => {
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    gas.uiAvailable = false;
+    expect(setupTma()).not.toBeNull();
+    expect(installTriggers()).toEqual({ removed: 0, created: 2 });
   });
 
   it('installTriggers replaces only its own triggers', () => {
@@ -332,7 +406,7 @@ describe('sendTestPushToMe', () => {
       };
     };
 
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
 
     expect(sentTo.map((e) => e.replace(/.*device-/, ''))).toEqual(['live:APA91bH', 'dead:APA91bH']);
     expect(report).toMatchObject({ email: 'treasurer@example.com', devices: 3, push: 1, removed: 2, emailSent: true, emailVia: 'cloudflare' });
@@ -358,7 +432,7 @@ describe('sendTestPushToMe', () => {
       expect(r.url).toBe(`${WORKER}/email`);
       return { code: 200, body: { results: [{ status: 'error', reason: 'sender_not_verified', code: 'E_SENDER_NOT_VERIFIED' }] } };
     };
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
     expect(report).toMatchObject({ emailSent: true, emailVia: 'gmail', emailWorkerReason: 'sender_not_verified', emailWorkerCode: 'E_SENDER_NOT_VERIFIED' });
     expect(gas.mail.sent).toEqual([expect.objectContaining({ to: 'treasurer@example.com', replyTo: 'timberlanemusictma@gmail.com' })]);
     expect(gas.ui.alerts[0].message).toContain(
@@ -382,7 +456,7 @@ describe('sendTestPushToMe', () => {
     vi.spyOn(MailApp, 'sendEmail').mockImplementation(() => {
       throw new Error('Service invoked too many times for one day: email.');
     });
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
     expect(report.emailSent).toBe(false);
     expect(gas.ui.alerts[0].message).toContain('Email: not sent.');
     expect(gas.ui.alerts[0].message).toContain('The test email could not be sent: Service invoked too many times');
@@ -390,14 +464,14 @@ describe('sendTestPushToMe', () => {
 
   it('explains how to set push up when the relay secret is missing', () => {
     devices([['treasurer@example.com', 'F1', storedToken(testSubscription('x')), 'iPhone', 'x', 'x']]);
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
     expect(report.notes[0]).toContain('TMA App → Set up / repair tabs');
     expect(gas.fetch.requests).toHaveLength(0);
   });
 
   it('explains what is missing when nothing can be pushed', () => {
     devices([]);
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
     expect(report.push).toBe(0);
     expect(report.notes[0]).toContain('No phones are registered for treasurer@example.com');
     // Not linked to the Worker (no PUSH_RELAY_SECRET): the email still goes, with Gmail.
@@ -414,13 +488,21 @@ describe('sendTestPushToMe', () => {
 
   it('handles an unknown active user', () => {
     gas.session.email = '';
-    const report = sendTestPushToMe();
+    const report = sendTestPushToMe()!;
     expect(report.emailSent).toBe(false);
     expect(report.notes[0]).toMatch(/Could not tell/);
   });
 });
 
 describe('showTmaStatus', () => {
+  /** The status dialog's text (showTmaStatus returns nothing: the text holds the email key). */
+  function status(): string {
+    expect(showTmaStatus()).toBeUndefined();
+    const shown = gas.ui.alerts.at(-1);
+    expect(shown?.title).toBe('TMA App status');
+    return shown?.message ?? '';
+  }
+
   it('lists secret names (never values), integrations, the push Worker and quota', () => {
     gas.properties.setProperty('TOKEN_SECRET', 'super-secret-token-value');
     gas.properties.setProperty('PAYPAL_SECRET', 'super-secret-paypal');
@@ -435,7 +517,7 @@ describe('showTmaStatus', () => {
         ? { code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: false } }
         : { code: 404, body: {} };
 
-    const text = showTmaStatus();
+    const text = status();
 
     expect(text).toContain('Web app URL: Deploy → Manage deployments → Web app (the URL ending in /exec)');
     expect(text).not.toContain('FAKE/exec');
@@ -456,7 +538,6 @@ describe('showTmaStatus', () => {
     expect(text).toContain(`Email key for Cloudflare (Worker secret EMAIL_KEY): ${key}`);
     expect(text).not.toContain('super-secret');
     expect(text).not.toMatch(/firebase|fcm/i);
-    expect(gas.ui.alerts[0]).toEqual({ title: 'TMA App status', message: text });
     // Read-only: only the health check went out.
     expect(gas.fetch.requests.map((r) => `${r.method} ${r.url}`)).toEqual(['get https://tma-push.coleciprari.workers.dev/health']);
   });
@@ -466,7 +547,7 @@ describe('showTmaStatus', () => {
     gas.fetch.handler = () => {
       throw new Error('Address unavailable');
     };
-    const text = showTmaStatus();
+    const text = status();
     expect(text).toContain('Push Worker health: unreachable (Address unavailable)');
     expect(text).toContain('Push public key (PUSH_PUBLIC_KEY): saved ✓');
     expect(text).toContain('Push notifications: not configured (TMA App → Set up / repair tabs)');
@@ -478,27 +559,27 @@ describe('showTmaStatus', () => {
     gas.mail.quota = 88;
     let emailKey = true;
     gas.fetch.handler = () => ({ code: 200, body: { ok: true, name: 'tma-push', registered: true, hasKeys: true, email: true, emailKey } });
-    expect(showTmaStatus()).toContain(
+    expect(status()).toContain(
       'Email: on; from noreply@mytma.org through the push Worker (Cloudflare Email Sending ✓, email key ✓); Reply-To help@example.org; Gmail fallback: 88 emails left today',
     );
     const key = nodeCrypto.createHash('sha256').update('f'.repeat(64)).digest('hex');
-    expect(showTmaStatus()).toContain(`\nEmail key for Cloudflare (Worker secret EMAIL_KEY): ${key}\n`);
+    expect(status()).toContain(`\nEmail key for Cloudflare (Worker secret EMAIL_KEY): ${key}\n`);
     emailKey = false;
-    expect(showTmaStatus()).toContain(
+    expect(status()).toContain(
       'through the push Worker (Cloudflare Email Sending ✓, email key ✗: add the Worker secret EMAIL_KEY below, so Gmail sends meanwhile; see docs/SETUP.md)',
     );
 
     gas.cache.put('email-worker:paused', 'sender_not_verified', 600);
-    expect(showTmaStatus()).toContain(
+    expect(status()).toContain(
       "Email: on; with Gmail from this Google account, because mytma.org isn't verified for Cloudflare Email Sending yet",
     );
-    expect(showTmaStatus()).toContain('(Gmail for up to 10 minutes, then the Worker is tried again); Reply-To help@example.org; 88 emails left today');
+    expect(status()).toContain('(Gmail for up to 10 minutes, then the Worker is tried again); Reply-To help@example.org; 88 emails left today');
     gas.cache.put('email-worker:paused', 'http_error', 120);
-    expect(showTmaStatus()).toContain('(Gmail for up to 2 minutes, then the Worker is tried again)');
+    expect(status()).toContain('(Gmail for up to 2 minutes, then the Worker is tried again)');
 
     gas.spreadsheet.sheets.length = 0;
     gas.spreadsheet.addSheet(FakeSheet.withRows('Settings', [['Key', 'Value'], ['EMAIL_VIA', 'gmail'], ['EMAIL_ENABLED', 'FALSE']]));
-    const gmailOnly = showTmaStatus();
+    const gmailOnly = status();
     expect(gmailOnly).toContain(
       'Email: notifications off (sign-in codes are still emailed); with Gmail from this Google account, because Settings EMAIL_VIA is gmail; Reply-To timberlanemusictma@gmail.com; 88 emails left today',
     );
@@ -510,7 +591,7 @@ describe('showTmaStatus', () => {
   });
 
   it('points to setup when TOKEN_SECRET is missing', () => {
-    const text = showTmaStatus();
+    const text = status();
     expect(text).toContain('TOKEN_SECRET is missing');
   });
 });

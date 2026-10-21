@@ -8,12 +8,13 @@ import { adminOverview, announce, reviewHousehold } from './admin';
 import { authenticate, requestCode, verifyCode } from './auth';
 import { buildBootstrap } from './bootstrap';
 import { createCtx, inWriteLock, type Ctx } from './context';
-import { ApiError, badRequest, fail, forbidden } from './errors';
+import { ApiError, badRequest, forbidden } from './errors';
 import { saveHousehold } from './household';
 import { addCounts, flushDeliveries } from './notify';
 import { registerDevice, savePrefs, testPush, unregisterDevice } from './me';
 import { captureOrder, createOrder } from './payments';
 import { cancelRedemption, decideRedemption, requestRedemption } from './redemptions';
+import { runReport } from './reports';
 import type { App, Services, SetupOptions } from './services';
 import { runSetup } from './setup';
 import { emptyReport, runDaily, runSync } from './sync';
@@ -54,8 +55,8 @@ const ROUTES: Record<PrivateAction, Route> = {
   'admin.reviewHousehold': { admin: true, write: true, run: reviewHousehold },
   'admin.announce': { admin: true, write: true, run: announce },
   'admin.runSync': { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
-  // Placeholder until src/server/reports.ts lands.
-  'admin.report': { admin: true, run: () => fail('NOT_CONFIGURED', 'Reports are not available yet.') },
+  // Read-only (no lock); the roster alone takes the lock briefly for its Log row.
+  'admin.report': { admin: true, run: runReport },
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';

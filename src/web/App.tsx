@@ -24,6 +24,7 @@ import { Household } from './screens/Household';
 import { More } from './screens/More';
 import { News } from './screens/News';
 import { Notifications } from './screens/Notifications';
+import { Reports } from './screens/Reports';
 import { SignIn } from './screens/SignIn';
 import { Trips } from './screens/Trips';
 
@@ -38,6 +39,7 @@ const TITLES: Record<Route['name'], string> = {
   household: 'Household',
   notifications: 'Notifications',
   admin: 'Board tools',
+  reports: 'Reports',
 };
 
 export function App({ api }: { api: ApiClient }) {
@@ -76,6 +78,8 @@ function Screen({ route }: { route: Route }) {
       return <Notifications />;
     case 'admin':
       return <Admin />;
+    case 'reports':
+      return <Reports kind={route.params.kind} />;
     default:
       return <Home />;
   }

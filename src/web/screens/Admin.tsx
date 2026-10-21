@@ -1,6 +1,6 @@
 /**
- * Board tools: stats, fund requests to approve, new households to verify,
- * announcements, a manual sync, and the recent activity log.
+ * Board tools: stats, a link to Reports, fund requests to approve, new
+ * households to verify, announcements, a manual sync, and the recent activity log.
  */
 import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from 'react';
 import type {
@@ -22,6 +22,7 @@ import { Chip, StatusChip } from '../components/StatusChip';
 import { useApp } from '../hooks/app-context';
 import { useToast } from '../hooks/toast';
 import { audienceSummary, formatCents, formatDateTime, gradeLabel, plural, safeHref, studentName } from '../lib/format';
+import { href } from '../lib/router';
 
 const LOG_SHOWN = 15;
 const TITLE_MAX = 120;
@@ -87,9 +88,17 @@ export function Admin() {
         </p>
       ) : null}
 
+      {overview ? <Stats overview={overview} /> : null}
+      <a className="card card-link admin-shortcut" href={href('reports')}>
+        <Icon name="news" size={24} />
+        <span>
+          <span className="card-link-title">Reports</span>
+          <span className="muted">Trip balances, student funds, payments and more. Download or print.</span>
+        </span>
+        <Icon name="chevron" />
+      </a>
       {overview ? (
         <>
-          <Stats overview={overview} />
           <PendingRequests requests={overview.pendingRedemptions} onChange={afterChange} />
           <PendingHouseholds households={overview.pendingHouseholds} onChange={afterChange} />
         </>

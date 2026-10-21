@@ -127,14 +127,14 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
       <div className="signin-inner">
         <picture className="signin-logo">
           <source
-            srcSet={`${import.meta.env.BASE_URL}brand/tma-banner-dark.webp`}
+            srcSet={`${import.meta.env.BASE_URL}brand/tma-logo-dark.webp`}
             media="(prefers-color-scheme: dark)"
           />
           <img
-            src={`${import.meta.env.BASE_URL}brand/tma-banner-light.webp`}
+            src={`${import.meta.env.BASE_URL}brand/tma-logo-light.webp`}
             alt="Timberlane Music Association"
-            width={1024}
-            height={267}
+            width={800}
+            height={617}
           />
         </picture>
 

@@ -601,6 +601,13 @@ using the previously deployed version until step 3. If Google asks for permissio
 *For developers:* change the TypeScript in `src/`, run `npm run build:gas`, and commit the new
 `apps-script/Code.js` with your change. CI fails if you forget.
 
+**Reports.** Board members get ready-made reports: trip balances, student funds, fundraiser totals,
+fund activity, payments, a roster with contact details, open items and app usage. In the spreadsheet
+they are under *TMA App → Reports*; each one goes into its own `Report: …` tab, rebuilt every time you
+run it. In the app they are under *Board tools → Reports*. If the *Reports* menu is missing after an
+update, save the new `Code.js` (step 2 above) and reload the spreadsheet. The app's Reports screen also
+needs step 3 (deploy a new version). What each report shows: [SHEET.md → Reports](SHEET.md#reports).
+
 ## 11. Troubleshooting
 
 **Notifications**

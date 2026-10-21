@@ -40,7 +40,11 @@ describe('SignIn', () => {
     );
     const { onSignedIn, user } = renderSignIn(api);
 
-    expect(screen.getByRole('img', { name: 'Timberlane Music Association' })).toBeInTheDocument();
+    // The logo, with a lighter version for the dark theme.
+    const logo = screen.getByRole('img', { name: 'Timberlane Music Association' });
+    expect(logo.getAttribute('src')).toMatch(/brand\/tma-logo-light\.webp$/);
+    expect(logo.previousElementSibling?.getAttribute('srcset')).toMatch(/brand\/tma-logo-dark\.webp$/);
+    expect(logo.previousElementSibling?.getAttribute('media')).toBe('(prefers-color-scheme: dark)');
     await user.type(screen.getByLabelText('Email address'), '  Parent@Example.COM ');
     await user.click(screen.getByRole('button', { name: 'Email me a code' }));
 

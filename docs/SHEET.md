@@ -8,7 +8,7 @@ This guide explains every tab and column, your day-to-day workflow, how to bring
 spreadsheet, and every setting.
 
 **Contents:** [Ground rules](#ground-rules) · [How balances are worked out](#how-balances-are-worked-out) ·
-[Everyday workflow](#everyday-workflow) · [The tabs](#the-tabs) · [Settings](#settings) ·
+[Everyday workflow](#everyday-workflow) · [Reports](#reports) · [The tabs](#the-tabs) · [Settings](#settings) ·
 [Hidden system tabs](#hidden-system-tabs) · [Importing the existing spreadsheet](#importing-the-existing-spreadsheet)
 
 ---
@@ -80,6 +80,38 @@ in the sheet, the app trusts you and posts the Ledger row as-is.
 
 You can make the app check the sheet right away with *TMA App → Run sync now*, or in the app with
 *Board tools → Sync with the spreadsheet → Run sync now*.
+
+## Reports
+
+Ready-made reports are in two places:
+
+* **In the spreadsheet:** *TMA App → Reports*, then pick one. It goes into its own tab, named
+  `Report: …` (for example `Report: Trip balances`). Run it again for fresh numbers.
+* **In the app:** *Board tools → Reports*. There you can also pick an activity, school, group or
+  dates, and download the report as a CSV file.
+
+The numbers are worked out the same way as everywhere else in the app, so they match what families see.
+"This school year" means July 1 to June 30.
+
+| Report | What it shows |
+| --- | --- |
+| **Trip balances** | Each student going on an open trip or activity who still owes money: cost, paid from activity funds, paid directly, pending, left to pay, due dates, and a status (*Owes*, *Deposit overdue* or *Past due*). Waitlisted students come after the others and are not in the totals. Withdrawn students are not listed. |
+| **Student funds** | Each active student's activity funds: earned, applied to trips, balance, requests waiting for approval, and available. |
+| **Fundraiser totals** | Money added to students' funds this school year, one line per fundraiser or donation (same Type and Description), with how many students got credit. |
+| **Fund activity** | Every Ledger row this school year, with the credits, debits and net at the bottom. |
+| **Payments** | Every Payments row this school year. The totals count only `Completed` payments. |
+| **Roster** | Each active student with grade, school, groups, instrument, and both parents' names, emails and phone numbers. **Keep it private.** When a board member opens it in the app, the Log tab notes who. |
+| **Open items** | What is waiting on you: fund requests to decide, new households and students to review, and payments still clearing. |
+| **App usage** | Counts only, no names: households signed up and verified, how many use the app, and how many get phone notifications, email or texts. |
+
+**About the `Report: …` tabs**
+
+* They are rebuilt every time you run the report. **Don't type in them.** Change the other tabs
+  instead; anything typed in a report tab is lost the next time.
+* Don't give your own tabs a name starting with `Report:`. Running a report with that name replaces the tab.
+* The app never reads them. The 15-minute sync and *Set up / repair tabs* leave them alone.
+* You can delete a report tab any time. It comes back the next time you run that report. Delete the
+  roster tab when you're done if other people can open the spreadsheet.
 
 ---
 
