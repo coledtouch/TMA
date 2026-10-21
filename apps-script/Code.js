@@ -4394,7 +4394,9 @@ var TMA = (() => {
     "admin.decideRedemption": { admin: true, write: true, run: decideRedemption },
     "admin.reviewHousehold": { admin: true, write: true, run: reviewHousehold },
     "admin.announce": { admin: true, write: true, run: announce },
-    "admin.runSync": { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) }
+    "admin.runSync": { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
+    // Placeholder until src/server/reports.ts lands.
+    "admin.report": { admin: true, run: () => fail("NOT_CONFIGURED", "Reports are not available yet.") }
   };
   var GENERIC_ERROR = "Something went wrong. Please try again.";
   function dispatch(services, request) {
