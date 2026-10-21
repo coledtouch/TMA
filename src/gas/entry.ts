@@ -248,14 +248,15 @@ export function sendTestPushToMe(): SelfTestReport {
 /** Menu: configuration overview. Lists secret *names* only, never values. */
 export function showTmaStatus(): string {
   const services = createGasServices();
-  const url = safely(() => ScriptApp.getService().getUrl(), '');
   const handlers = safely(() => ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()), [] as string[]);
   const present = SECRET_NAMES.filter((name) => services.secrets.get(name) !== null);
   const missing = SECRET_NAMES.filter((name) => !present.includes(name));
   const yes = (on: boolean) => (on ? 'on' : 'off');
 
   const lines = [
-    `Web app URL: ${url || 'not deployed yet (Deploy → New deployment → Web app)'}`,
+    // ScriptApp.getService().getUrl() reports the editor's test deployment, not the
+    // live one, so point to where the real /exec URL is listed instead.
+    'Web app URL: Deploy → Manage deployments → Web app (the URL ending in /exec)',
     `App link (Settings APP_URL): ${services.setting('APP_URL') || 'not set'}`,
     `Schedules: sync every 15 min ${handlers.includes('syncTick') ? '✓' : '✗'}, daily reminders ${handlers.includes('dailyTick') ? '✓' : '✗'}${
       SCHEDULED_HANDLERS.every((h) => handlers.includes(h)) ? '' : ' (TMA App → Install schedules)'
