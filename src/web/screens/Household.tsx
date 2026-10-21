@@ -293,7 +293,7 @@ function HouseholdForm() {
                 ])
               }
             >
-              <Icon name="plus" /> Add a second parent or guardian
+              <Icon name="plus" /> Add a parent or guardian
             </button>
           ) : null}
         </fieldset>
@@ -346,7 +346,7 @@ function HouseholdForm() {
                   </div>
                 </div>
                 {nameLocked ? <p className="field-hint">To change a verified student's name, contact TMA.</p> : null}
-                <div className="field-row">
+                <div className="field-row field-row-wide">
                   <div data-field={`s${i}.grade`}>
                     <SelectField
                       label="Grade"

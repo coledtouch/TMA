@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check for the Cloudflare secrets
         id: secrets
@@ -53,7 +53,7 @@ jobs:
           fi
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -65,10 +65,10 @@ jobs:
         run: npm ci
 
       - name: Test the Worker
-        run: npx vitest run --config workers/push/vitest.config.ts
+        run: npm run test:worker
 
       - name: Typecheck the Worker
-        run: npx tsc -p workers/push/tsconfig.json
+        run: npx tsc -p workers/push/tsconfig.json --noEmit
 
       # Installs the pinned Wrangler from workers/push/package-lock.json, so
       # wrangler-action finds it and does not install one itself.
@@ -79,7 +79,7 @@ jobs:
       - name: Deploy to Cloudflare
         id: deploy
         if: steps.secrets.outputs.deploy == 'true'
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

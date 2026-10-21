@@ -79,7 +79,7 @@ apps-script/  Code.js (generated, committed so volunteers can copy/paste), appss
 workers/push/ Cloudflare Worker that delivers Web Push (own package.json, tests, wrangler.toml)
 scripts/      build-gas.mjs, make-icons.mjs
 docs/         this spec, SETUP, SHEET, PAYMENTS, BOARD-FAQ
-e2e/          Playwright smoke test of demo mode
+e2e/          Playwright tests (demo, demo inside a live build) and README screenshots
 ```
 
 ## 3. Sheet ↔ domain mapping rules (src/server/data.ts)
@@ -413,7 +413,8 @@ service-account key. The full reference is `workers/push/README.md`.
 * Endpoint allowlist (an SSRF guard): `https://` on the default port, host `fcm.googleapis.com` (Chrome,
   Edge, Android), `updates.push.services.mozilla.com` (Firefox), `web.push.apple.com` (Safari and
   iPhone/iPad Home Screen apps), or a host ending in `.push.apple.com` or `.notify.windows.com`. The same
-  list is copied in `src/server/push-subscription.ts` and `src/web/lib/push.ts`: **change all three together.**
+  list is copied in `src/server/push-subscription.ts` and `src/web/lib/push.ts`: **change all three together**
+  (`src/web/lib/push-contract.test.ts` fails when they disagree).
 * KV namespace `TMA_PUSH` holds only `vapid:v1` (the key pair) and `relay:secret-sha256` (hex SHA-256
   of the registered secret, compared in constant time). No subscriptions, payloads or family data are
   stored. Logs show only the push service host and status.
@@ -639,12 +640,20 @@ export function PayPalCheckout(props: {
   script, no service calls at load time, every entry point) and drives it end to end against those fakes,
   including setup linking the Worker, `push.register` and a sync push; it is skipped until
   `npm run build:gas` has run.
-* `workers/push`: its own Vitest config, run by the Worker's deploy workflow (not by `npm test`):
-  `npx vitest run --config workers/push/vitest.config.ts`. It checks the RFC 8291 Appendix A vector
+* `workers/push`: its own Vitest config (`workers/push/vitest.config.ts`), run by `npm test` after the
+  app's tests, by `npm run test:worker` alone, and by the Worker's deploy workflow; `npm run typecheck`
+  includes `workers/push/tsconfig.json`. It checks the RFC 8291 Appendix A vector
   byte for byte, decrypts real output with an independent receiver, verifies the VAPID JWT signature,
   and drives every endpoint against an in-memory KV with a mocked `fetch`.
 * `src/demo/flow.test.ts`: the board walkthrough through the demo client (parent requests funds and pays,
   treasurer approves and verifies a household, announces, posts a credit → `tma:push` to the parent).
 * `src/web`: Vitest + Testing Library in jsdom (`// @vitest-environment jsdom` docblock).
-* `e2e/`: Playwright against `vite preview` in demo mode at a 390×844 viewport: sign in as a parent, see
-  balances, request funds, pay online (demo), sign in as treasurer, approve, check the balance notification.
+* `e2e/` (Playwright, 390×844 viewport, `npm run e2e` after `npm run build:web`):
+  * `demo.spec.ts` against `vite preview` of `dist/` (demo build): sign in as a parent, see balances,
+    request funds, pay online (demo), sign in as treasurer, approve, check the balance notification.
+  * `live-demo.spec.ts` against a live build that `playwright.config.ts` makes in `dist-live/` with
+    `VITE_API_URL=https://example.invalid/exec`: the live sign-in, `?demo` (address tidied, route kept,
+    remembered across a reload), the demo strip, **Exit demo**, *See a demo with sample data*, `?demo=0`,
+    separate `tma.session` / `tma.demo.session`, and no request ever reaching the backend address.
+  * `screenshots.spec.ts` (`npm run screenshots`, not part of `npm run e2e`): the README images in
+    `docs/screenshots/`, light theme plus a dark Home.

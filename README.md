@@ -76,15 +76,19 @@ Demo data is saved in your browser, so you can come back to it later.
 
 ## Screenshots
 
-| Home | Trips | Pay online |
+| Home | Activity funds | Trips |
 | --- | --- | --- |
-| ![Home screen with students' activity-fund balances](docs/screenshots/home.png) | ![Trips screen with cost, paid and remaining](docs/screenshots/trips.png) | ![Paying online with PayPal](docs/screenshots/pay.png) |
+| ![Home screen with each student's available activity funds](docs/screenshots/home.png) | ![Activity funds: balance, pending requests and history](docs/screenshots/funds.png) | ![Trips screen with cost, paid and left to pay](docs/screenshots/trips.png) |
 
-| Notifications | Board tools | Sign in |
+| Pay online | News & events | Notifications |
 | --- | --- | --- |
-| ![Choosing notifications by school, group and topic](docs/screenshots/notifications.png) | ![Treasurer's approvals and announcements](docs/screenshots/admin.png) | ![Signing in with an email code](docs/screenshots/signin.png) |
+| ![Paying online with PayPal, with the optional fee contribution](docs/screenshots/pay.png) | ![Upcoming events and announcements](docs/screenshots/news.png) | ![Choosing notifications by school, group and topic](docs/screenshots/notifications.png) |
 
-The screenshots are taken from the demo by the end-to-end test.
+| Board tools | Sign in | Dark theme |
+| --- | --- | --- |
+| ![Treasurer's dashboard and fund requests to approve](docs/screenshots/admin.png) | ![Signing in with an email code, with the demo shortcuts](docs/screenshots/signin.png) | ![Home screen in the dark theme](docs/screenshots/home-dark.png) |
+
+The screenshots are taken from the demo at iPhone 13 size by `npm run screenshots`.
 
 ## What it costs
 
@@ -155,13 +159,14 @@ More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Start the app locally (demo mode unless `VITE_API_URL` is set in `.env.local`; see `.env.example`). |
-| `npm test` | Unit and integration tests (Vitest), including the demo walkthrough and, once `npm run build:gas` has run, checks of `apps-script/Code.js` itself. |
-| `npm run typecheck` | TypeScript checks for the web app, service worker, Apps Script code and configs. |
+| `npm test` | Unit and integration tests (Vitest), including the demo walkthrough and, once `npm run build:gas` has run, checks of `apps-script/Code.js` itself; then the Cloudflare Workers' tests (`workers/push`, `workers/app`). |
+| `npm run typecheck` | TypeScript checks for the web app, service worker, Apps Script code, configs and both Cloudflare Workers. |
 | `npm run build` | Typecheck, then build the web app into `dist/`. |
 | `npm run build:web` | Build the web app only. |
 | `npm run build:gas` | Bundle the backend into `apps-script/Code.js`. **Commit the result**: volunteers copy it into Apps Script, and CI fails if it is out of date. |
 | `npm run preview` | Serve the built `dist/` locally. |
-| `npm run e2e` | Playwright test of the demo at phone size; it also takes the screenshots. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
+| `npm run e2e` | Playwright tests at phone size: the demo walkthrough, and the demo inside a live build (`?demo`, Exit demo), which it builds into `dist-live/` itself. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
+| `npm run screenshots` | Retake the README screenshots in `docs/screenshots/` from the demo build (after `npm run build:web`). Look at them before committing. |
 | `npm run icons` | Regenerate the app icons (and the notification badge) from `public/brand/timberlane-shield-source.webp`. |
 
 The app connects to a real backend through one build-time variable, `VITE_API_URL` (the Apps Script
@@ -170,8 +175,8 @@ needs no build setting: the app gets the push Worker's public key from Apps Scri
 
 | Worker command (from the repo root) | What it does |
 | --- | --- |
-| `npx vitest run --config workers/push/vitest.config.ts` | Tests of the push Worker (not part of `npm test`). |
-| `npx tsc -p workers/push/tsconfig.json` | Typecheck of the push Worker. |
+| `npm run test:worker` | Only the push Worker's tests (`npm test` runs them too). |
+| `npx tsc -p workers/push/tsconfig.json --noEmit` | Only the push Worker's typecheck (`npm run typecheck` runs it too). |
 
 ### Project layout
 
@@ -186,7 +191,7 @@ workers/push/  the Cloudflare Worker that delivers push notifications (deployed 
 scripts/       build-gas.mjs, make-icons.mjs
 public/        logos and app icons
 docs/          setup, sheet, payments, board FAQ, architecture
-e2e/           Playwright smoke test of the demo
+e2e/           Playwright tests of the demo, and the README screenshots
 .github/       CI, the GitHub Pages deployment and the push Worker deployment
 ```
 

@@ -14,10 +14,12 @@
     "build:web": "vite build",
     "build:gas": "node scripts/build-gas.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.sw.json --noEmit && tsc -p tsconfig.gas.json --noEmit && tsc -p tsconfig.gas-test.json --noEmit && tsc -p tsconfig.node.json --noEmit",
-    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.sw.json --noEmit && tsc -p tsconfig.gas.json --noEmit && tsc -p tsconfig.gas-test.json --noEmit && tsc -p tsconfig.node.json --noEmit && tsc -p workers/push/tsconfig.json --noEmit && tsc -p workers/app/tsconfig.json --noEmit",
+    "test": "vitest run && vitest run --config workers/push/vitest.config.ts && vitest run --config workers/app/vitest.config.ts",
+    "test:worker": "vitest run --config workers/push/vitest.config.ts",
     "test:watch": "vitest",
-    "e2e": "playwright test",
+    "e2e": "playwright test --project=demo --project=live-build",
+    "screenshots": "playwright test --project=screenshots",
     "icons": "node scripts/make-icons.mjs"
   },
   "dependencies": {

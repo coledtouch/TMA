@@ -7,7 +7,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
 
 // Relative base so the same build works at https://<user>.github.io/<repo>/,
-// on Firebase Hosting, or at a custom domain root. Routing is hash-based.
+// on any other static host, or at a custom domain root. Routing is hash-based.
 export default defineConfig({
   base: './',
   define: {

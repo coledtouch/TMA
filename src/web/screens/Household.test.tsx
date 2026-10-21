@@ -85,7 +85,7 @@ describe('Household', () => {
     renderScreen(<Household />, { api, data: newFamilyData() });
     const user = userEvent.setup();
 
-    await user.click(screen.getByRole('button', { name: /Add a second parent/ }));
+    await user.click(screen.getByRole('button', { name: /Add a parent or guardian/ }));
     expect(screen.getAllByLabelText('Email')).toHaveLength(2);
     expect(screen.getAllByLabelText('Email')[1]).not.toHaveAttribute('readonly');
     await user.click(screen.getAllByRole('button', { name: 'Remove' })[0]);

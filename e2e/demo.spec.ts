@@ -1,29 +1,20 @@
 /**
  * Smoke test of the demo build at phone size (ARCHITECTURE.md §11): a parent
  * asks to use activity funds and pays online, the treasurer approves and posts
- * a fundraiser credit, and the parent's "phone" gets the notification. It also
- * refreshes the README screenshots in docs/screenshots.
+ * a fundraiser credit, and the parent's "phone" gets the notification.
+ * (The README screenshots come from screenshots.spec.ts: `npm run screenshots`.)
  *
  * Run `npm run build:web` first; playwright.config.ts serves dist with vite preview.
  */
 import { expect, test, type Page } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
-const SHOTS = fileURLToPath(new URL('../docs/screenshots/', import.meta.url));
-mkdirSync(SHOTS, { recursive: true });
 
 test.use({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, contextOptions: { reducedMotion: 'reduce' } });
-
-async function shot(page: Page, name: string): Promise<void> {
-  await page.screenshot({ path: `${SHOTS}${name}.png`, animations: 'disabled' });
-}
 
 async function tab(page: Page, name: 'Home' | 'Funds' | 'Trips' | 'News' | 'More'): Promise<void> {
   await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name }).click();
 }
 
-/** Dismiss toasts and in-app push banners (keeps screenshots and later assertions clear). */
+/** Dismiss toasts and in-app push banners (keeps later assertions clear). */
 async function clearMessages(page: Page): Promise<void> {
   const dismissers = page
     .getByRole('button', { name: 'Dismiss message' })
@@ -47,18 +38,15 @@ test('parent pays and redeems, treasurer approves, parent is notified', async ({
   // --- Sign in as a parent -----------------------------------------------------
   await page.goto('./');
   await expect(page.getByRole('button', { name: /Try as a parent/ })).toBeVisible();
-  await shot(page, 'signin');
 
   await page.getByRole('button', { name: /Try as a parent/ }).click();
   await expect(page.getByText('Available activity funds').first()).toBeVisible();
   await expect(page.getByText('$440.00').first()).toBeVisible(); // Avery: $640 − $200 pending
-  await shot(page, 'home');
 
   // --- Ask to use $100 of Avery's funds for Florida ----------------------------
   await tab(page, 'Trips');
   const useFunds = page.getByRole('button', { name: 'Use activity funds' }).first();
   await expect(useFunds).toBeVisible();
-  await shot(page, 'trips');
 
   await useFunds.click();
   let dialog = page.getByRole('dialog');
@@ -74,17 +62,14 @@ test('parent pays and redeems, treasurer approves, parent is notified', async ({
   await dialog.getByLabel('Amount to pay').fill('250.00');
   const paypal = dialog.getByRole('button', { name: 'PayPal (Demo)' });
   await expect(paypal).toBeEnabled();
-  await shot(page, 'pay');
   await paypal.click();
   await expect(page.getByText(/Payment received – thank you! \$250\.00/)).toBeVisible();
   // The demo also "sends" the payment notification to this phone.
   await expect(page.locator('.push-banner').filter({ hasText: 'Payment received' })).toBeVisible();
   await clearMessages(page);
 
-  // Choosing notifications (for the README).
   await page.goto('./#/notifications');
   await expect(page.getByRole('heading', { name: 'Notifications', level: 1 })).toBeVisible();
-  await shot(page, 'notifications');
 
   // --- Treasurer approves the request and posts a fundraiser credit ------------
   await signOut(page);
@@ -92,7 +77,6 @@ test('parent pays and redeems, treasurer approves, parent is notified', async ({
   await page.goto('./#/admin');
   const approve = page.getByRole('button', { name: 'Approve $100.00' });
   await expect(approve).toBeVisible();
-  await shot(page, 'admin');
   await approve.click();
   await expect(page.getByText(/Approved \$100\.00 for Avery/)).toBeVisible();
 
