@@ -142,14 +142,14 @@ More detail: [docs/BOARD-FAQ.md](docs/BOARD-FAQ.md).
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Start the app locally (demo mode unless `VITE_API_URL` is set in `.env.local`; see `.env.example`). |
-| `npm test` | Unit tests (Vitest). |
+| `npm test` | Unit and integration tests (Vitest), including the demo walkthrough and, once `npm run build:gas` has run, checks of `apps-script/Code.js` itself. |
 | `npm run typecheck` | TypeScript checks for the web app, service worker, Apps Script code and configs. |
 | `npm run build` | Typecheck, then build the web app into `dist/`. |
 | `npm run build:web` | Build the web app only. |
 | `npm run build:gas` | Bundle the backend into `apps-script/Code.js`. **Commit the result**: volunteers copy it into Apps Script, and CI fails if it is out of date. |
 | `npm run preview` | Serve the built `dist/` locally. |
 | `npm run e2e` | Playwright test of the demo at phone size; it also takes the screenshots. Run `npm run build:web` first. The first time, install a browser with `npx playwright install chromium`. |
-| `npm run icons` | Regenerate the app icons from `public/brand/timberlane-shield-source.webp`. |
+| `npm run icons` | Regenerate the app icons (and the notification badge) from `public/brand/timberlane-shield-source.webp`. |
 
 The app connects to a real backend through three build-time variables (`VITE_API_URL`,
 `VITE_FIREBASE_CONFIG`, `VITE_FIREBASE_VAPID_KEY`). With none set, it is the demo.

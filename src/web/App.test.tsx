@@ -179,6 +179,21 @@ describe('App', () => {
     expect(window.location.hash).toBe('#/');
   });
 
+  it("clears the last person's messages on sign-out (shared phones)", async () => {
+    window.location.hash = '#/notifications';
+    const { user } = renderApp({
+      'me.bootstrap': () => makeBootstrap(),
+      'prefs.save': (p) => ({ prefs: p.prefs }),
+    });
+    await user.click(await screen.findByRole('button', { name: 'Save notification settings' }));
+    expect(await screen.findByText('Notification settings saved.')).toBeInTheDocument();
+
+    await user.click(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'More' }));
+    await user.click(await screen.findByRole('button', { name: /Sign out/ }));
+    expect(await screen.findByLabelText('Email address')).toBeInTheDocument();
+    expect(screen.queryByText('Notification settings saved.')).not.toBeInTheDocument();
+  });
+
   it('offers to reload when a new version is ready', async () => {
     renderApp({}, null);
     act(() => {

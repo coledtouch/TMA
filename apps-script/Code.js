@@ -3991,14 +3991,10 @@ var TMA = (() => {
           amount: { ...usd(input.grossCents), breakdown: { item_total: usd(input.grossCents) } }
         }
       ],
-      payment_source: {
-        paypal: {
-          experience_context: {
-            brand_name: clip(input.brandName, 127),
-            shipping_preference: "NO_SHIPPING",
-            user_action: "PAY_NOW"
-          }
-        }
+      application_context: {
+        brand_name: clip(input.brandName, 127),
+        shipping_preference: "NO_SHIPPING",
+        user_action: "PAY_NOW"
       }
     };
   }

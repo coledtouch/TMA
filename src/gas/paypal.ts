@@ -63,7 +63,14 @@ export function parseAmount(value: unknown): number | undefined {
   return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
 }
 
-/** Orders v2 create body (see docs/ARCHITECTURE.md §9). */
+/**
+ * Orders v2 create body (see docs/ARCHITECTURE.md §9).
+ *
+ * No `payment_source`: the payer picks PayPal, Venmo or a card on the JS SDK
+ * buttons *after* the order exists, and a payment_source fixed here (e.g.
+ * `paypal`) may not match the button they press. `application_context` sets the
+ * same brand/shipping/pay-now options for every funding source.
+ */
 export function buildOrderBody(input: CreateOrderInput): Record<string, unknown> {
   const usd = (cents: number) => ({ currency_code: 'USD', value: formatAmount(cents) });
   const items: Array<Record<string, unknown>> = [
@@ -81,14 +88,10 @@ export function buildOrderBody(input: CreateOrderInput): Record<string, unknown>
         amount: { ...usd(input.grossCents), breakdown: { item_total: usd(input.grossCents) } },
       },
     ],
-    payment_source: {
-      paypal: {
-        experience_context: {
-          brand_name: clip(input.brandName, 127),
-          shipping_preference: 'NO_SHIPPING',
-          user_action: 'PAY_NOW',
-        },
-      },
+    application_context: {
+      brand_name: clip(input.brandName, 127),
+      shipping_preference: 'NO_SHIPPING',
+      user_action: 'PAY_NOW',
     },
   };
 }

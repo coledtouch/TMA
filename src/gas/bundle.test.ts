@@ -62,6 +62,10 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
     expect(code).not.toMatch(/(^|[^.\w$])fetch\s*\(/m);
     expect(code).not.toMatch(/\b(?:window|document|localStorage|navigator|process)\.\w/);
     expect(code).not.toMatch(/\brequire\s*\(/);
+    // Web/Node globals the Apps Script V8 runtime doesn't have (Utilities replaces most of them).
+    expect(code).not.toMatch(
+      /\bnew URL\(|\bURLSearchParams\b|\bTextEncoder\b|\bTextDecoder\b|\batob\(|\bbtoa\(|\bsetTimeout\(|\bsetInterval\(|\bstructuredClone\(|\bqueueMicrotask\(|\bcrypto\.(?:randomUUID|getRandomValues|subtle)\b|\bBuffer\./,
+    );
     // The test-only in-memory services must never ship.
     expect(code).not.toContain('createMemoryServices');
     // Literal U+2028/U+2029 would end a line inside a string or regex in older parsers.

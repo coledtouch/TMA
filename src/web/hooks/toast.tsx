@@ -17,9 +17,15 @@ interface ToastItem {
 export type ShowToast = (message: string, tone?: ToastTone) => void;
 
 const ToastContext = createContext<ShowToast>(() => {});
+const ClearToastsContext = createContext<() => void>(() => {});
 
 export function useToast(): ShowToast {
   return useContext(ToastContext);
+}
+
+/** Remove every visible toast (on sign-out, so the next person on a shared phone sees none of them). */
+export function useClearToasts(): () => void {
+  return useContext(ClearToastsContext);
 }
 
 const DURATION_MS: Record<ToastTone, number> = { success: 4500, info: 5000, error: 8000 };
@@ -49,6 +55,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [remove],
   );
 
+  const clear = useCallback(() => {
+    for (const timer of timers.current.values()) clearTimeout(timer);
+    timers.current.clear();
+    setItems([]);
+  }, []);
+
   useEffect(() => {
     const map = timers.current;
     return () => {
@@ -72,8 +84,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   return (
     <ToastContext.Provider value={show}>
-      {children}
-      {typeof document === 'undefined' ? region : createPortal(region, document.body)}
+      <ClearToastsContext.Provider value={clear}>
+        {children}
+        {typeof document === 'undefined' ? region : createPortal(region, document.body)}
+      </ClearToastsContext.Provider>
     </ToastContext.Provider>
   );
 }

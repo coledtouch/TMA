@@ -100,7 +100,7 @@ describe('helpers', () => {
 });
 
 describe('buildOrderBody', () => {
-  it('has one purchase unit with items, breakdown and the PayPal experience context', () => {
+  it('has one purchase unit with items, breakdown and a context that suits every funding source', () => {
     expect(buildOrderBody(ORDER)).toEqual({
       intent: 'CAPTURE',
       purchase_units: [
@@ -119,16 +119,14 @@ describe('buildOrderBody', () => {
           },
         },
       ],
-      payment_source: {
-        paypal: {
-          experience_context: {
-            brand_name: 'Timberlane Music Association',
-            shipping_preference: 'NO_SHIPPING',
-            user_action: 'PAY_NOW',
-          },
-        },
+      application_context: {
+        brand_name: 'Timberlane Music Association',
+        shipping_preference: 'NO_SHIPPING',
+        user_action: 'PAY_NOW',
       },
     });
+    // A fixed payment_source could contradict the Venmo or card button the payer picks.
+    expect(buildOrderBody(ORDER)).not.toHaveProperty('payment_source');
   });
 
   it('omits the fee item when no fee is covered and clips long text to PayPal limits', () => {

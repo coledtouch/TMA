@@ -10,7 +10,7 @@ import { PushBanner } from './components/PushBanner';
 import { ErrorState, SkeletonCards } from './components/States';
 import { UpdateBanner } from './components/UpdateBanner';
 import { AppContext, type AppContextValue } from './hooks/app-context';
-import { ToastProvider, useToast } from './hooks/toast';
+import { ToastProvider, useClearToasts, useToast } from './hooks/toast';
 import { clearCachedBootstrap, useBootstrap } from './hooks/useBootstrap';
 import { useSession, type Session } from './hooks/useSession';
 import { formatDateTime } from './lib/format';
@@ -82,6 +82,7 @@ function Screen({ route }: { route: Route }) {
 
 function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
   const toast = useToast();
+  const clearToasts = useClearToasts();
   const route = useRoute();
   const endedRef = useRef(false);
 
@@ -89,9 +90,10 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
     if (endedRef.current) return;
     endedRef.current = true;
     clearCachedBootstrap(session.email);
+    clearToasts();
     session.end();
     toast('Your sign-in expired. Please sign in again.', 'info');
-  }, [session, toast]);
+  }, [session, toast, clearToasts]);
 
   const boot = useBootstrap(api, session.email, onUnauthorized);
   const guardedApi = useMemo(() => withAuthGuard(api, onUnauthorized), [api, onUnauthorized]);
@@ -114,9 +116,10 @@ function SignedIn({ api, session }: { api: ApiClient; session: Session }) {
     endedRef.current = true;
     clearCachedBootstrap(session.email);
     if (boot.data && boot.data.me.email !== session.email) clearCachedBootstrap(boot.data.me.email);
+    clearToasts(); // they can name this household's students
     session.end();
     navigate('home');
-  }, [api, boot.data, session]);
+  }, [api, boot.data, session, clearToasts]);
 
   const { refresh, replace, patch } = boot;
   const context = useMemo<AppContextValue | null>(

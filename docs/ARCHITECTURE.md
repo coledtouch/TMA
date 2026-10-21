@@ -197,8 +197,9 @@ the first names match exactly (or 0.2 if one is a prefix of the other, e.g. "Ale
   receives everything; otherwise, if both audience lists are non-empty the recipient needs a match in each.
   If one audience list is empty, a match on the other suffices.
 * channels: push → every device token for that email (if `push.enabled()`); delete tokens that
-  return `invalid`. email → if `EMAIL_ENABLED` and `mailer.remainingQuota() > 0`; skip with a log
-  when out of quota. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
+  return `invalid`. email → if `EMAIL_ENABLED` and `mailer.remainingQuota()` is above the 20 recipients
+  kept back for sign-in codes (`SIGN_IN_EMAIL_RESERVE`; codes and notifications share one quota); skip
+  with a log otherwise. sms → if `SMS_ENABLED`, `sms.enabled()`, and prefs.smsPhone.
   Admin-chosen channels further restrict announcements.
 * Each delivery batch is logged in `Log` (kind `notify`, detail "topic: title → push n, email n, sms n").
 * Email: HTML with a maroon header bar showing the org name, the body paragraphs, a button "Open the TMA app"
@@ -307,8 +308,9 @@ Return the `SetupReport`.
   cached ~8 h in CacheService, base `https://api-m.sandbox.paypal.com` or `https://api-m.paypal.com` per
   PAYPAL_ENV. Create order: intent CAPTURE; one purchase unit with reference_id, custom_id,
   description, items [trip payment, + "Optional processing-fee contribution" when fee>0], amount with breakdown
-  item_total; `payment_source.paypal.experience_context` {brand_name, shipping_preference
-  NO_SHIPPING, user_action PAY_NOW}. Capture: POST `/v2/checkout/orders/{id}/capture` with header
+  item_total; `application_context` {brand_name, shipping_preference NO_SHIPPING, user_action PAY_NOW}
+  and **no** `payment_source` (the payer chooses PayPal, Venmo or a card on the buttons after the order
+  exists, so a fixed `payment_source.paypal` could contradict the button they press). Capture: POST `/v2/checkout/orders/{id}/capture` with header
   `PayPal-Request-Id`. Parse `purchase_units[0].payments.captures[0]`. Enabled when PAYPAL_CLIENT_ID (Settings) and
   PAYPAL_SECRET (Script Properties) are set.
 * FCM sender: service-account JSON from Script Properties `FCM_SERVICE_ACCOUNT`; RS256 JWT signed with
@@ -324,7 +326,8 @@ Return the `SetupReport`.
   syncTick every 15 min and dailyTick at 8 AM.
 * `appsscript.json`: timeZone `America/New_York`, runtime V8, webapp {executeAs USER_DEPLOYING,
   access ANYONE_ANONYMOUS}, oauthScopes (least privilege): `spreadsheets.currentonly`,
-  `script.container.ui`, `script.send_mail`, `script.external_request`, `script.scriptapp`.
+  `script.container.ui`, `script.send_mail`, `script.external_request`, `script.scriptapp`, and
+  `userinfo.email` (the menu's "Send me a test notification" needs `Session.getActiveUser().getEmail()`).
 
 ## 10. Browser app (src/web)
 
@@ -343,6 +346,10 @@ export interface ApiClient {
 }
 export function createLiveClient(apiUrl: string): ApiClient;       // fetch POST text/plain, 30 s timeout
 export function createApiClient(): ApiClient;  // VITE_API_URL ? live : demo (lazy import of src/demo)
+// The demo client is created on first use, so createApiClient() returns ApiClient & { loadDemo(): Promise<DemoControls> }
+// in demo mode; UI code reaches the controls through getDemoControls(api) (null in live mode).
+export function getDemoControls(api: ApiClient): Promise<DemoControls | null>;
+export function withAuthGuard<T extends ApiClient>(api: T, onUnauthorized: () => void): T; // UNAUTHORIZED → sign out
 
 // src/demo/index.ts
 export interface DemoControls {
@@ -352,20 +359,25 @@ export interface DemoControls {
   reset(): void;                        // restore sample data
 }
 export interface DemoOutboxItem { at: string; channel: 'push'|'email'|'sms'; to: string; title: string; body: string }
-export function createDemoClient(): ApiClient & { demo: DemoControls };
+export function createDemoClient(options?: { latencyMs?: [number, number]; now?: () => Date; exposeGlobal?: boolean }):
+  ApiClient & { demo: DemoControls };   // also sets window.__tmaDemo = DemoControls (e2e)
 // Demo push: the PushSender fake dispatches window event 'tma:push' (detail: PushMessage) and, when
 // Notification.permission === 'granted', shows a real notification through the SW registration.
 
 // src/web/lib/push.ts
 export type PushSupport = 'ready' | 'enabled' | 'needs-install' | 'blocked' | 'unsupported' | 'not-configured';
-export function getPushSupport(): Promise<PushSupport>;
+export function getPushSupport(options?: { mode?: 'demo' | 'live' }): Promise<PushSupport>; // demo: always ready/enabled
 export function enablePush(api: ApiClient): Promise<{ ok: true } | { ok: false; reason: string }>;
 export function disablePush(api: ApiClient): Promise<void>;
+export function refreshPushRegistration(api: ApiClient): Promise<void>; // on signed-in start; never throws
 export function isIos(): boolean;
 export function isStandalone(): boolean;
 
 // src/web/lib/install.ts
-export function useInstallPrompt(): { canPrompt: boolean; installed: boolean; showIosHint: boolean; prompt(): Promise<void> };
+export function useInstallPrompt(): {
+  canPrompt: boolean; installed: boolean; showIosHint: boolean; prompt(): Promise<void>;
+  inAppBrowser: boolean;  // Facebook/Instagram/etc. in-app browser: suggest opening in Safari/Chrome
+};
 
 // src/web/lib/sw-register.ts
 export function registerServiceWorker(): void;     // virtual:pwa-register; exposes update banner via event 'tma:sw-update'
@@ -446,7 +458,11 @@ export function PayPalCheckout(props: {
   `src/server/memory.ts` (MemoryStore, fake cache with injectable clock, deterministic crypto, outbox
   recorders for mail/sms/push, a fake PaymentGateway).
 * `src/gas`: Vitest with hand-written mocks of SpreadsheetApp/Utilities/UrlFetchApp/etc. (headers, aliasing,
-  JWT shape, PayPal request bodies, FCM payloads).
+  JWT shape, PayPal request bodies, FCM payloads). `src/gas/bundle.test.ts` checks the generated
+  `apps-script/Code.js` itself (plain script, no service calls at load time, every entry point) and drives
+  it end to end against those fakes; it is skipped until `npm run build:gas` has run.
+* `src/demo/flow.test.ts`: the board walkthrough through the demo client (parent requests funds and pays,
+  treasurer approves and verifies a household, announces, posts a credit → `tma:push` to the parent).
 * `src/web`: Vitest + Testing Library in jsdom (`// @vitest-environment jsdom` docblock).
 * `e2e/`: Playwright against `vite preview` in demo mode at a 390×844 viewport: sign in as a parent, see
   balances, request funds, pay online (demo), sign in as treasurer, approve, check the balance notification.
