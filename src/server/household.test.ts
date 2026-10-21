@@ -85,6 +85,16 @@ describe('household.save: sign-up', () => {
     expect(h.rows('Families')).toHaveLength(3);
   });
 
+  it('makes the person signing up the first guardian', () => {
+    const h = harness();
+    h.ok(
+      'household.save',
+      { guardians: [{ name: 'Alex Rivera', email: 'alex.rivera@example.org' }, { name: 'Sam Rivera', email: NEW_PARENT }], students: [] },
+      h.signIn(NEW_PARENT),
+    );
+    expect(h.rows('Families').pop()).toMatchObject({ Email: NEW_PARENT, 'Parent 2 Email': 'alex.rivera@example.org' });
+  });
+
   it('allows a household with no students yet', () => {
     const h = harness();
     const b = h.ok('household.save', { guardians: [{ name: 'Sam Rivera', email: NEW_PARENT }], students: [] }, h.signIn(NEW_PARENT));

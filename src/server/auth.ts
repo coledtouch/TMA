@@ -52,7 +52,9 @@ function readOtp(raw: string | null): OtpEntry | null {
 export function requestCode(ctx: Ctx, params: v.Params): { sent: true; devCode?: string } {
   const email = v.email(params.email);
   const secret = requireSecret(ctx);
-  rateLimit(ctx, `otp-rl:${email}`, CODES_PER_HOUR, 3600, 'Too many codes requested for this email. Please wait an hour and try again.');
+  // The demo signs in with one tap over and over; the real limit only matters when email is sent.
+  const perHour = ctx.s.mode === 'demo' ? 100 : CODES_PER_HOUR;
+  rateLimit(ctx, `otp-rl:${email}`, perHour, 3600, 'Too many codes requested for this email. Please wait an hour and try again.');
 
   const code = ctx.s.crypto.randomDigits(6);
   if (!/^\d{6}$/.test(code)) throw new Error('randomDigits returned an invalid code');

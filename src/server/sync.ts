@@ -4,7 +4,6 @@
  */
 import { centsToDollars } from '../shared/money';
 import type { TickReport } from '../shared/types';
-import { newAnnouncementId } from './admin';
 import type { Ctx } from './context';
 import { announcementNotice, creditNotice, debitNotice, eventTomorrowNotice, paymentReminderNotice } from './messages';
 import { addCounts, allRecipients, deliver, notifyFamily, zeroCounts } from './notify';
@@ -106,32 +105,35 @@ function detectBalanceChanges(ctx: Ctx, report: TickReport): void {
   }
 
   let changed = false;
+  const alerts: Array<{ studentId: string; delta: number; balance: number }> = [];
   current.forEach((cur, key) => {
     const before = snapshot.get(key);
     const delta = cur.cents - (before ? before.balanceCents : 0);
-    if (!before && cur.cents === 0) return;
-    if (delta === 0) {
-      if (!before) changed = true;
-      return;
-    }
+    // A student missing from the snapshot counts as a previous balance of 0.
+    if (delta === 0) return;
     changed = true;
     report.balanceChanges++;
-    const student = ctx.m.studentById(cur.studentId);
-    if (!student || !ctx.m.isVerified(student)) return;
-    try {
-      const notice =
-        delta > 0
-          ? creditNotice(student.firstName, delta, cur.cents, student.id)
-          : debitNotice(student.firstName, delta, cur.cents, student.id);
-      addCounts(report.notifications, notifyFamily(ctx, ctx.m.familyById(student.familyId), notice));
-    } catch (err) {
-      recordError(ctx, report, `balance ${student.id}`, err);
-    }
+    alerts.push({ studentId: cur.studentId, delta, balance: cur.cents });
   });
   snapshot.forEach((_, key) => {
     if (!current.has(key)) changed = true;
   });
+  // Save first: a family should never get the same alert twice.
   if (changed) ctx.db.overwrite('_Snapshot', rows());
+
+  for (const alert of alerts) {
+    const student = ctx.m.studentById(alert.studentId);
+    if (!student || !ctx.m.isVerified(student)) continue;
+    try {
+      const notice =
+        alert.delta > 0
+          ? creditNotice(student.firstName, alert.delta, alert.balance, student.id)
+          : debitNotice(student.firstName, alert.delta, alert.balance, student.id);
+      addCounts(report.notifications, notifyFamily(ctx, ctx.m.familyById(student.familyId), notice));
+    } catch (err) {
+      recordError(ctx, report, `balance ${student.id}`, err);
+    }
+  }
 }
 
 /** 3. Announcements typed into the sheet with a blank Sent (and Date blank or due). */
@@ -141,13 +143,9 @@ function sendQueuedAnnouncements(ctx: Ctx, report: TickReport): void {
   const recipients = allRecipients(ctx);
   for (const a of queued) {
     try {
-      const id = a.storedId || newAnnouncementId(ctx);
-      const patch: RowData = { Sent: ctx.now };
-      if (!a.storedId) patch.ID = id;
-      if (!a.date) patch.Date = ctx.today;
-      // Mark first: at most once, even if delivery fails halfway.
-      ctx.db.update('Announcements', a.row, patch);
-      const counts = deliver(ctx, recipients, announcementNotice({ ...a, id }));
+      // Only Sent is written to this treasurer tab; mark first so it goes out at most once.
+      ctx.db.update('Announcements', a.row, { Sent: ctx.now });
+      const counts = deliver(ctx, recipients, announcementNotice(a));
       addCounts(report.notifications, counts);
       report.announcementsSent++;
     } catch (err) {

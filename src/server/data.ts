@@ -138,9 +138,9 @@ export function enrollmentStatus(value: unknown): EnrollmentStatus {
 
 export function activityKind(value: unknown): ActivityKind {
   const s = lettersOnly(str(value));
-  if (s.startsWith('trip') || s === 'travel') return 'Trip';
-  if (s.startsWith('lesson')) return 'Lessons';
-  if (s.startsWith('camp')) return 'Camp';
+  if (s.includes('trip') || s === 'travel') return 'Trip';
+  if (s.includes('lesson')) return 'Lessons';
+  if (s.includes('camp')) return 'Camp';
   return 'Other';
 }
 
@@ -651,10 +651,18 @@ export class Model {
 
   /** Students linked to a family (Inactive ones only when asked). */
   studentsOfFamily(familyId: string, includeInactive = false): StudentRec[] {
-    const key = idKey(familyId);
-    return this.students().filter(
-      (s) => s.familyId !== null && idKey(s.familyId) === key && (includeInactive || s.status !== 'Inactive'),
-    );
+    const byFamily = this.memo('studentsByFamily', PEOPLE, () => {
+      const index = new Map<string, StudentRec[]>();
+      for (const s of this.students()) {
+        if (s.familyId === null) continue;
+        const list = index.get(idKey(s.familyId)) ?? [];
+        list.push(s);
+        index.set(idKey(s.familyId), list);
+      }
+      return index;
+    });
+    const all = byFamily.get(idKey(familyId)) ?? [];
+    return includeInactive ? all.slice() : all.filter((s) => s.status !== 'Inactive');
   }
 
   /** Verified = family Active and student Active (money is only shown/notified then). */

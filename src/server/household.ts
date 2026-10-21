@@ -116,17 +116,18 @@ export function saveHousehold(ctx: Ctx, email: string, params: v.Params): Bootst
     badRequest('Your own email must be one of the guardians.');
   }
   const family = ctx.m.familyForEmail(email);
-  if (!family) createHousehold(ctx, input);
+  if (!family) createHousehold(ctx, email, input);
   else if (family.status === 'Inactive') forbidden('This household is inactive. Please contact TMA.');
   else updateHousehold(ctx, email, family, input);
   return buildBootstrap(ctx, email);
 }
 
-function createHousehold(ctx: Ctx, input: { guardians: GuardianInput[]; students: StudentInput[] }): void {
+function createHousehold(ctx: Ctx, email: string, input: { guardians: GuardianInput[]; students: StudentInput[] }): void {
   for (const g of input.guardians) if (emailTaken(ctx, g.email)) conflict(TAKEN_MESSAGE);
 
   const familyId = nextSequentialId('F', ctx.m.families().map((f) => f.id));
-  const [g1, g2] = input.guardians;
+  // The person signing up is the first guardian, who may later change the second one.
+  const [g1, g2] = input.guardians.slice().sort((a, b) => Number(b.email === email) - Number(a.email === email));
   ctx.db.append('Families', [
     {
       FamilyID: familyId,
@@ -148,7 +149,7 @@ function createHousehold(ctx: Ctx, input: { guardians: GuardianInput[]; students
     input.students.map((s, i) => studentRow(ids[i], familyId, s)),
   );
 
-  const names = input.guardians.map((g) => g.name).join(' & ');
+  const names = [g1, g2].filter((g): g is GuardianInput => g !== undefined).map((g) => g.name).join(' & ');
   ctx.log('signup', `${familyId}: ${names} signed up with ${input.students.length} student(s)`);
   notifyAdmins(ctx, newSignupNotice(names, input.students.length, familyId));
 }

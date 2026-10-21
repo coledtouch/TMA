@@ -37,6 +37,11 @@ function isTopic(topic: string): topic is NotificationTopic {
   return (TOPICS as readonly string[]).includes(topic);
 }
 
+/** Collapse whitespace (sheet text may contain newlines) and cap the length. */
+function oneLine(text: string, max: number): string {
+  return truncate(text.replace(/\s+/g, ' ').trim(), max);
+}
+
 function safely<T>(ctx: Ctx, what: string, fn: () => T, fallback: T): T {
   try {
     return fn();
@@ -80,6 +85,8 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
 
   let quotaSkipped = 0;
   if (mailTo.length > 0) {
+    // One quota read per batch (each read is a service call in Apps Script).
+    let quota = safely(ctx, 'mailer.remainingQuota', () => ctx.s.mailer.remainingQuota(), 0);
     const { html, text } = renderEmail({
       orgName: settings.pub.orgName,
       title: notice.title,
@@ -88,8 +95,8 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
       path: notice.url,
       link: notice.link,
     });
+    const subject = oneLine(notice.title, 150);
     for (const to of mailTo) {
-      const quota = safely(ctx, 'mailer.remainingQuota', () => ctx.s.mailer.remainingQuota(), 0);
       if (quota <= 0) {
         quotaSkipped++;
         continue;
@@ -98,17 +105,20 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
         ctx,
         `email to ${to}`,
         () => {
-          ctx.s.mailer.send({ to, subject: notice.title, html, text });
+          ctx.s.mailer.send({ to, subject, html, text });
           return true;
         },
         false,
       );
-      if (sent) counts.email++;
+      if (sent) {
+        counts.email++;
+        quota--;
+      }
     }
   }
 
   if (smsTo.length > 0) {
-    const message = truncate(`TMA: ${notice.title} – ${notice.pushBody ?? notice.body}`, 320);
+    const message = oneLine(`TMA: ${notice.title} – ${notice.pushBody ?? notice.body}`, 320);
     for (const phone of unique(smsTo)) {
       const sent = safely(
         ctx,
@@ -131,8 +141,8 @@ export function deliver(ctx: Ctx, recipients: readonly string[], notice: Notice,
 /** Send one push batch; remove tokens the push service reports as invalid. Returns delivered count. */
 function sendPush(ctx: Ctx, tokens: string[], notice: Notice): number {
   const message: PushMessage = {
-    title: truncate(notice.title, 120),
-    body: truncate(notice.pushBody ?? notice.body, 240),
+    title: oneLine(notice.title, 120),
+    body: oneLine(notice.pushBody ?? notice.body, 240),
     url: notice.url,
     topic: notice.topic,
   };

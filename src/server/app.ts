@@ -84,7 +84,7 @@ export function createApp(services: Services): App {
         if (err instanceof ApiError) return { ok: false, error: { code: err.code, message: err.message } };
         const action = isRecord(request) && typeof request.action === 'string' ? request.action.slice(0, 64) : '?';
         try {
-          services.logger.error(`Unhandled error in ${action}`, errorMessage(err));
+          services.logger.error(`Unhandled error in ${action}: ${errorMessage(err)}`, err);
         } catch {
           // Logging must never turn into a thrown error.
         }

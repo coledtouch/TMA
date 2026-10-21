@@ -39,7 +39,7 @@ export function requireActivity(ctx: Ctx, activityId: string): ActivityRec {
   return ctx.m.activityById(activityId) ?? notFound('Activity not found.');
 }
 
-/** First name of a guardian of the family matching `email`, for messages ("Jordan Thompson asked…"). */
+/** Name of the guardian with `email` (else the email local-part), for messages like "Jordan Thompson asked…". */
 export function guardianName(family: FamilyRec | null, email: string): string {
   const g = family?.guardians.find((x) => x.email === email);
   return g?.name || email.split('@')[0];
