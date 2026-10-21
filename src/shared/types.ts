@@ -349,6 +349,79 @@ export interface AdminOverview {
   recentLog: LogEntry[]; // newest first, max 50
 }
 
+// ---------------------------------------------------------------------------
+// Reports (admin.report): read-only tables computed from the sheet, shown on the
+// Admin → Reports screen, downloadable as CSV, and writable to a "Report: …" tab.
+// ---------------------------------------------------------------------------
+
+export type ReportKind =
+  /** One row per enrollment: cost, paid from funds, paid directly, pending, left to pay. */
+  | 'trip-balances'
+  /** One row per active student: earned, applied, balance, pending requests, available. */
+  | 'student-funds'
+  /** Fund credits (Ledger rows with a positive Amount) grouped by Type + Description, in a date range. */
+  | 'fundraiser-totals'
+  /** Every Ledger row in a date range. */
+  | 'fund-activity'
+  /** Every Payments row in a date range. */
+  | 'payments'
+  /** Students with their school, groups and guardians' contact details (admins only; contains PII). */
+  | 'roster'
+  /** What is waiting on the treasurer: pending fund requests, new households, payments still clearing. */
+  | 'open-items'
+  /** How many families use the app: sign-ups, push devices, notification choices. */
+  | 'app-usage';
+
+export interface ReportFilters {
+  /** trip-balances, payments, fund-activity: one activity only. */
+  activityId?: ActivityId;
+  /** trip-balances, student-funds, roster: students at this school level (Settings SCHOOLS). */
+  school?: string;
+  /** trip-balances, student-funds, roster: students in this group (Settings ENSEMBLES). */
+  ensemble?: string;
+  /** fundraiser-totals, fund-activity, payments: inclusive date range (spreadsheet time zone). */
+  from?: IsoDate;
+  to?: IsoDate;
+  /** trip-balances: include enrollments with nothing left to pay (default false). */
+  includePaid?: boolean;
+}
+
+export type ReportColumnType = 'text' | 'money' | 'number' | 'date' | 'email' | 'phone';
+
+export interface ReportColumn {
+  key: string;
+  label: string;
+  type: ReportColumnType;
+}
+
+/** money cells are integer cents; date cells are IsoDate strings; empty cells are null. */
+export type ReportCell = string | number | null;
+
+export interface Report {
+  kind: ReportKind;
+  title: string;
+  /** One sentence on what the report shows and how it is computed. */
+  description: string;
+  generatedAt: IsoDateTime;
+  /** The filters actually applied (after validation and defaults). */
+  filters: ReportFilters;
+  columns: ReportColumn[];
+  rows: Array<Record<string, ReportCell>>;
+  /** Sums for money/number columns where a total makes sense, keyed by column key. */
+  totals?: Record<string, number>;
+  /** Short caveats, e.g. "Refunded and Failed payments are listed but not counted in the totals." */
+  notes?: string[];
+  /** True when rows include emails or phone numbers (the UI warns before download). */
+  containsContactInfo: boolean;
+}
+
+/** Choices for the Reports screen's filters, from the sheet. */
+export interface ReportOptions {
+  activities: Array<{ id: ActivityId; name: string; open: boolean }>;
+  schools: string[];
+  ensembles: string[];
+}
+
 export interface DeliveryCounts {
   push: number;
   email: number;
@@ -433,6 +506,10 @@ export interface ApiSpec {
     result: { announcement: Announcement; delivered: DeliveryCounts };
   };
   'admin.runSync': { params: Record<string, never>; result: TickReport };
+  'admin.report': {
+    params: { kind: ReportKind; filters?: ReportFilters };
+    result: { report: Report; options: ReportOptions };
+  };
 }
 
 export type ApiAction = keyof ApiSpec;
@@ -478,6 +555,7 @@ export const API_ACTIONS: readonly ApiAction[] = [
   'admin.reviewHousehold',
   'admin.announce',
   'admin.runSync',
+  'admin.report',
 ] as const;
 
 /** Push/notification payload shared by server senders and the service worker. */

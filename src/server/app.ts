@@ -8,7 +8,7 @@ import { adminOverview, announce, reviewHousehold } from './admin';
 import { authenticate, requestCode, verifyCode } from './auth';
 import { buildBootstrap } from './bootstrap';
 import { createCtx, inWriteLock, type Ctx } from './context';
-import { ApiError, badRequest, forbidden } from './errors';
+import { ApiError, badRequest, fail, forbidden } from './errors';
 import { saveHousehold } from './household';
 import { addCounts, flushDeliveries } from './notify';
 import { registerDevice, savePrefs, testPush, unregisterDevice } from './me';
@@ -54,6 +54,8 @@ const ROUTES: Record<PrivateAction, Route> = {
   'admin.reviewHousehold': { admin: true, write: true, run: reviewHousehold },
   'admin.announce': { admin: true, write: true, run: announce },
   'admin.runSync': { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
+  // Placeholder until src/server/reports.ts lands.
+  'admin.report': { admin: true, run: () => fail('NOT_CONFIGURED', 'Reports are not available yet.') },
 };
 
 const GENERIC_ERROR = 'Something went wrong. Please try again.';
