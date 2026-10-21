@@ -140,6 +140,23 @@ describe('validation helpers', () => {
     expect(decodeKeys(null)).toBeNull();
   });
 
+  it('rejects over-long keys by length before decoding them', async () => {
+    const ua = await makeUserAgent();
+    const std = (s: string) => s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (s.length % 4)) % 4);
+    // The longest accepted forms: padded standard base64 (88 and 24 chars).
+    expect(std(ua.p256dh).length).toBe(88);
+    expect(std(ua.auth).length).toBe(24);
+    expect(decodeKeys({ p256dh: std(ua.p256dh), auth: std(ua.auth) })).not.toBeNull();
+    expect(decodeKeys({ p256dh: `${std(ua.p256dh)}=`, auth: ua.auth })).toBeNull();
+    expect(decodeKeys({ p256dh: ua.p256dh, auth: `${std(ua.auth)}=` })).toBeNull();
+
+    const start = performance.now();
+    expect(decodeKeys({ p256dh: '='.repeat(10_000) + 'A', auth: ua.auth })).toBeNull();
+    expect(decodeKeys({ p256dh: ua.p256dh, auth: '='.repeat(10_000) + 'A' })).toBeNull();
+    expect(decodeKeys({ p256dh: 'A'.repeat(50_000), auth: ua.auth })).toBeNull();
+    expect(performance.now() - start).toBeLessThan(20);
+  });
+
   it('normalizes ttl, urgency and topic', () => {
     expect(normalizeTtl(undefined)).toBe(86400);
     expect(normalizeTtl('60')).toBe(86400);

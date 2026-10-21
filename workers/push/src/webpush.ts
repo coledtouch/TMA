@@ -123,11 +123,22 @@ export function allowedEndpoint(endpoint: unknown): URL | null {
   return null;
 }
 
+/**
+ * Longest accepted key strings: padded standard base64 of 65 and 16 bytes.
+ * Subscriptions come from browsers via the sheet, so anything longer is
+ * rejected before decoding.
+ */
+const MAX_P256DH_CHARS = 88;
+const MAX_AUTH_CHARS = 24;
+
 /** Decodes the subscription keys; null unless p256dh is a 65-byte point and auth 16 bytes. */
 export function decodeKeys(keys: unknown): { uaPublic: Bytes; authSecret: Bytes } | null {
   if (!isObject(keys) || typeof keys.p256dh !== 'string' || typeof keys.auth !== 'string') return null;
-  const uaPublic = b64urlDecode(keys.p256dh.trim());
-  const authSecret = b64urlDecode(keys.auth.trim());
+  const p256dh = keys.p256dh.trim();
+  const auth = keys.auth.trim();
+  if (p256dh.length > MAX_P256DH_CHARS || auth.length > MAX_AUTH_CHARS) return null;
+  const uaPublic = b64urlDecode(p256dh);
+  const authSecret = b64urlDecode(auth);
   if (!uaPublic || uaPublic.length !== 65 || uaPublic[0] !== 0x04) return null;
   if (!authSecret || authSecret.length !== 16) return null;
   return { uaPublic, authSecret };

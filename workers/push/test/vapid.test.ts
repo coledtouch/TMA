@@ -4,6 +4,7 @@ import { resetKvCache } from '../src/env';
 import {
   getVapidKeys,
   JWT_LIFETIME_S,
+  loadVapidKeys,
   parseStoredKeys,
   resetVapidCache,
   vapidAuthorization,
@@ -127,5 +128,67 @@ describe('VAPID JWT', () => {
     expect(c).not.toBe(a);
     expect(decodeSegment(c.split('.')[1]!).exp).toBe(Math.floor(later / 1000) + JWT_LIFETIME_S);
     expect(await verifyJwt(c, keys.publicKey)).toBe(true);
+  });
+
+  it('signs once when many messages to one origin miss the cache together', async () => {
+    const keys = await getVapidKeys(makeEnv());
+    const sign = vi.spyOn(crypto.subtle, 'sign');
+    const t0 = Date.UTC(2026, 9, 21, 12, 0, 0);
+    const headers = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => vapidAuthorization(keys, `${ENDPOINT}${i}`, SUBJECT, t0)),
+    );
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(new Set(headers).size).toBe(1);
+    expect(await verifyJwt(parseAuthorization(headers[0]!).jwt, keys.publicKey)).toBe(true);
+
+    // At the refresh point, concurrent callers again share one new signature.
+    const later = t0 + 11.5 * 3600_000;
+    const renewed = await Promise.all(
+      Array.from({ length: 10 }, (_, i) => vapidAuthorization(keys, `${ENDPOINT}${i}`, SUBJECT, later)),
+    );
+    expect(sign).toHaveBeenCalledTimes(2);
+    expect(new Set(renewed).size).toBe(1);
+    expect(renewed[0]).not.toBe(headers[0]);
+  });
+
+  it('does not cache a failed signature', async () => {
+    const keys = await getVapidKeys(makeEnv());
+    const sign = vi.spyOn(crypto.subtle, 'sign').mockRejectedValueOnce(new Error('sign failed'));
+    const t0 = Date.UTC(2026, 9, 21, 12, 0, 0);
+    const failed = await Promise.allSettled([
+      vapidAuthorization(keys, ENDPOINT, SUBJECT, t0),
+      vapidAuthorization(keys, ENDPOINT, SUBJECT, t0),
+    ]);
+    expect(failed.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    expect(sign).toHaveBeenCalledTimes(1);
+
+    const header = await vapidAuthorization(keys, ENDPOINT, SUBJECT, t0);
+    expect(sign).toHaveBeenCalledTimes(2);
+    expect(await verifyJwt(parseAuthorization(header).jwt, keys.publicKey)).toBe(true);
+  });
+});
+
+describe('loadVapidKeys', () => {
+  it('returns null instead of creating keys, and loads stored ones', async () => {
+    const env = makeEnv();
+    expect(await loadVapidKeys(env)).toBeNull();
+    expect(env.TMA_PUSH.writes).toBe(0);
+    expect(env.TMA_PUSH.data.has('vapid:v1')).toBe(false);
+
+    const created = await getVapidKeys(env);
+    resetKvCache();
+    resetVapidCache();
+    expect((await loadVapidKeys(env))?.publicKey).toBe(created.publicKey);
+    expect(env.TMA_PUSH.writes).toBe(1);
+  });
+
+  it('re-reads KV when this isolate cached "missing"', async () => {
+    const env = makeEnv();
+    expect(await loadVapidKeys(env)).toBeNull(); // caches the miss
+    const other = makeEnv(env.TMA_PUSH);
+    resetKvCache();
+    resetVapidCache();
+    const created = await getVapidKeys(other); // "another isolate" creates the pair
+    expect((await loadVapidKeys(env))?.publicKey).toBe(created.publicKey);
   });
 });

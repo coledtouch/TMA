@@ -35,9 +35,15 @@ export function b64urlEncode(bytes: Uint8Array): string {
  * Decodes base64url. Also accepts standard base64 ("+", "/") and trailing
  * "=" padding, since browsers and libraries disagree on which they emit.
  * Returns null for anything else (bad characters, impossible length).
+ * Runs in linear time on any input.
  */
 export function b64urlDecode(input: string): Bytes | null {
-  const s = input.replace(/=+$/, '');
+  // Drop at most two trailing "=" with a loop. A regex like /=+$/ backtracks
+  // quadratically on a long run of "=" that does not end the string (seconds
+  // of CPU for 50k characters). Any "=" left over is rejected below.
+  let end = input.length;
+  while (end > 0 && input.length - end < 2 && input.charCodeAt(end - 1) === 61) end--;
+  const s = end === input.length ? input : input.slice(0, end);
   if (s.length % 4 === 1) return null;
   const out = new Uint8Array(Math.floor((s.length * 3) / 4));
   let buffer = 0;

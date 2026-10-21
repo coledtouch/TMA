@@ -8,10 +8,10 @@
 //   GET  /vapid-public-key  {"publicKey":"<b64url>"}   (creates the key pair on first use)
 //   POST /register          {"secret":"..."}            trust on first use
 //   POST /send              Authorization: Bearer <secret>, {"messages":[...]} (max 10)
-import { constantTimeEqual, sha256Hex } from './b64';
+import { concat, constantTimeEqual, sha256Hex } from './b64';
 import { KV_RECHECK_MS, KV_SECRET, kvGet, kvPut, kvRead, type Env } from './env';
-import { DEFAULT_SUBJECT, getVapidKeys, hasVapidKeys } from './vapid';
-import { sendAll } from './webpush';
+import { DEFAULT_SUBJECT, getVapidKeys, hasVapidKeys, loadVapidKeys } from './vapid';
+import { sendAll, type SendResult } from './webpush';
 
 export type { Env } from './env';
 
@@ -20,8 +20,10 @@ export const NAME = 'tma-push';
 export const MAX_MESSAGES = 10;
 export const MIN_SECRET = 32;
 export const MAX_SECRET = 256;
-/** 10 messages of up to 3000 bytes each, with JSON escaping headroom. */
+/** /send body cap in bytes: 10 messages of up to 3000 bytes each, with JSON escaping headroom. */
 export const MAX_BODY_BYTES = 256 * 1024;
+/** /register body cap in bytes ({"secret": <= 256 chars}, even fully escaped, is far below). */
+export const MAX_REGISTER_BODY_BYTES = 4 * 1024;
 
 const ROUTES = new Map<string, string>([
   ['/health', 'GET'],
@@ -40,14 +42,38 @@ function json(status: number, body: unknown, extra: Record<string, string> = {})
 const BAD_REQUEST = () => json(400, { error: 'bad_request' });
 const UNAUTHORIZED = () => json(401, { error: 'unauthorized' });
 
-/** Reads and parses a JSON body: null when it is not JSON, 'too_large' over the limit. */
-async function readJson(request: Request): Promise<{ value: unknown } | 'too_large' | null> {
-  const declared = Number(request.headers.get('Content-Length') ?? '0');
-  if (declared > MAX_BODY_BYTES) return 'too_large';
-  const text = await request.text();
-  if (text.length > MAX_BODY_BYTES) return 'too_large';
+/**
+ * Reads the request body, at most maxBytes of it. The stream is read chunk by
+ * chunk and abandoned as soon as the running byte count passes the cap, so a
+ * chunked body without Content-Length cannot make the Worker buffer megabytes
+ * (/register is unauthenticated).
+ */
+async function readBody(request: Request, maxBytes: number): Promise<Uint8Array | 'too_large'> {
+  const declared = request.headers.get('Content-Length');
+  if (declared !== null && Number(declared) > maxBytes) return 'too_large';
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      reader.cancel().catch(() => undefined);
+      return 'too_large';
+    }
+    chunks.push(value);
+  }
+  return concat(...chunks);
+}
+
+/** Reads and parses a JSON body: null when it is not UTF-8 JSON, 'too_large' over maxBytes. */
+async function readJson(request: Request, maxBytes: number): Promise<{ value: unknown } | 'too_large' | null> {
+  const bytes = await readBody(request, maxBytes);
+  if (bytes === 'too_large') return 'too_large';
   try {
-    return { value: JSON.parse(text) as unknown };
+    return { value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown };
   } catch {
     return null;
   }
@@ -80,7 +106,7 @@ async function handlePublicKey(env: Env): Promise<Response> {
 }
 
 async function handleRegister(request: Request, env: Env): Promise<Response> {
-  const body = await readJson(request);
+  const body = await readJson(request, MAX_REGISTER_BODY_BYTES);
   if (body === 'too_large') return json(413, { error: 'too_large' });
   if (!body || typeof body.value !== 'object' || body.value === null) return BAD_REQUEST();
   const secret = (body.value as { secret?: unknown }).secret;
@@ -112,7 +138,7 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   if (!isValidSecret(secret)) return UNAUTHORIZED();
   if ((await storedSecretMatches(env, await sha256Hex(secret))) !== 'match') return UNAUTHORIZED();
 
-  const body = await readJson(request);
+  const body = await readJson(request, MAX_BODY_BYTES);
   if (body === 'too_large') return json(413, { error: 'too_large' });
   if (!body || typeof body.value !== 'object' || body.value === null) return BAD_REQUEST();
   const messages = (body.value as { messages?: unknown }).messages;
@@ -120,7 +146,16 @@ async function handleSend(request: Request, env: Env): Promise<Response> {
   if (messages.length > MAX_MESSAGES) return json(413, { error: 'too_many_messages', max: MAX_MESSAGES });
   if (messages.length === 0) return json(200, { results: [] });
 
-  const vapid = await getVapidKeys(env);
+  // Only GET /vapid-public-key creates the key pair. A pair minted here could
+  // not match any subscription and would replace the published one, so every
+  // push service would answer 403 and Apps Script would delete every
+  // subscription. Answer a retryable error per message instead.
+  const vapid = await loadVapidKeys(env);
+  if (!vapid) {
+    console.log('send no_keys');
+    const noKeys: SendResult = { status: 'error', reason: 'no_keys' };
+    return json(200, { results: messages.map(() => noKeys) });
+  }
   const subject = env.VAPID_SUBJECT?.trim() || DEFAULT_SUBJECT;
   const results = await sendAll(messages, { vapid, subject });
   return json(200, { results });

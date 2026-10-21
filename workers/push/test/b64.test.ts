@@ -39,6 +39,25 @@ describe('base64url', () => {
     expect(b64urlDecode('é')).toBeNull();
     expect(b64urlDecode('ab cd')).toBeNull();
   });
+
+  it('drops at most two padding characters', () => {
+    expect(new TextDecoder().decode(b64urlDecode('Zg==')!)).toBe('f');
+    expect(new TextDecoder().decode(b64urlDecode('Zg=')!)).toBe('f');
+    expect(new TextDecoder().decode(b64urlDecode('Zm8=')!)).toBe('fo');
+    expect(b64urlDecode('Zg===')).toBeNull();
+    expect(b64urlDecode('===')).toBeNull();
+    expect(toHex(b64urlDecode('==')!)).toBe('');
+  });
+
+  it('rejects a long run of "=" in linear time (no regex backtracking)', () => {
+    // /=+$/ took ~2 s on this input (quadratic backtracking), which would
+    // blow the free plan's 10 ms CPU budget for a whole /send batch.
+    const hostile = '='.repeat(50_000) + 'x';
+    const start = performance.now();
+    expect(b64urlDecode(hostile)).toBeNull();
+    expect(b64urlDecode('='.repeat(50_000))).toBeNull();
+    expect(performance.now() - start).toBeLessThan(50);
+  });
 });
 
 describe('byte helpers', () => {

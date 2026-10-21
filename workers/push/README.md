@@ -48,6 +48,8 @@ a known path gives `405 {"error":"method_not_allowed"}`.
 The VAPID public key: base64url without padding of the 65-byte uncompressed
 P-256 point. This is the `applicationServerKey` the web app passes to
 `PushManager.subscribe()`. The first call creates the key pair and stores it.
+This is the only endpoint that creates keys: `/send` never does (see
+`no_keys` below).
 
 ### `POST /register`
 
@@ -59,6 +61,7 @@ Body `{"secret": "<32 to 256 characters>"}`. Trust on first use:
 | Same secret as the one registered           | `200 {"registered": true, "first": false}` |
 | A different secret is already registered    | `409 {"error": "already_registered"}`      |
 | Not JSON, no `secret`, or wrong length      | `400 {"error": "bad_request"}`             |
+| Body over 4 KB                              | `413 {"error": "too_large"}`               |
 
 Only the SHA-256 of the secret is stored; comparisons are constant-time.
 
@@ -84,7 +87,7 @@ Header `Authorization: Bearer <secret>`, body:
 | --------------------------------------------- | -------------------------------- |
 | No secret registered, missing or wrong secret | `401 {"error": "unauthorized"}`  |
 | Not JSON, or `messages` is not an array       | `400 {"error": "bad_request"}`   |
-| More than 10 messages (or body over 256 KB)   | `413 {"error": "too_many_messages", "max": 10}` (or `"too_large"`) |
+| More than 10 messages (or body over 256 KB of UTF-8) | `413 {"error": "too_many_messages", "max": 10}` (or `"too_large"`) |
 | Otherwise                                     | `200 {"results": [...]}`         |
 
 `results` has exactly one entry per message, in the same order:
@@ -101,7 +104,15 @@ Header `Authorization: Bearer <secret>`, body:
   `payload_too_large` (over 3000 bytes of UTF-8, or the push service said
   413), `rate_limited` (429), `push_service_error` (5xx), `unexpected_status`
   (any other status), `network` (no answer within 15 s), `bad_payload`
-  (`payload` is not a string), `bad_message` (not an object).
+  (`payload` is not a string), `bad_message` (not an object), `internal`
+  (an unexpected failure in the Worker), `no_keys` (no VAPID key pair is
+  stored yet, or KV briefly reads it as missing: every message in the batch
+  gets this and nothing is sent; run **TMA App → Set up**, then retry. Never
+  delete subscriptions for it).
+
+Request bodies are read as a stream and abandoned as soon as they pass the
+cap (4 KB for `/register`, 256 KB for `/send`), with or without a
+`Content-Length` header.
 
 Per message:
 
@@ -166,7 +177,10 @@ Everything fits Cloudflare's free Workers plan:
   message takes a fraction of a millisecond of WebCrypto work. The VAPID
   private key is imported once per isolate, and the signed VAPID JWT is cached
   per push service for 12 hours (renewed with under an hour left), so most
-  requests sign nothing.
+  requests sign nothing. A batch that misses the cache signs once per push
+  service, not once per message. Subscription keys longer than their padded
+  base64 form are rejected before decoding, so one bad row in the sheet cannot
+  use up a batch's CPU.
 * **50 subrequests per request**: 10 messages are 10 fetches.
 * **KV: 100,000 reads and 1,000 writes a day**: each isolate caches what it
   read for 5 minutes (a missing key for 10 seconds), so a busy day costs a
@@ -188,7 +202,9 @@ Apps Script project was copied or the secret leaked):
    that long, and KV itself takes up to a minute to forget a deleted key
    everywhere.
 3. In the spreadsheet run **TMA App → Set up** again. It registers a secret
-   and reads the new public key.
+   and reads the new public key, which creates the new pair. Until then,
+   `/send` answers `401` (no secret) or `error` / `no_keys` per message
+   (no key pair). It never creates a key pair itself.
 
 Every existing subscription was made with the old public key, so push
 services now answer `403` for them (`invalid`, `vapid_rejected`) and Apps

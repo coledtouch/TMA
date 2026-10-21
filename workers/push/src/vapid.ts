@@ -32,9 +32,15 @@ export interface VapidKeys {
   privateKey: CryptoKey;
 }
 
-// Per-isolate caches.
+// Per-isolate caches. A JWT entry holds the signing promise until it settles
+// (then the plain token), so the up to 10 messages of a batch that miss the
+// cache together (cold isolate, or the refresh point) share one signature.
+interface JwtEntry {
+  token: string | Promise<string>;
+  exp: number;
+}
 let keyCache: { source: string; keys: VapidKeys } | null = null;
-const jwtCache = new Map<string, { token: string; exp: number }>();
+const jwtCache = new Map<string, JwtEntry>();
 const JWT_CACHE_MAX = 64;
 
 /** Test hook: forget the imported key and every cached JWT. */
@@ -67,27 +73,47 @@ export async function hasVapidKeys(env: Env): Promise<boolean> {
   return (await kvGet(env, KV_VAPID)) !== null;
 }
 
-/**
- * Returns the stored key pair, generating and storing one on first use.
- * Two isolates can race to create it; after writing, we read KV again and
- * use whatever is stored there so everyone converges on one pair.
- */
-export async function getVapidKeys(env: Env): Promise<VapidKeys> {
-  let raw = await kvGet(env, KV_VAPID);
-  if (raw === null) raw = await kvRead(env, KV_VAPID); // the cached "missing" may be stale
-  if (raw === null) {
-    const fresh = await generateVapidKeys();
-    await kvPut(env, KV_VAPID, JSON.stringify(fresh));
-    raw = (await kvRead(env, KV_VAPID)) ?? JSON.stringify(fresh);
-  }
-  if (keyCache && keyCache.source === raw) return keyCache.keys;
+/** The stored JSON, re-reading KV when this isolate's cached "missing" may be stale. */
+async function readStoredKeys(env: Env): Promise<string | null> {
+  return (await kvGet(env, KV_VAPID)) ?? kvRead(env, KV_VAPID);
+}
 
+/** Imports the stored key pair, once per isolate per stored value. */
+async function importStoredKeys(raw: string): Promise<VapidKeys> {
+  if (keyCache && keyCache.source === raw) return keyCache.keys;
   const stored = parseStoredKeys(raw);
   const privateKey = await crypto.subtle.importKey('jwk', stored.privateJwk, EC_SIGN, false, ['sign']);
   const keys: VapidKeys = { publicKey: stored.publicKey, privateKey };
   keyCache = { source: raw, keys };
   jwtCache.clear(); // tokens signed by a previous key are useless now
   return keys;
+}
+
+/**
+ * Returns the stored key pair, or null if none is stored. Never creates one:
+ * /send uses this, because a key minted there could not match any
+ * subscription and would overwrite the published key (KV's last write wins,
+ * and a location can read "missing" for up to a minute after the first put).
+ */
+export async function loadVapidKeys(env: Env): Promise<VapidKeys | null> {
+  const raw = await readStoredKeys(env);
+  return raw === null ? null : importStoredKeys(raw);
+}
+
+/**
+ * Returns the stored key pair, generating and storing one on first use (only
+ * GET /vapid-public-key calls this). Two isolates can race to create it;
+ * after writing, we read KV again and use whatever is stored there so
+ * everyone converges on one pair.
+ */
+export async function getVapidKeys(env: Env): Promise<VapidKeys> {
+  let raw = await readStoredKeys(env);
+  if (raw === null) {
+    const fresh = await generateVapidKeys();
+    await kvPut(env, KV_VAPID, JSON.stringify(fresh));
+    raw = (await kvRead(env, KV_VAPID)) ?? JSON.stringify(fresh);
+  }
+  return importStoredKeys(raw);
 }
 
 /** Signs a VAPID JWT for one push service origin. */
@@ -121,9 +147,21 @@ export async function vapidAuthorization(
   let entry = jwtCache.get(cacheKey);
   if (!entry || entry.exp - now < JWT_REFRESH_S) {
     const exp = now + JWT_LIFETIME_S;
-    entry = { token: await signVapidJwt(keys, audience, subject, exp), exp };
+    const pending = signVapidJwt(keys, audience, subject, exp);
+    const fresh: JwtEntry = { token: pending, exp };
+    // Store before awaiting so concurrent callers for this origin reuse it.
     if (jwtCache.size >= JWT_CACHE_MAX) jwtCache.clear();
-    jwtCache.set(cacheKey, entry);
+    jwtCache.set(cacheKey, fresh);
+    pending.then(
+      (token) => {
+        fresh.token = token; // keep only the string once signed
+      },
+      () => {
+        // A failed signature must not stay cached; every waiting caller still sees the error.
+        if (jwtCache.get(cacheKey) === fresh) jwtCache.delete(cacheKey);
+      },
+    );
+    entry = fresh;
   }
-  return `vapid t=${entry.token}, k=${keys.publicKey}`;
+  return `vapid t=${await entry.token}, k=${keys.publicKey}`;
 }
