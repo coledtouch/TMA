@@ -407,6 +407,23 @@ button {
   padding: 4px 0 0;
 }
 
+/* A heading with an icon action (Admin's reload): the action sits beside the
+   title, not centred on title + subtitle, and stays there with a long email. */
+.screen-head.row-between {
+  align-items: flex-start;
+  flex-wrap: nowrap;
+}
+
+.screen-head.row-between > :first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Line the glyph (not its 44px tap area) up with the gutter. */
+.screen-head .icon-button {
+  margin-inline-end: -10px;
+}
+
 .screen-title {
   font-family: var(--font-serif);
   font-weight: 700;
@@ -833,6 +850,24 @@ a.list-row:hover {
   background: var(--card-2);
 }
 
+/* Lists of links: a hovered row fills the card out to its rounded edges, so
+   the list's 4px top and bottom padding moves into the first and last rows. */
+.card.list:has(> li > a.list-row) {
+  padding: 0;
+}
+
+.card.list > li:first-child > a.list-row {
+  padding-top: 14px;
+  border-top-left-radius: calc(var(--radius-lg) - 1px);
+  border-top-right-radius: calc(var(--radius-lg) - 1px);
+}
+
+.card.list > li:last-child > a.list-row {
+  padding-bottom: 14px;
+  border-bottom-left-radius: calc(var(--radius-lg) - 1px);
+  border-bottom-right-radius: calc(var(--radius-lg) - 1px);
+}
+
 .list-main {
   display: flex;
   flex-direction: column;
@@ -1147,6 +1182,12 @@ a.list-row:hover {
   font-size: var(--text-sm);
 }
 
+/* A small link keeps the link's slim side padding, so it lines up with the
+   text around it (e.g. "Cancel request" when its row wraps). */
+.btn-link.btn-sm {
+  padding-inline: 4px;
+}
+
 .btn-lg {
   min-height: 52px;
   font-size: var(--text-lg);
@@ -1302,6 +1343,18 @@ a.list-row:hover {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 10px;
+}
+
+/* Selects whose choices are long ("Kindergarten", "Middle School") sit side by
+   side only where both fit, and stack on phones instead of cutting text off. */
+.field-row-wide {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+/* Side by side, the grid gap spaces the fields; the stacked-field margin
+   (.field + .field) would push the second one 4px lower than the first. */
+.field-row > .field {
+  margin-top: 0;
 }
 
 .field-narrow {
@@ -1947,11 +2000,11 @@ ul.callout {
   gap: 16px;
 }
 
+/* Transparent banner art: black notes in light mode, cream notes in dark mode
+   (see scripts/make-banner.py). The logo's own white panel stays as drawn. */
 .signin-logo {
-  background: #ffffff; /* the logo artwork is on white; keep it legible in dark mode */
-  border-radius: var(--radius-lg);
-  padding: 10px 8px;
-  box-shadow: var(--shadow);
+  display: block;
+  padding: 4px 0;
 }
 
 .signin-logo img {

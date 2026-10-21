@@ -118,14 +118,18 @@ export function SignIn({ api, onSignedIn }: { api: ApiClient; onSignedIn(email: 
   return (
     <div className="signin">
       <div className="signin-inner">
-        <div className="signin-logo">
+        <picture className="signin-logo">
+          <source
+            srcSet={`${import.meta.env.BASE_URL}brand/tma-banner-dark.webp`}
+            media="(prefers-color-scheme: dark)"
+          />
           <img
-            src={`${import.meta.env.BASE_URL}brand/tma-banner.jpg`}
+            src={`${import.meta.env.BASE_URL}brand/tma-banner-light.webp`}
             alt="Timberlane Music Association"
             width={1024}
             height={267}
           />
-        </div>
+        </picture>
 
         {demo ? (
           <section className="card demo-banner" aria-labelledby="demo-title">
