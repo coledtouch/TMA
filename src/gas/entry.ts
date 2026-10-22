@@ -183,6 +183,7 @@ function runSetup(seedSampleData: boolean): SetupReport | null {
       ? `Added columns: ${report.addedColumns.map((c) => `${c.table} › ${c.column}`).join(', ')}`
       : 'No columns were missing.',
     report.addedSettings?.length ? `Added settings (with their defaults): ${report.addedSettings.join(', ')}` : '',
+    report.updatedSettings?.length ? `Updated settings you hadn't changed to the new default text: ${report.updatedSettings.join(', ')}` : '',
     report.seeded ? 'Filled the empty tabs with sample (fictional) data.' : '',
     report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(', ')}` : '',
     ...push,
@@ -257,6 +258,10 @@ export function reportOpenItems(): void {
 
 export function reportAppUsage(): void {
   sheetReport('app-usage');
+}
+
+export function reportAppActivity(): void {
+  sheetReport('app-activity');
 }
 
 /**

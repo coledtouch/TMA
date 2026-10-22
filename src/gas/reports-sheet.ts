@@ -35,6 +35,7 @@ export const SHEET_REPORTS: ReadonlyArray<{ kind: ReportKind; fn: string }> = [
   { kind: 'roster', fn: 'reportRoster' },
   { kind: 'open-items', fn: 'reportOpenItems' },
   { kind: 'app-usage', fn: 'reportAppUsage' },
+  { kind: 'app-activity', fn: 'reportAppActivity' },
 ];
 
 const FORMATS: Readonly<Partial<Record<ReportColumnType, string>>> = {

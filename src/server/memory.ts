@@ -404,6 +404,7 @@ export function createMemoryServices(opts: MemoryServicesOptions = {}): MemorySe
     push,
     payments: opts.payments ?? createFakePaymentGateway(),
     logger,
+    // One caller at a time in tests and the demo, so the lock is always free (waitMs doesn't matter).
     withLock: <T>(fn: () => T): T => fn(),
   };
 }

@@ -139,6 +139,18 @@ describe('withLock', () => {
     expect(gas.lock.calls).toEqual(['waitLock 20000', 'releaseLock']);
   });
 
+  it('waits only as long as asked (never longer than 20 s) for best-effort writes', () => {
+    const withLock = createScriptLock({ onAcquire: () => undefined, beforeRelease: () => undefined });
+    withLock(() => undefined, { waitMs: 1500 });
+    withLock(() => undefined, { waitMs: 99999 });
+    withLock(() => undefined, { waitMs: 0 });
+    withLock(() => undefined, { waitMs: Number.NaN });
+    expect(gas.lock.calls.filter((c) => c.startsWith('waitLock'))).toEqual(['waitLock 1500', 'waitLock 20000', 'waitLock 1', 'waitLock 20000']);
+    // Already holding the lock: no second wait, whatever the options.
+    withLock(() => withLock(() => undefined, { waitMs: 1500 }));
+    expect(gas.lock.calls.slice(-2)).toEqual(['waitLock 20000', 'releaseLock']);
+  });
+
   it('propagates a lock timeout without running fn', () => {
     gas.lock.busy = true;
     const fn = vi.fn();

@@ -23,6 +23,7 @@ export type TableName =
   | 'Events'
   | 'Preferences'
   | 'Devices'
+  | 'Sign-ins'
   | 'Settings'
   | 'Log'
   | '_Snapshot'
@@ -163,6 +164,15 @@ export const TABLES: Readonly<Record<TableName, TableDef>> = {
     system: true,
     note: 'Push-notification device tokens. Managed by the app.',
   },
+  'Sign-ins': {
+    headers: ['Email', 'FamilyID', 'First Signed In', 'Last Signed In', 'Last Opened App', 'Sign-ins'],
+    aliases: {
+      'Last Opened App': ['Last Opened'],
+      'Sign-ins': ['Sign-in Count', 'Times Signed In'],
+    },
+    system: true,
+    note: 'Who uses the app: one row per email with when it first and last signed in, when it last opened the app, and how many times it signed in. Managed by the app.',
+  },
   Settings: {
     headers: ['Key', 'Value', 'Notes'],
     note: 'App settings (non-secret). Secrets go in Apps Script > Project Settings > Script Properties.',
@@ -197,6 +207,7 @@ export const TABLE_ORDER: readonly TableName[] = [
   'Settings',
   'Preferences',
   'Devices',
+  'Sign-ins',
   'Log',
   '_Snapshot',
   '_Sent',
@@ -221,7 +232,7 @@ export const SETTING_DEFAULTS = {
     'Checks payable to "Timberlane Music Association", P.O. Box 420, Plaistow, NH 03865. Please write the student\'s name and the trip in the memo line.',
   DONATE_URL: 'https://sites.google.com/view/timberlanemusicassociation/donate',
   PRIVACY_NOTE:
-    'TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student\'s name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.',
+    'TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student\'s name, grade, school and groups. The app also notes when each parent signs in and last opened it, so TMA can see who is using it. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.',
   REMINDER_DAYS: '14, 7, 1',
   EMAIL_ENABLED: 'TRUE',
   /** "cloudflare": send as noreply@mytma.org through the push Worker (Gmail if that fails); "gmail": always MailApp. */
@@ -234,6 +245,18 @@ export const SETTING_DEFAULTS = {
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;
+
+/**
+ * Earlier defaults that Set up wrote into older sheets. A cell that still holds one of these exactly
+ * (the treasurer never changed it) gets today's default the next time Set up runs; any other text is
+ * left alone.
+ */
+export const OLD_SETTING_DEFAULTS: Readonly<Partial<Record<SettingKey, readonly string[]>>> = {
+  // Before the app noted sign-ins (the Sign-ins tab).
+  PRIVACY_NOTE: [
+    'TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student\'s name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.',
+  ],
+};
 
 /** Secrets live in Script Properties, never in the sheet. */
 export type SecretName =

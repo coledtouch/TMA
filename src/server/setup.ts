@@ -3,12 +3,13 @@
  * keys, create TOKEN_SECRET, and optionally seed the sample data into an
  * empty sheet. Safe to run any number of times.
  */
-import { SETTING_DEFAULTS, TABLE_ORDER, type SecretName, type SettingKey, type TableName } from '../shared/schema';
+import { OLD_SETTING_DEFAULTS, SETTING_DEFAULTS, TABLE_ORDER, type SecretName, type SettingKey, type TableName } from '../shared/schema';
 import type { SetupReport } from '../shared/types';
 import type { Ctx } from './context';
 import { sampleData } from './sample-data';
 import type { Crypto, SetupOptions } from './services';
 import { SETTING_NOTES, settingKey } from './settings';
+import { hasOwn, str } from './util';
 
 const SEED_GUARD: readonly TableName[] = ['Families', 'Students', 'Ledger'];
 
@@ -23,6 +24,11 @@ export function generateSecret(c: Crypto, name: SecretName): string {
   return secret;
 }
 
+/** Text compared the way a person reads it: runs of spaces and line breaks count as one space. */
+function sameText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
 export function runSetup(ctx: Ctx, options: SetupOptions = {}): SetupReport {
   const report: SetupReport = { createdTables: [], addedColumns: [], seeded: false, secretsInitialized: [] };
 
@@ -32,10 +38,23 @@ export function runSetup(ctx: Ctx, options: SetupOptions = {}): SetupReport {
     for (const column of result.addedColumns) report.addedColumns.push({ table, column });
   }
 
-  const present = new Set(ctx.db.rows('Settings').map((r) => settingKey(r.data.Key)));
+  const settingRows = ctx.db.rows('Settings');
+  const present = new Set(settingRows.map((r) => settingKey(r.data.Key)));
   const missing = (Object.keys(SETTING_DEFAULTS) as SettingKey[])
     .filter((key) => !present.has(key))
     .map((key) => ({ Key: key, Value: SETTING_DEFAULTS[key], Notes: SETTING_NOTES[key] }));
+
+  // An old default nobody changed gets today's (e.g. the privacy note now mentions the Sign-ins tab).
+  const updated: SettingKey[] = [];
+  for (const row of settingRows) {
+    const key = settingKey(row.data.Key) as SettingKey;
+    const olds = hasOwn(OLD_SETTING_DEFAULTS, key) ? OLD_SETTING_DEFAULTS[key] : undefined;
+    if (!olds || !olds.some((old) => sameText(old) === sameText(str(row.data.Value)))) continue;
+    ctx.db.update('Settings', row.rowNumber, { Value: SETTING_DEFAULTS[key] });
+    if (!updated.includes(key)) updated.push(key);
+  }
+  if (updated.length) report.updatedSettings = updated;
+
   ctx.db.append('Settings', missing);
   if (missing.length) report.addedSettings = missing.map((row) => row.Key);
 
@@ -60,6 +79,7 @@ export function runSetup(ctx: Ctx, options: SetupOptions = {}): SetupReport {
       report.createdTables.length ? `created ${report.createdTables.join(', ')}` : 'tabs ok',
       report.addedColumns.length ? `added ${report.addedColumns.length} column(s)` : '',
       missing.length ? `added ${missing.length} setting(s)` : '',
+      updated.length ? `updated ${updated.join(', ')} to the new default` : '',
       report.secretsInitialized.length ? 'created TOKEN_SECRET' : '',
       report.seeded ? 'seeded sample data' : '',
     ]

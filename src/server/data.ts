@@ -102,6 +102,24 @@ export interface DeviceRec {
   createdAt?: IsoDateTime;
   lastSeen?: IsoDateTime;
 }
+/**
+ * One person's Sign-ins row. Rows repeating an email (capitals and spaces ignored) count as one:
+ * the earliest first sign-in, the latest last sign-in and app opening, and the highest count
+ * (a pasted copy must not double it). `row` is the one kept: the row with the latest timestamps.
+ */
+export interface SignInRec {
+  row: number;
+  /** Every row for this email, in sheet order (more than one = duplicates the next write merges). */
+  rows: number[];
+  email: string;
+  /** The household the row names (as written at the last sign-in or opening). */
+  familyId: string;
+  firstSignedIn?: IsoDateTime;
+  lastSignedIn?: IsoDateTime;
+  lastOpened?: IsoDateTime;
+  /** Times signed in; 0 when blank (someone who signed in before the app kept this tab). */
+  count: number;
+}
 export interface LogRec extends LogEntry {
   row: number;
 }
@@ -407,6 +425,66 @@ export function mapEvent(row: StoredRow, settings: AppSettings): EventRec | null
   const details = str(d.Details);
   if (details) e.details = details;
   return e;
+}
+
+/** A Sign-ins count cell: a whole number of times, 0 when blank or not a number. */
+export function signInCount(value: unknown): number {
+  const n = typeof value === 'number' ? value : /^\s*\d+(\.\d*)?\s*$/.test(str(value)) ? parseFloat(str(value)) : 0;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/** The later of two timestamps (ISO strings from parseTimestamp sort as text). */
+export function latest(a: IsoDateTime | undefined, b: IsoDateTime | undefined): IsoDateTime | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a >= b ? a : b;
+}
+
+function earliest(a: IsoDateTime | undefined, b: IsoDateTime | undefined): IsoDateTime | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a <= b ? a : b;
+}
+
+/** When this person was last seen in the app: the later of Last Opened App and Last Signed In. */
+export function lastActive(rec: Pick<SignInRec, 'lastOpened' | 'lastSignedIn'> | undefined): IsoDateTime | undefined {
+  return rec ? latest(rec.lastOpened, rec.lastSignedIn) : undefined;
+}
+
+export function mapSignIn(row: StoredRow): SignInRec | null {
+  const d = row.data;
+  const email = normEmail(d.Email);
+  if (!isEmail(email)) return null;
+  const rec: SignInRec = { row: row.rowNumber, rows: [row.rowNumber], email, familyId: str(d.FamilyID), count: signInCount(d['Sign-ins']) };
+  const first = parseTimestamp(d['First Signed In']);
+  if (first) rec.firstSignedIn = first;
+  const last = parseTimestamp(d['Last Signed In']);
+  if (last) rec.lastSignedIn = last;
+  const opened = parseTimestamp(d['Last Opened App']);
+  if (opened) rec.lastOpened = opened;
+  return rec;
+}
+
+/** Two rows for one email as one record (see SignInRec). */
+export function mergeSignIns(a: SignInRec, b: SignInRec): SignInRec {
+  const aSeen = lastActive(a) ?? '';
+  const bSeen = lastActive(b) ?? '';
+  // The row with the latest timestamps is kept; on a tie, the one higher up.
+  const keep = bSeen > aSeen || (bSeen === aSeen && b.row < a.row) ? b : a;
+  const merged: SignInRec = {
+    row: keep.row,
+    rows: [...a.rows, ...b.rows].sort((x, y) => x - y),
+    email: keep.email,
+    familyId: keep.familyId,
+    count: Math.max(a.count, b.count),
+  };
+  const first = earliest(a.firstSignedIn, b.firstSignedIn);
+  if (first) merged.firstSignedIn = first;
+  const last = latest(a.lastSignedIn, b.lastSignedIn);
+  if (last) merged.lastSignedIn = last;
+  const opened = latest(a.lastOpened, b.lastOpened);
+  if (opened) merged.lastOpened = opened;
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +884,18 @@ export class Model {
   devicesFor(email: string): DeviceRec[] {
     const key = normEmail(email);
     return key ? this.devices().filter((d) => d.email === key) : [];
+  }
+
+  /** Sign-ins by email, one record per person (duplicate rows merged, see SignInRec). */
+  signIns(): Map<string, SignInRec> {
+    return this.memo('signIns', ['Sign-ins'], () => {
+      const map = new Map<string, SignInRec>();
+      for (const rec of this.parse('Sign-ins', mapSignIn)) {
+        const seen = map.get(rec.email);
+        map.set(rec.email, seen ? mergeSignIns(seen, rec) : rec);
+      }
+      return map;
+    });
   }
 
   logEntries(): LogRec[] {

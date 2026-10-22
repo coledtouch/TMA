@@ -17,6 +17,7 @@ import { cancelRedemption, decideRedemption, requestRedemption } from './redempt
 import { runReport } from './reports';
 import type { App, Services, SetupOptions } from './services';
 import { runSetup } from './setup';
+import { noteAppOpened } from './sign-ins';
 import { emptyReport, runDaily, runSync } from './sync';
 import { errorMessage, hasOwn, isRecord } from './util';
 import type { Params } from './validate';
@@ -40,7 +41,13 @@ const PUBLIC_ROUTES: Record<PublicAction, (ctx: Ctx, params: Params) => unknown>
 };
 
 const ROUTES: Record<PrivateAction, Route> = {
-  'me.bootstrap': { run: (ctx, email) => buildBootstrap(ctx, email) },
+  'me.bootstrap': {
+    run(ctx, email) {
+      const bootstrap = buildBootstrap(ctx, email);
+      noteAppOpened(ctx, email); // best effort, at most every 6 hours per email
+      return bootstrap;
+    },
+  },
   'household.save': { write: true, run: saveHousehold },
   'prefs.save': { write: true, run: savePrefs },
   'push.register': { write: true, run: registerDevice },

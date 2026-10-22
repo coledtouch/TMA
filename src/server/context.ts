@@ -7,7 +7,7 @@ import { Model } from './data';
 import { Db } from './db';
 import { ApiError } from './errors';
 import type { DeliveryJob } from './notify';
-import type { RowData, Services } from './services';
+import type { LockOptions, RowData, Services } from './services';
 import { nyDate, truncate } from './util';
 
 export interface Ctx {
@@ -60,8 +60,9 @@ export function createCtx(services: Services): Ctx {
  * Run `fn` holding the script-wide write lock, on fresh data (anything read
  * before the lock may be stale), and write queued Log rows before releasing.
  * Never nest: Ctx-level code that already holds the lock calls helpers directly.
+ * `options.waitMs` gives up sooner (it throws) when another execution holds the lock.
  */
-export function inWriteLock<T>(ctx: Ctx, fn: () => T): T {
+export function inWriteLock<T>(ctx: Ctx, fn: () => T, options?: LockOptions): T {
   return ctx.s.withLock(() => {
     ctx.db.reset();
     try {
@@ -69,7 +70,7 @@ export function inWriteLock<T>(ctx: Ctx, fn: () => T): T {
     } finally {
       ctx.flushLog();
     }
-  });
+  }, options);
 }
 
 /** Fixed-window limiter in the cache: at most `limit` calls per `windowSeconds` for `key`. */

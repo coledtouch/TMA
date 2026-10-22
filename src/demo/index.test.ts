@@ -201,6 +201,27 @@ describe('demo client', () => {
     expect(second.demo.outbox().some((i) => i.title === '+$50.00 for Avery')).toBe(true);
   });
 
+  it('notes sign-ins like the live app, keeps them across reloads, and reports who is using it', async () => {
+    const first = newClient();
+    await signIn(first, PARENT);
+    await first.call('me.bootstrap', {});
+    flushSave();
+    type Row = Record<string, unknown>;
+    const signIns = () => (JSON.parse(localStorage.getItem(DEMO_DB_KEY)!) as { tables: Record<string, Row[]> }).tables['Sign-ins'];
+    const parentRow = () => signIns().find((r) => r.Email === PARENT)!;
+    // The sample row had 2 sign-ins; this one makes 3, and the household and times are filled in.
+    expect(parentRow()).toMatchObject({ FamilyID: 'F0001', 'Sign-ins': 3 });
+    expect(parentRow()['Last Signed In']).toBe(parentRow()['Last Opened App']);
+    expect(Date.now() - Date.parse(String(parentRow()['Last Signed In']))).toBeLessThan(60_000);
+
+    const second = newClient();
+    await signIn(second, TREASURER);
+    const { report } = await second.call('admin.report', { kind: 'app-activity' });
+    // Both just signed in, so they lead the list.
+    expect(report.rows.slice(0, 2).map((r) => r.who).sort()).toEqual(['Jordan Thompson & Casey Thompson', TREASURER]);
+    expect(report.rows.find((r) => r.familyId === 'F0001')).toMatchObject({ signIns: 3, daysSince: 0 });
+  });
+
   it('keeps a session across reloads', async () => {
     const first = newClient();
     await signIn(first, PARENT);

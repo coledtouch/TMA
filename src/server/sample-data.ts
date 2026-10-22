@@ -328,6 +328,12 @@ export function sampleData(today: Date, opts: { demoSettings?: boolean } = {}): 
         'Last Seen': at(-1, 7, 30),
       },
     ];
+    // So the demo's "Who's using the app" report has something to show. The Nguyens never signed in.
+    data['Sign-ins'] = [
+      signIn('parent@example.com', 'F0001', at(-45, 19, 2), at(-30, 18, 55), at(-1, 7, 30), 2),
+      signIn('ortiz@example.com', 'F0003', at(-2, 21, 10), at(-2, 21, 10), at(-2, 21, 20), 1),
+      signIn(TREASURER, '', at(-60, 9, 0), at(-20, 9, 0), at(-3, 9, 5), 3),
+    ];
   }
   return data;
 }
@@ -353,5 +359,16 @@ function student(
     Ensembles: ensembles,
     Instrument: instrument,
     Status: status,
+  };
+}
+
+function signIn(email: string, familyId: string, first: string, last: string, opened: string, count: number): RowData {
+  return {
+    Email: email,
+    FamilyID: familyId,
+    'First Signed In': first,
+    'Last Signed In': last,
+    'Last Opened App': opened,
+    'Sign-ins': count,
   };
 }

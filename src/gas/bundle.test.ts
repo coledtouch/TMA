@@ -224,6 +224,35 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
       parentToken = token;
     });
 
+    it('notes the sign-in in the Sign-ins tab, lists it in the menu report, and still signs in when the lock is busy', () => {
+      const tab = () => gas.spreadsheet.getSheetByName('Sign-ins')!.dump();
+      expect(tab()[0]).toEqual(['Email', 'FamilyID', 'First Signed In', 'Last Signed In', 'Last Opened App', 'Sign-ins']);
+      expect(tab().slice(1).map((r) => [r[0], r[1], r[5]])).toEqual([['parent@example.com', 'F0001', 1]]);
+      expect(gas.spreadsheet.getSheetByName('Sign-ins')!.isSheetHidden()).toBe(true);
+
+      g.onOpen();
+      const menu = gas.ui.menus.find((m) => m.name === 'TMA App')!;
+      expect(menu.items).toContainEqual(["Reports › Who's using the app", 'reportAppActivity']);
+      expect(g.reportAppActivity()).toBeUndefined();
+      const report = gas.spreadsheet.getSheetByName("Report: Who's using the app")!.dump();
+      expect(report[2].slice(0, 3)).toEqual(['Jordan Thompson & Casey Thompson', 'F0001', 'Active']);
+
+      const sent = post({ action: 'auth.requestCode', params: { email: 'casey.thompson@example.com' } });
+      expect(sent.ok).toBe(true);
+      const code = /(\d{6})/.exec(String(emailed.at(-1)?.subject))?.[1];
+      gas.lock.busy = true;
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const verified = post({ action: 'auth.verifyCode', params: { email: 'casey.thompson@example.com', code } });
+        expect(verified.ok).toBe(true);
+        expect(post({ action: 'me.bootstrap', params: {}, token: verified.data.token }).ok).toBe(true);
+      } finally {
+        gas.lock.busy = false;
+        error.mockRestore();
+      }
+      expect(tab()).toHaveLength(2); // Casey's sign-in was skipped, not an error
+    });
+
     it('registers a browser subscription and pushes a credit to it through the Worker', () => {
       const sub = {
         endpoint: 'https://web.push.apple.com/QGuQyavXutnMH-test-device',

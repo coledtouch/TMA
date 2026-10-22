@@ -49,6 +49,7 @@ export const REPORTS: readonly ReportInfo[] = [
   { kind: 'roster', title: 'Roster', summary: "Students with their parents' emails and phone numbers", icon: 'users' },
   { kind: 'open-items', title: 'Open items', summary: 'What is waiting on the treasurer right now', icon: 'bell' },
   { kind: 'app-usage', title: 'App usage', summary: 'How many families use the app and get notifications', icon: 'sparkle' },
+  { kind: 'app-activity', title: "Who's using the app", summary: 'When each household last opened the app and signed in', icon: 'user' },
 ];
 
 const INFO = new Map(REPORTS.map((r) => [r.kind, r]));
@@ -69,6 +70,7 @@ export const REPORT_FILTERS: Readonly<Record<ReportKind, readonly FilterName[]>>
   roster: ['school', 'ensemble'],
   'open-items': [],
   'app-usage': [],
+  'app-activity': ['school', 'ensemble'],
 };
 
 /** What the filter controls hold. Blank means "all" (or, for dates, the school year). */

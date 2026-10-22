@@ -35,6 +35,7 @@ const ENTRY_FUNCTIONS = [
   'reportRoster',
   'reportOpenItems',
   'reportAppUsage',
+  'reportAppActivity',
 ];
 
 const BANNER = '// GENERATED FILE — do not edit. Built from src/ by `npm run build:gas`.';

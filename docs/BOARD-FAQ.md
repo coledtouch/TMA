@@ -22,6 +22,11 @@ it that would be valuable to a criminal.
 * **Settings:** each parent's notification choices, and, for each phone where they turned on
   notifications, the browser's notification address (a web address at Apple, Google, Mozilla or
   Microsoft plus two keys). It is not a phone number.
+* **App use:** when each parent first and last signed in, when they last opened the app, and how
+  many times they signed in (the hidden **Sign-ins** tab), so the board can see whether families use
+  it. Not where they were, which device they used, or what they looked at. The app's privacy note
+  (Settings `PRIVACY_NOTE`) should say so. The default does, and *Set up / repair tabs* puts it in
+  place of the old default. If the treasurer edited the note, they add the sentence by hand.
 
 **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
 student emails or phone numbers, photos, grades or any school records.
@@ -92,6 +97,7 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
 * **Board members** listed in the sheet's Settings (`ADMIN_EMAILS`) get *Board tools* in the app:
   fund requests, new sign-ups, announcements, an activity log and reports. One report, the roster,
   lists parents' emails and phone numbers; each time someone opens it in the app, the Log tab says who.
+  Another, *Who's using the app*, shows when each household last opened the app and signed in.
 * **People who can open the spreadsheet** see everything, just as today. Keep that list short.
 
 ### How is it secured?
@@ -168,7 +174,7 @@ spreadsheet, exactly as the treasurer has always kept it.
 ### A family asks us to delete their information. What do we do?
 
 Delete their rows in **Families** and **Students**, and their email's rows in the hidden
-**Preferences** and **Devices** tabs (*View → Hidden sheets*). Keep the **Ledger** and **Payments**
+**Preferences**, **Devices** and **Sign-ins** tabs (*View → Hidden sheets*). Keep the **Ledger** and **Payments**
 rows for TMA's financial records. They contain only a student ID and amounts. Once the household
 and student rows are gone, nobody can see that family's information in the app. The app never
 gives a later sign-up a student or family ID that is still used in any tab, so those kept rows can't

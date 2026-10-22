@@ -9,6 +9,7 @@ import { inWriteLock, rateLimit } from './context';
 import { renderEmail } from './email';
 import { ApiError, badRequest, fail } from './errors';
 import { MailReserveError } from './services';
+import { recordSignIn } from './sign-ins';
 import * as v from './validate';
 import { base64UrlDecode, base64UrlEncode, errorMessage, isEmail, isRecord, safeEqual } from './util';
 
@@ -196,7 +197,9 @@ export function verifyCode(ctx: Ctx, params: v.Params): { token: string; expires
     );
   }
   ctx.s.cache.remove(key);
-  return issueToken(ctx, email, secret);
+  const session = issueToken(ctx, email, secret);
+  recordSignIn(ctx, email); // best effort: never fails or holds up the sign-in
+  return session;
 }
 
 export function issueToken(ctx: Ctx, email: string, secret = requireSecret(ctx)): { token: string; expiresAt: IsoDateTime } {

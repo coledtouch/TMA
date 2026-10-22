@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SETTING_DEFAULTS, TABLE_ORDER } from '../shared/schema';
+import { OLD_SETTING_DEFAULTS, SETTING_DEFAULTS, TABLE_ORDER } from '../shared/schema';
 import { createApp } from './app';
 import { createDeterministicCrypto, createMemoryServices } from './memory';
 import { sampleData } from './sample-data';
@@ -53,6 +53,30 @@ describe('setup()', () => {
     expect(settings).toHaveLength(Object.keys(SETTING_DEFAULTS).length);
   });
 
+  it('gives an untouched old privacy note the new default, which mentions sign-ins, and leaves edited text alone', () => {
+    const oldNote = OLD_SETTING_DEFAULTS.PRIVACY_NOTE?.[0] ?? '';
+    expect(oldNote).not.toMatch(/signs in/);
+    expect(SETTING_DEFAULTS.PRIVACY_NOTE).toMatch(/notes when each parent signs in and last opened it/);
+    const custom = `${oldNote} Questions? Ask the treasurer.`;
+    const services = createMemoryServices({
+      now: TEST_NOW,
+      db: { tables: { Settings: [{ Key: 'Privacy Note', Value: `${oldNote.replace('. ', '.\n')}  `, Notes: 'mine' }] } },
+    });
+    const first = createApp(services).setup();
+    expect(first.updatedSettings).toEqual(['PRIVACY_NOTE']);
+    expect(services.db.tables.Settings?.[0]).toEqual({ Key: 'Privacy Note', Value: SETTING_DEFAULTS.PRIVACY_NOTE, Notes: 'mine' });
+    expect(createApp(services).setup().updatedSettings).toBeUndefined();
+
+    const edited = createMemoryServices({ now: TEST_NOW, db: { tables: { Settings: [{ Key: 'PRIVACY_NOTE', Value: custom }] } } });
+    expect(createApp(edited).setup().updatedSettings).toBeUndefined();
+    expect(edited.db.tables.Settings?.[0].Value).toBe(custom);
+
+    // What a family sees under More → Your privacy after Set up on an older sheet.
+    const h = harness({ settings: { PRIVACY_NOTE: oldNote } });
+    h.app.setup();
+    expect(h.ok('me.bootstrap', {}, h.signIn(PARENT)).settings.privacyNote).toBe(SETTING_DEFAULTS.PRIVACY_NOTE);
+  });
+
   it('seeds the sample data only into an empty sheet', () => {
     const services = createMemoryServices({ now: TEST_NOW });
     const report = createApp(services).setup({ seedSampleData: true });
@@ -62,6 +86,7 @@ describe('setup()', () => {
     // Production seeding keeps default settings and adds no demo device.
     expect(services.db.tables.Settings?.find((r) => r.Key === 'ADMIN_EMAILS')?.Value).toBe('');
     expect(services.db.tables.Devices).toEqual([]);
+    expect(services.db.tables['Sign-ins']).toEqual([]); // nobody has signed in to a fresh sheet
 
     const again = createApp(services).setup({ seedSampleData: true });
     expect(again.seeded).toBe(false);

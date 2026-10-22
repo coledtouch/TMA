@@ -369,15 +369,20 @@ export type ReportKind =
   | 'roster'
   /** What is waiting on the treasurer: pending fund requests, new households, payments still clearing. */
   | 'open-items'
-  /** How many families use the app: sign-ups, push devices, notification choices. */
-  | 'app-usage';
+  /** How many families use the app: sign-ins, recent use, push devices, notification choices. Counts only. */
+  | 'app-usage'
+  /**
+   * "Who's using the app": one row per household (Active or Pending) and per person who signed in
+   * with no household yet: last opened, last signed in, sign-ins, push devices, parents not signed in yet.
+   */
+  | 'app-activity';
 
 export interface ReportFilters {
   /** trip-balances, payments, fund-activity: one activity only. */
   activityId?: ActivityId;
-  /** trip-balances, student-funds, roster: students at this school level (Settings SCHOOLS). */
+  /** trip-balances, student-funds, roster, app-activity: students at this school level (Settings SCHOOLS). */
   school?: string;
-  /** trip-balances, student-funds, roster: students in this group (Settings ENSEMBLES). */
+  /** trip-balances, student-funds, roster, app-activity: students in this group (Settings ENSEMBLES). */
   ensemble?: string;
   /** fundraiser-totals, fund-activity, payments: inclusive date range (spreadsheet time zone). */
   from?: IsoDate;
@@ -450,6 +455,8 @@ export interface SetupReport {
   secretsInitialized: string[];
   /** Settings keys setup() added with their defaults (absent from older backends). */
   addedSettings?: string[];
+  /** Settings keys whose untouched old default setup() replaced with today's default (OLD_SETTING_DEFAULTS). */
+  updatedSettings?: string[];
 }
 
 // ---------------------------------------------------------------------------

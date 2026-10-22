@@ -185,12 +185,12 @@ describe('Reports', () => {
     expect(api.call).not.toHaveBeenCalled();
   });
 
-  it('lists the eight reports with a plain line each', () => {
+  it('lists the nine reports with a plain line each', () => {
     const api = fakeApi();
     renderScreen(<Reports />, { api, data: adminData() });
     const list = screen.getByRole('list', { name: 'Reports' });
     const links = within(list).getAllByRole('link');
-    expect(links).toHaveLength(8);
+    expect(links).toHaveLength(9);
     expect(REPORTS.map((r) => r.kind)).toEqual([
       'trip-balances',
       'student-funds',
@@ -200,7 +200,11 @@ describe('Reports', () => {
       'roster',
       'open-items',
       'app-usage',
+      'app-activity',
     ]);
+    const who = within(list).getByRole('link', { name: /Who's using the app/ });
+    expect(who).toHaveAttribute('href', '#/reports?kind=app-activity');
+    expect(who).toHaveTextContent('When each household last opened the app and signed in');
     const trips = within(list).getByRole('link', { name: /Trip balances/ });
     expect(trips).toHaveAttribute('href', '#/reports?kind=trip-balances');
     expect(trips).toHaveTextContent('Who still owes what');
@@ -468,6 +472,7 @@ describe('Reports', () => {
     ['payments', 'Jul 1, 2026 to Jun 30, 2027 · All activities'],
     ['roster', 'All schools · All groups'],
     ['app-usage', ''],
+    ['app-activity', 'All schools · All groups'],
   ])('sums up the %s filters in words', (kind, words) => {
     const report = { ...studentFunds(), kind, filters: { from: '2026-07-01', to: '2027-06-30' } };
     expect(filterSummary(report, OPTIONS)).toBe(words);

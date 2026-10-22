@@ -33,6 +33,7 @@ var TMA = (() => {
     linkPushWorker: () => linkPushWorker,
     onOpen: () => onOpen,
     parseApiRequest: () => parseApiRequest,
+    reportAppActivity: () => reportAppActivity,
     reportAppUsage: () => reportAppUsage,
     reportFundActivity: () => reportFundActivity,
     reportFundraiserTotals: () => reportFundraiserTotals,
@@ -200,6 +201,15 @@ var TMA = (() => {
       system: true,
       note: "Push-notification device tokens. Managed by the app."
     },
+    "Sign-ins": {
+      headers: ["Email", "FamilyID", "First Signed In", "Last Signed In", "Last Opened App", "Sign-ins"],
+      aliases: {
+        "Last Opened App": ["Last Opened"],
+        "Sign-ins": ["Sign-in Count", "Times Signed In"]
+      },
+      system: true,
+      note: "Who uses the app: one row per email with when it first and last signed in, when it last opened the app, and how many times it signed in. Managed by the app."
+    },
     Settings: {
       headers: ["Key", "Value", "Notes"],
       note: "App settings (non-secret). Secrets go in Apps Script > Project Settings > Script Properties."
@@ -233,6 +243,7 @@ var TMA = (() => {
     "Settings",
     "Preferences",
     "Devices",
+    "Sign-ins",
     "Log",
     "_Snapshot",
     "_Sent"
@@ -253,7 +264,7 @@ var TMA = (() => {
     MIN_PAYMENT: "5.00",
     OTHER_PAYMENT_INSTRUCTIONS: `Checks payable to "Timberlane Music Association", P.O. Box 420, Plaistow, NH 03865. Please write the student's name and the trip in the memo line.`,
     DONATE_URL: "https://sites.google.com/view/timberlanemusicassociation/donate",
-    PRIVACY_NOTE: "TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student's name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.",
+    PRIVACY_NOTE: "TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student's name, grade, school and groups. The app also notes when each parent signs in and last opened it, so TMA can see who is using it. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers.",
     REMINDER_DAYS: "14, 7, 1",
     EMAIL_ENABLED: "TRUE",
     /** "cloudflare": send as noreply@mytma.org through the push Worker (Gmail if that fails); "gmail": always MailApp. */
@@ -263,6 +274,12 @@ var TMA = (() => {
     TOKEN_VERSION: "1",
     SESSION_DAYS: "120",
     NEW_SIGNUPS_PER_HOUR: "30"
+  };
+  var OLD_SETTING_DEFAULTS = {
+    // Before the app noted sign-ins (the Sign-ins tab).
+    PRIVACY_NOTE: [
+      "TMA only stores what it needs to run the program: parent names, emails, an optional cell number, and each student's name, grade, school and groups. No addresses, SSNs or card numbers. Card payments are handled by PayPal; TMA never sees card numbers."
+    ]
   };
   function normalizeHeader(h) {
     return String(h).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -1341,8 +1358,8 @@ var TMA = (() => {
       amountCents: Math.max(0, dollarsToCents(d.Amount)),
       status: redemptionStatus(d.Status)
     };
-    const note = str(d.Note);
-    if (note) r.note = note;
+    const note2 = str(d.Note);
+    if (note2) r.note = note2;
     const decidedAt = parseTimestamp(d.Decided);
     if (decidedAt) r.decidedAt = decidedAt;
     const decidedBy = str(d["Decided By"]);
@@ -1402,6 +1419,56 @@ var TMA = (() => {
     const details = str(d.Details);
     if (details) e.details = details;
     return e;
+  }
+  function signInCount(value) {
+    const n = typeof value === "number" ? value : /^\s*\d+(\.\d*)?\s*$/.test(str(value)) ? parseFloat(str(value)) : 0;
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+  function latest(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    return a >= b ? a : b;
+  }
+  function earliest(a, b) {
+    if (!a) return b;
+    if (!b) return a;
+    return a <= b ? a : b;
+  }
+  function lastActive(rec) {
+    return rec ? latest(rec.lastOpened, rec.lastSignedIn) : void 0;
+  }
+  function mapSignIn(row) {
+    const d = row.data;
+    const email2 = normEmail(d.Email);
+    if (!isEmail(email2)) return null;
+    const rec = { row: row.rowNumber, rows: [row.rowNumber], email: email2, familyId: str(d.FamilyID), count: signInCount(d["Sign-ins"]) };
+    const first = parseTimestamp(d["First Signed In"]);
+    if (first) rec.firstSignedIn = first;
+    const last = parseTimestamp(d["Last Signed In"]);
+    if (last) rec.lastSignedIn = last;
+    const opened = parseTimestamp(d["Last Opened App"]);
+    if (opened) rec.lastOpened = opened;
+    return rec;
+  }
+  function mergeSignIns(a, b) {
+    var _a, _b;
+    const aSeen = (_a = lastActive(a)) != null ? _a : "";
+    const bSeen = (_b = lastActive(b)) != null ? _b : "";
+    const keep = bSeen > aSeen || bSeen === aSeen && b.row < a.row ? b : a;
+    const merged = {
+      row: keep.row,
+      rows: [...a.rows, ...b.rows].sort((x, y) => x - y),
+      email: keep.email,
+      familyId: keep.familyId,
+      count: Math.max(a.count, b.count)
+    };
+    const first = earliest(a.firstSignedIn, b.firstSignedIn);
+    if (first) merged.firstSignedIn = first;
+    const last = latest(a.lastSignedIn, b.lastSignedIn);
+    if (last) merged.lastSignedIn = last;
+    const opened = latest(a.lastOpened, b.lastOpened);
+    if (opened) merged.lastOpened = opened;
+    return merged;
   }
   function toFamily(f) {
     const out = {
@@ -1777,6 +1844,17 @@ var TMA = (() => {
       const key = normEmail(email2);
       return key ? this.devices().filter((d) => d.email === key) : [];
     }
+    /** Sign-ins by email, one record per person (duplicate rows merged, see SignInRec). */
+    signIns() {
+      return this.memo("signIns", ["Sign-ins"], () => {
+        const map = /* @__PURE__ */ new Map();
+        for (const rec of this.parse("Sign-ins", mapSignIn)) {
+          const seen = map.get(rec.email);
+          map.set(rec.email, seen ? mergeSignIns(seen, rec) : rec);
+        }
+        return map;
+      });
+    }
     logEntries() {
       return this.memo(
         "log",
@@ -1844,11 +1922,11 @@ var TMA = (() => {
     };
   }
   function redemptionDeniedNotice(amountCents, activityName2, adminNote, requestId) {
-    const note = adminNote ? ` Note: ${adminNote}` : "";
+    const note2 = adminNote ? ` Note: ${adminNote}` : "";
     return {
       topic: "payments",
       title: "Funds request not approved",
-      body: `Your request to apply ${formatCents(amountCents)} to ${activityName2} was not approved.${note}`,
+      body: `Your request to apply ${formatCents(amountCents)} to ${activityName2} was not approved.${note2}`,
       url: "#/trips",
       tag: `red-${requestId}`
     };
@@ -1863,11 +1941,11 @@ var TMA = (() => {
     };
   }
   function paymentReminderNotice(opts) {
-    const when = opts.days === 0 ? "today" : `in ${plural(opts.days, "day")}`;
+    const when2 = opts.days === 0 ? "today" : `in ${plural(opts.days, "day")}`;
     const how = opts.allowFunds && opts.allowOnline ? "Use activity funds or pay online in the app." : opts.allowFunds ? "You can use activity funds in the app." : opts.allowOnline ? "You can pay online in the app." : "See the app for ways to pay.";
     return {
       topic: "reminders",
-      title: `${opts.activityName} payment due ${when}`,
+      title: `${opts.activityName} payment due ${when2}`,
       body: `${opts.firstName} has ${formatCents(opts.remainingCents)} left to pay by ${shortDate(opts.dueDate)}. ${how}`,
       url: "#/trips",
       tag: opts.tag
@@ -2090,7 +2168,7 @@ var TMA = (() => {
       }
     };
   }
-  function inWriteLock(ctx, fn) {
+  function inWriteLock(ctx, fn, options) {
     return ctx.s.withLock(() => {
       ctx.db.reset();
       try {
@@ -2098,7 +2176,7 @@ var TMA = (() => {
       } finally {
         ctx.flushLog();
       }
-    });
+    }, options);
   }
   function rateLimit(ctx, key, limit, windowSeconds, message) {
     const nowMs = ctx.now.getTime();
@@ -2834,6 +2912,133 @@ var TMA = (() => {
     }
   };
 
+  // src/server/sign-ins.ts
+  var SIGN_IN_LOCK_WAIT_MS = 5e3;
+  var OPENED_LOCK_WAIT_MS = 1500;
+  var OPENED_EVERY_SECONDS = 6 * 3600;
+  var OPENED_RETRY_SECONDS = 600;
+  var PENDING_SIGN_IN_SECONDS = 6 * 3600;
+  var COLUMNS = TABLES["Sign-ins"].headers;
+  function openedKey(email2) {
+    return `opened:${email2}`;
+  }
+  function pendingSignInKey(email2) {
+    return `signin-pending:${email2}`;
+  }
+  function recordSignIn(ctx, email2) {
+    note(ctx, email2, "sign-in");
+  }
+  function noteAppOpened(ctx, email2) {
+    try {
+      if (ctx.s.cache.get(openedKey(email2))) return;
+    } catch (err) {
+      ctx.s.logger.error("Could not read the cache; app opening not noted", errorMessage(err));
+      return;
+    }
+    note(ctx, email2, "open");
+  }
+  function note(ctx, email2, activity) {
+    let written = false;
+    try {
+      const family = ctx.m.familyForEmail(email2);
+      const familyId = family ? family.id : "";
+      inWriteLock(
+        ctx,
+        () => {
+          const pending = readPending(ctx, email2);
+          upsert(ctx, email2, familyId, activity, pending);
+          if (pending) forgetPending(ctx, email2);
+        },
+        { waitMs: activity === "sign-in" ? SIGN_IN_LOCK_WAIT_MS : OPENED_LOCK_WAIT_MS }
+      );
+      written = true;
+    } catch (err) {
+      const what = activity === "sign-in" ? "the sign-in" : "that the app was opened";
+      ctx.s.logger.error(`Could not note ${what} (Sign-ins tab); skipped`, errorMessage(err));
+      if (activity === "sign-in") keepPending(ctx, email2);
+    }
+    try {
+      ctx.s.cache.put(openedKey(email2), "1", written ? OPENED_EVERY_SECONDS : OPENED_RETRY_SECONDS);
+    } catch (err) {
+      ctx.s.logger.error("Could not write the cache", errorMessage(err));
+    }
+  }
+  function upsert(ctx, email2, familyId, activity, pending) {
+    const rec = ctx.m.signIns().get(email2);
+    const now = ctx.now;
+    const signedIn = activity === "sign-in";
+    const added = (signedIn ? 1 : 0) + (pending ? pending.count : 0);
+    const first = pending ? pending.first : signedIn ? now.toISOString() : void 0;
+    const last = signedIn ? now.toISOString() : pending == null ? void 0 : pending.last;
+    if (!rec) {
+      ctx.db.append("Sign-ins", [
+        {
+          Email: email2,
+          FamilyID: familyId,
+          "First Signed In": when(first),
+          "Last Signed In": when(last),
+          "Last Opened App": now,
+          "Sign-ins": added
+        }
+      ]);
+      return;
+    }
+    const duplicates = rec.rows.filter((r) => r !== rec.row);
+    if (added === 0 && duplicates.length === 0 && rec.familyId === familyId && recentlyOpened(ctx, rec)) return;
+    const patch = { FamilyID: familyId, "Last Opened App": now };
+    if (added > 0) {
+      patch["Last Signed In"] = signedIn ? now : when(latest(rec.lastSignedIn, last));
+      patch["Sign-ins"] = rec.count + added;
+      if (!rec.firstSignedIn) patch["First Signed In"] = when(first);
+    }
+    if (duplicates.length > 0) {
+      patch.Email = email2;
+      if (patch["First Signed In"] === void 0) patch["First Signed In"] = when(rec.firstSignedIn);
+      if (patch["Last Signed In"] === void 0) patch["Last Signed In"] = when(rec.lastSignedIn);
+      if (patch["Sign-ins"] === void 0) patch["Sign-ins"] = rec.count;
+    }
+    ctx.db.update("Sign-ins", rec.row, patch);
+    for (const row of duplicates) ctx.db.clear("Sign-ins", row, COLUMNS);
+  }
+  function recentlyOpened(ctx, rec) {
+    const t = rec.lastOpened ? Date.parse(rec.lastOpened) : NaN;
+    const age = ctx.now.getTime() - t;
+    return age >= 0 && age < OPENED_EVERY_SECONDS * 1e3;
+  }
+  function when(iso) {
+    return iso ? new Date(iso) : "";
+  }
+  function readPending(ctx, email2) {
+    try {
+      const raw = ctx.s.cache.get(pendingSignInKey(email2));
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (isRecord(p) && typeof p.count === "number" && Number.isInteger(p.count) && p.count > 0 && typeof p.first === "string" && typeof p.last === "string" && !Number.isNaN(Date.parse(p.first)) && !Number.isNaN(Date.parse(p.last))) {
+        return { count: p.count, first: p.first, last: p.last };
+      }
+    } catch (err) {
+      ctx.s.logger.error("Could not read a skipped sign-in from the cache", errorMessage(err));
+    }
+    return null;
+  }
+  function keepPending(ctx, email2) {
+    const before = readPending(ctx, email2);
+    const now = ctx.now.toISOString();
+    const kept = { count: (before ? before.count : 0) + 1, first: before ? before.first : now, last: now };
+    try {
+      ctx.s.cache.put(pendingSignInKey(email2), JSON.stringify(kept), PENDING_SIGN_IN_SECONDS);
+    } catch (err) {
+      ctx.s.logger.error("Could not keep the skipped sign-in in the cache", errorMessage(err));
+    }
+  }
+  function forgetPending(ctx, email2) {
+    try {
+      ctx.s.cache.remove(pendingSignInKey(email2));
+    } catch (err) {
+      ctx.s.logger.error("Could not clear a skipped sign-in from the cache", errorMessage(err));
+    }
+  }
+
   // src/server/auth.ts
   var CODE_TTL_SECONDS = 600;
   var MAX_CODE_ATTEMPTS = 5;
@@ -2970,7 +3175,9 @@ var TMA = (() => {
       );
     }
     ctx.s.cache.remove(key);
-    return issueToken(ctx, email2, secret);
+    const session = issueToken(ctx, email2, secret);
+    recordSignIn(ctx, email2);
+    return session;
   }
   function issueToken(ctx, email2, secret = requireSecret(ctx)) {
     const settings = ctx.m.settings();
@@ -3631,7 +3838,7 @@ var TMA = (() => {
     const studentId = id(params.studentId, "Student");
     const activityId = id(params.activityId, "Activity");
     const amount = cents(params.amountCents, "Amount", MIN_REDEMPTION_CENTS);
-    const note = optText(params.note, "Note", LIMITS.note, true);
+    const note2 = optText(params.note, "Note", LIMITS.note, true);
     rateLimit(ctx, `red-rl:${email2}`, 20, 3600, "Too many requests in a short time. Please try again later.");
     const family = requireFamily(ctx, email2, { active: true });
     const student2 = requireOwnStudent(ctx, family, studentId);
@@ -3665,7 +3872,7 @@ var TMA = (() => {
         StudentID: student2.id,
         ActivityID: activity.id,
         Amount: centsToDollars(amount),
-        Note: note,
+        Note: note2,
         Status: "Pending"
       }
     ]);
@@ -3787,7 +3994,8 @@ var TMA = (() => {
     "payments",
     "roster",
     "open-items",
-    "app-usage"
+    "app-usage",
+    "app-activity"
   ];
   var REPORT_TITLES = {
     "trip-balances": "Trip balances",
@@ -3797,7 +4005,8 @@ var TMA = (() => {
     payments: "Payments",
     roster: "Roster",
     "open-items": "Open items",
-    "app-usage": "App usage"
+    "app-usage": "App usage",
+    "app-activity": "Who's using the app"
   };
   var MAX_REPORT_ROWS = 5e3;
   var FILTERS_FOR = {
@@ -3808,7 +4017,8 @@ var TMA = (() => {
     payments: ["from", "to", "activityId"],
     roster: ["school", "ensemble"],
     "open-items": [],
-    "app-usage": []
+    "app-usage": [],
+    "app-activity": ["school", "ensemble"]
   };
   var col = (key, label, type = "text") => ({ key, label, type });
   function runReport(ctx, adminEmail, params) {
@@ -4374,7 +4584,7 @@ var TMA = (() => {
     for (const r of requests) {
       const family = m.familyById(r.familyId);
       const asker = r.email ? ` (asked by ${guardianName(family, r.email)})` : "";
-      const note = r.note ? ` Note: "${truncate(r.note, 200)}"` : "";
+      const note2 = r.note ? ` Note: "${truncate(r.note, 200)}"` : "";
       items.push({
         order: 0,
         sheetRow: r.row,
@@ -4382,7 +4592,7 @@ var TMA = (() => {
           kind: "Fund request",
           date: dateOf(r.requestedAt),
           who: `${nameOf(ctx, r.studentId)}${asker}`,
-          detail: `Apply to ${(_a = activityName(ctx, r.activityId)) != null ? _a : "an activity"}.${note}`,
+          detail: `Apply to ${(_a = activityName(ctx, r.activityId)) != null ? _a : "an activity"}.${note2}`,
           amount: r.amountCents,
           reference: r.id
         }
@@ -4469,51 +4679,89 @@ var TMA = (() => {
       narrow: "Work through the oldest items first."
     };
   }
+  function usageOf(ctx) {
+    var _a;
+    const signIns = ctx.m.signIns();
+    const prefs = new Set(ctx.m.preferences().keys());
+    const devices = /* @__PURE__ */ new Map();
+    for (const d of ctx.m.devices()) if (d.email) devices.set(d.email, ((_a = devices.get(d.email)) != null ? _a : 0) + 1);
+    const emails = /* @__PURE__ */ new Set([...signIns.keys(), ...prefs, ...devices.keys()]);
+    return { signIns, prefs, devices, emails };
+  }
+  function hasUsed(u, email2) {
+    return u.emails.has(email2);
+  }
+  function guardianEmails(family) {
+    return unique(family.guardians.map((g) => g.email).filter(isEmail));
+  }
+  function daysAgo(ctx, at) {
+    return Math.max(0, daysBetween(nyDate(new Date(at)), ctx.today));
+  }
+  function activityOf(u, emails) {
+    var _a;
+    const out = { signIns: 0, devices: 0 };
+    for (const email2 of emails) {
+      const rec = u.signIns.get(email2);
+      out.devices += (_a = u.devices.get(email2)) != null ? _a : 0;
+      if (!rec) continue;
+      out.seen = latest(out.seen, lastActive(rec));
+      out.lastSignedIn = latest(out.lastSignedIn, rec.lastSignedIn);
+      out.signIns += rec.count;
+    }
+    return out;
+  }
   function appUsage(ctx) {
     const m = ctx.m;
     const settings = m.settings();
     const families = m.families().filter((f) => f.status !== "Inactive");
-    const prefs = m.preferences();
-    const devices = m.devices();
-    const withDevice = new Set(devices.map((d) => d.email).filter((e) => e !== ""));
+    const u = usageOf(ctx);
     const students = uniqueStudents(ctx);
     let used = 0;
+    let signedIn = 0;
+    let week = 0;
+    let month = 0;
     let push = 0;
     let email2 = 0;
     let sms = 0;
-    const guardianEmails = /* @__PURE__ */ new Set();
+    const onHousehold = new Set(m.families().flatMap(guardianEmails));
     for (const f of families) {
-      const emails = f.guardians.map((g) => g.email).filter(isEmail);
-      emails.forEach((e) => guardianEmails.add(e));
+      const emails = guardianEmails(f);
       const choices = emails.map((e) => ({ email: e, prefs: prefsFor(ctx, e) }));
-      if (f.status === "Pending" || emails.some((e) => prefs.has(e) || withDevice.has(e))) used += 1;
-      if (choices.some((c) => c.prefs.channels.push && withDevice.has(c.email))) push += 1;
+      if (f.status === "Pending" || emails.some((e) => hasUsed(u, e))) used += 1;
+      if (emails.some((e) => u.signIns.has(e))) signedIn += 1;
+      const seen = activityOf(u, emails).seen;
+      const days = seen ? daysAgo(ctx, seen) : Infinity;
+      if (days < 7) week += 1;
+      if (days < 30) month += 1;
+      if (choices.some((c) => c.prefs.channels.push && u.devices.has(c.email))) push += 1;
       if (choices.some((c) => c.prefs.channels.email)) email2 += 1;
       if (choices.some((c) => c.prefs.channels.sms)) sms += 1;
     }
-    const noHousehold = /* @__PURE__ */ new Set();
-    prefs.forEach((_, e) => {
-      if (!guardianEmails.has(e)) noHousehold.add(e);
+    let noHousehold = 0;
+    u.emails.forEach((e) => {
+      if (!onHousehold.has(e)) noHousehold += 1;
     });
-    withDevice.forEach((e) => {
-      if (!guardianEmails.has(e)) noHousehold.add(e);
-    });
+    let devices = 0;
+    u.devices.forEach((n) => devices += n);
     const metrics = [
       ["Households (not counting inactive ones)", families.length],
       ["Households verified by TMA", families.filter((f) => f.status === "Active").length],
       ["Households waiting for review", families.filter((f) => f.status === "Pending").length],
       ["Active students", students.filter((s) => s.status === "Active").length],
       ["Students waiting for review", students.filter((s) => s.status === "Pending").length],
-      ["Households that have used the app (signed up, saved settings or turned on notifications)", used],
-      ["Phones and computers with notifications on", devices.length],
+      ["Households that have used the app (signed in, signed up, saved settings or turned on notifications)", used],
+      ["Households with a parent who signed in", signedIn],
+      ["Households that opened the app in the last 7 days", week],
+      ["Households that opened the app in the last 30 days", month],
+      ["Phones and computers with notifications on", devices],
       ["Households getting phone notifications", push],
       ["Households getting email", email2],
       ["Households getting text messages", sms],
-      ["Parents who changed their notification settings", prefs.size],
-      ["People who signed in but have no household yet", noHousehold.size]
+      ["Parents who changed their notification settings", u.prefs.size],
+      ["People who signed in but have no household yet", noHousehold]
     ];
     const notes = [
-      "Signing in leaves no trace in the sheet, so more households may use the app than counted here.",
+      "Sign-ins and app openings count from the app update that added the Sign-ins tab. Who's using the app lists them household by household.",
       "Parents who never changed their settings get phone notifications (on phones where they turned them on) and email."
     ];
     if (!settings.emailEnabled) notes.push("Email notifications are switched off in Settings (EMAIL_ENABLED), so nobody gets them right now.");
@@ -4525,6 +4773,115 @@ var TMA = (() => {
       narrow: ""
     };
   }
+  function appActivity(ctx, f) {
+    const m = ctx.m;
+    const u = usageOf(ctx);
+    const filtered = Boolean(f.school || f.ensemble);
+    const entries = [];
+    const onHousehold = /* @__PURE__ */ new Set();
+    const dateOf = (at) => at ? nyDate(new Date(at)) : null;
+    const add2 = (a, used2, key, w) => {
+      var _a;
+      entries.push({
+        rank: a.seen ? 0 : used2 ? 1 : 2,
+        seen: (_a = a.seen) != null ? _a : "",
+        key,
+        household: w.familyId !== null,
+        row: {
+          who: w.who,
+          familyId: w.familyId,
+          status: w.status,
+          lastOpened: dateOf(a.seen),
+          daysSince: a.seen ? daysAgo(ctx, a.seen) : null,
+          lastSignedIn: dateOf(a.lastSignedIn),
+          signIns: a.signIns,
+          devices: a.devices,
+          notSignedIn: w.notSignedIn
+        }
+      });
+    };
+    let households = 0;
+    let used = 0;
+    let month = 0;
+    const inactive = /* @__PURE__ */ new Set();
+    for (const family of m.families()) {
+      const emails = guardianEmails(family);
+      if (family.status === "Inactive") {
+        emails.forEach((e) => inactive.add(e));
+        continue;
+      }
+      emails.forEach((e) => onHousehold.add(e));
+      if (filtered && !m.studentsOfFamily(family.id).some((s) => studentMatches(s, f))) continue;
+      const a = activityOf(u, emails);
+      const hasUsedApp = family.status === "Pending" || emails.some((e) => hasUsed(u, e));
+      households += 1;
+      if (hasUsedApp) used += 1;
+      if (a.seen && daysAgo(ctx, a.seen) < 30) month += 1;
+      const notNoted = emails.filter((e) => !hasUsed(u, e)).length;
+      add2(a, hasUsedApp, family.id, {
+        who: guardianNames(family),
+        familyId: family.id,
+        status: family.status,
+        // A household waiting for review was signed up in the app, so one of its parents signed in.
+        notSignedIn: family.status === "Pending" && notNoted === emails.length ? Math.max(0, notNoted - 1) : notNoted
+      });
+    }
+    let people = 0;
+    let inactiveParents = 0;
+    if (!filtered) {
+      u.emails.forEach((email2) => {
+        if (onHousehold.has(email2)) return;
+        if (inactive.has(email2)) {
+          inactiveParents += 1;
+          return;
+        }
+        people += 1;
+        add2(activityOf(u, [email2]), true, email2, { who: email2, familyId: null, status: "No household", notSignedIn: null });
+      });
+    }
+    entries.sort(
+      (a, b) => a.rank - b.rank || (a.seen === b.seen ? 0 : a.seen > b.seen ? -1 : 1) || Number(b.household) - Number(a.household) || cmpText(a.key, b.key)
+    );
+    const notes = [
+      `${used} of ${plural(households, "household")} ${households === 1 ? "has" : "have"} used the app, ${month} in the last 30 days.`,
+      "Sign-ins and app openings are noted from the app update that added the Sign-ins tab; earlier sign-ins are not known.",
+      "Last opened app is the latest time anyone in the household opened the app or signed in. Opening the app is noted at most once every 6 hours.",
+      "Parents not signed in yet counts parents with an email in Families who have no sign-in, saved settings or notifications noted. A household waiting for review was signed up in the app, so one of its parents counts as signed in."
+    ];
+    if (entries.some((e) => e.rank === 1 && e.household)) {
+      notes.push(
+        "Some households with no dates used the app before it started noting sign-ins (they signed up, saved settings or turned on notifications). They come before the households with no sign of using the app."
+      );
+    }
+    if (people > 0) {
+      const who = people === 1 ? "1 person" : `${people} people`;
+      notes.push(
+        `${who} used the app with an email that is on no household: board members, families who haven't signed up yet, or parents using a different email than the one in Families.`
+      );
+    }
+    if (inactiveParents > 0) {
+      notes.push(`${inactiveParents === 1 ? "1 parent" : `${inactiveParents} parents`} of inactive households used the app. Inactive households are not listed.`);
+    }
+    if (filtered) notes.push("People with no household are listed only when no school or group is picked.");
+    return {
+      description: "One row per household, and per person who signed in with no household yet: when they last opened the app and signed in, how many times they signed in, and their phones with notifications on. Most recently active first; households with no sign of using the app come last.",
+      columns: [
+        col("who", "Household"),
+        col("familyId", "Household ID"),
+        col("status", "Status"),
+        col("lastOpened", "Last opened app", "date"),
+        col("daysSince", "Days since opened", "number"),
+        col("lastSignedIn", "Last signed in", "date"),
+        col("signIns", "Sign-ins", "number"),
+        col("devices", "Phones with notifications", "number"),
+        col("notSignedIn", "Parents not signed in yet", "number")
+      ],
+      rows: entries.map((e) => e.row),
+      totals: sum(entries.map((e) => e.row), ["signIns", "devices", "notSignedIn"]),
+      notes,
+      narrow: "Pick a school or group to see the rest."
+    };
+  }
   var BUILDERS = {
     "trip-balances": tripBalances,
     "student-funds": studentFunds,
@@ -4533,7 +4890,8 @@ var TMA = (() => {
     payments: paymentsReport,
     roster,
     "open-items": (ctx) => openItems(ctx),
-    "app-usage": (ctx) => appUsage(ctx)
+    "app-usage": (ctx) => appUsage(ctx),
+    "app-activity": appActivity
   };
 
   // src/server/sample-data.ts
@@ -4850,6 +5208,11 @@ var TMA = (() => {
           "Last Seen": at(-1, 7, 30)
         }
       ];
+      data["Sign-ins"] = [
+        signIn("parent@example.com", "F0001", at(-45, 19, 2), at(-30, 18, 55), at(-1, 7, 30), 2),
+        signIn("ortiz@example.com", "F0003", at(-2, 21, 10), at(-2, 21, 10), at(-2, 21, 20), 1),
+        signIn(TREASURER, "", at(-60, 9, 0), at(-20, 9, 0), at(-3, 9, 5), 3)
+      ];
     }
     return data;
   }
@@ -4866,6 +5229,16 @@ var TMA = (() => {
       Status: status
     };
   }
+  function signIn(email2, familyId, first, last, opened, count2) {
+    return {
+      Email: email2,
+      FamilyID: familyId,
+      "First Signed In": first,
+      "Last Signed In": last,
+      "Last Opened App": opened,
+      "Sign-ins": count2
+    };
+  }
 
   // src/server/setup.ts
   var SEED_GUARD = ["Families", "Students", "Ledger"];
@@ -4874,6 +5247,9 @@ var TMA = (() => {
     if (!/^[0-9a-f]{64}$/.test(secret)) throw new Error(`Could not generate ${name}`);
     return secret;
   }
+  function sameText(value) {
+    return value.replace(/\s+/g, " ").trim();
+  }
   function runSetup(ctx, options = {}) {
     const report = { createdTables: [], addedColumns: [], seeded: false, secretsInitialized: [] };
     for (const table of TABLE_ORDER) {
@@ -4881,8 +5257,18 @@ var TMA = (() => {
       if (result.created) report.createdTables.push(table);
       for (const column of result.addedColumns) report.addedColumns.push({ table, column });
     }
-    const present = new Set(ctx.db.rows("Settings").map((r) => settingKey(r.data.Key)));
+    const settingRows = ctx.db.rows("Settings");
+    const present = new Set(settingRows.map((r) => settingKey(r.data.Key)));
     const missing = Object.keys(SETTING_DEFAULTS).filter((key) => !present.has(key)).map((key) => ({ Key: key, Value: SETTING_DEFAULTS[key], Notes: SETTING_NOTES[key] }));
+    const updated = [];
+    for (const row of settingRows) {
+      const key = settingKey(row.data.Key);
+      const olds = hasOwn(OLD_SETTING_DEFAULTS, key) ? OLD_SETTING_DEFAULTS[key] : void 0;
+      if (!olds || !olds.some((old) => sameText(old) === sameText(str(row.data.Value)))) continue;
+      ctx.db.update("Settings", row.rowNumber, { Value: SETTING_DEFAULTS[key] });
+      if (!updated.includes(key)) updated.push(key);
+    }
+    if (updated.length) report.updatedSettings = updated;
     ctx.db.append("Settings", missing);
     if (missing.length) report.addedSettings = missing.map((row) => row.Key);
     if (!ctx.s.secrets.get("TOKEN_SECRET")) {
@@ -4903,6 +5289,7 @@ var TMA = (() => {
         report.createdTables.length ? `created ${report.createdTables.join(", ")}` : "tabs ok",
         report.addedColumns.length ? `added ${report.addedColumns.length} column(s)` : "",
         missing.length ? `added ${missing.length} setting(s)` : "",
+        updated.length ? `updated ${updated.join(", ")} to the new default` : "",
         report.secretsInitialized.length ? "created TOKEN_SECRET" : "",
         report.seeded ? "seeded sample data" : ""
       ].filter((s) => s !== "").join("; ")
@@ -5162,7 +5549,13 @@ var TMA = (() => {
     "auth.verifyCode": verifyCode
   };
   var ROUTES = {
-    "me.bootstrap": { run: (ctx, email2) => buildBootstrap(ctx, email2) },
+    "me.bootstrap": {
+      run(ctx, email2) {
+        const bootstrap = buildBootstrap(ctx, email2);
+        noteAppOpened(ctx, email2);
+        return bootstrap;
+      }
+    },
     "household.save": { write: true, run: saveHousehold },
     "prefs.save": { write: true, run: savePrefs },
     "push.register": { write: true, run: registerDevice },
@@ -6267,7 +6660,8 @@ var TMA = (() => {
     { kind: "payments", fn: "reportPayments" },
     { kind: "roster", fn: "reportRoster" },
     { kind: "open-items", fn: "reportOpenItems" },
-    { kind: "app-usage", fn: "reportAppUsage" }
+    { kind: "app-usage", fn: "reportAppUsage" },
+    { kind: "app-activity", fn: "reportAppActivity" }
   ];
   var FORMATS = {
     money: "$#,##0.00",
@@ -6351,7 +6745,7 @@ var TMA = (() => {
     values.push(line(""), line(report.description));
     const filters = filtersLine(report);
     if (filters) values.push(line(filters));
-    for (const note of (_b = report.notes) != null ? _b : []) values.push(line(`Note: ${note}`));
+    for (const note2 of (_b = report.notes) != null ? _b : []) values.push(line(`Note: ${note2}`));
     const formats = [];
     columns.forEach((c, i) => {
       const format = FORMATS[c.type];
@@ -6790,12 +7184,12 @@ Email from the TMA app is working.
       headers.forEach((h, i) => layout.columns.set(h, start + i));
       this.rowCache.delete(layout.table);
     }
-    writeHeaderRow(sheet, headers, note) {
+    writeHeaderRow(sheet, headers, note2) {
       const needed = headers.length - sheet.getMaxColumns();
       if (needed > 0) sheet.insertColumnsAfter(sheet.getMaxColumns(), needed);
       sheet.getRange(1, 1, 1, headers.length).setValues([[...headers]]).setFontWeight("bold");
       sheet.setFrozenRows(1);
-      sheet.getRange(1, 1).setNote(note);
+      sheet.getRange(1, 1).setNote(note2);
     }
     /** Write rows as one block spanning only the columns the rows actually use. */
     writeRows(layout, startRow, rows) {
@@ -6939,7 +7333,7 @@ Email from the TMA app is working.
   }
   function createScriptLock(hooks, timeoutMs = LOCK_TIMEOUT_MS) {
     let depth = 0;
-    return function withLock(fn) {
+    return function withLock(fn, options) {
       if (depth > 0) {
         depth += 1;
         try {
@@ -6948,8 +7342,9 @@ Email from the TMA app is working.
           depth -= 1;
         }
       }
+      const wait = options == null ? void 0 : options.waitMs;
       const lock = LockService.getScriptLock();
-      lock.waitLock(timeoutMs);
+      lock.waitLock(typeof wait === "number" && Number.isFinite(wait) ? clamp(Math.floor(wait), 1, timeoutMs) : timeoutMs);
       depth = 1;
       try {
         hooks.onAcquire();
@@ -7121,7 +7516,7 @@ This address is the TMA app's server. ${link}
     return runSetup2(true);
   }
   function runSetup2(seedSampleData) {
-    var _a;
+    var _a, _b;
     if (!allowed("Set up", false)) return null;
     const { services, app } = boot();
     const report = services.withLock(() => {
@@ -7136,6 +7531,7 @@ This address is the TMA app's server. ${link}
       report.createdTables.length ? `Created tabs: ${report.createdTables.join(", ")}` : "All tabs were already there.",
       report.addedColumns.length ? `Added columns: ${report.addedColumns.map((c) => `${c.table} › ${c.column}`).join(", ")}` : "No columns were missing.",
       ((_a = report.addedSettings) == null ? void 0 : _a.length) ? `Added settings (with their defaults): ${report.addedSettings.join(", ")}` : "",
+      ((_b = report.updatedSettings) == null ? void 0 : _b.length) ? `Updated settings you hadn't changed to the new default text: ${report.updatedSettings.join(", ")}` : "",
       report.seeded ? "Filled the empty tabs with sample (fictional) data." : "",
       report.secretsInitialized.length ? `Created secrets: ${report.secretsInitialized.join(", ")}` : "",
       ...push
@@ -7189,6 +7585,9 @@ ${next}`);
   }
   function reportAppUsage() {
     sheetReport("app-usage");
+  }
+  function reportAppActivity() {
+    sheetReport("app-activity");
   }
   function sheetReport(kind) {
     if (!allowed(`Report ${kind}`, true)) return;
@@ -7420,4 +7819,8 @@ function reportOpenItems(e) {
 
 function reportAppUsage(e) {
   return TMA.reportAppUsage(e);
+}
+
+function reportAppActivity(e) {
+  return TMA.reportAppActivity(e);
 }

@@ -11,7 +11,7 @@ function report(h: Harness, kind: ReportKind, filters?: Record<string, unknown>,
   return h.ok('admin.report', filters === undefined ? { kind } : { kind, filters }, token).report;
 }
 
-function push(h: Harness, table: 'Activities' | 'Enrollments' | 'Payments' | 'Ledger' | 'Students' | 'Families' | 'Preferences' | 'Devices' | 'Redemptions', ...rows: RowData[]) {
+function push(h: Harness, table: 'Activities' | 'Enrollments' | 'Payments' | 'Ledger' | 'Students' | 'Families' | 'Preferences' | 'Devices' | 'Redemptions' | 'Sign-ins', ...rows: RowData[]) {
   const list = h.services.db.tables[table] ?? (h.services.db.tables[table] = []);
   list.push(...rows);
 }
@@ -86,7 +86,7 @@ describe('admin.report: filters', () => {
   it('rejects unknown reports and malformed filters with a clear message', () => {
     expect(h.err('admin.report', { kind: 'everything' }, admin)).toEqual({
       code: 'BAD_REQUEST',
-      message: expect.stringMatching(/^Report must be one of: trip-balances, student-funds, .*app-usage\.$/),
+      message: expect.stringMatching(/^Report must be one of: trip-balances, student-funds, .*app-usage, app-activity\.$/),
     });
     expect(h.err('admin.report', {}, admin).code).toBe('BAD_REQUEST');
     expect(bad('all')).toEqual({ code: 'BAD_REQUEST', message: 'Filters is missing or invalid.' });
@@ -632,25 +632,208 @@ describe('app-usage', () => {
       { Email: 'new.parent@example.com', FamilyID: '', Prefs: '{}' },
     );
     push(h, 'Devices', { Email: 'visitor@example.com', Token: 'demo-device-visitor' });
+    // Sample Sign-ins: Jordan (F0001) opened the app 2026-10-20, Marcus (F0003, pending) 2026-10-19,
+    // the treasurer (no household) signs in now; the Nguyens never signed in.
     const r = report(h, 'app-usage');
     expect(r.columns).toEqual([
       { key: 'metric', label: 'What', type: 'text' },
       { key: 'value', label: 'Count', type: 'number' },
     ]);
-    expect(r.rows.map((row) => row.value)).toEqual([3, 2, 1, 5, 1, 3, 2, 1, 2, 1, 2, 2]);
+    expect(r.rows.map((row) => row.value)).toEqual([3, 2, 1, 5, 1, 3, 2, 2, 2, 2, 1, 2, 1, 2, 3]);
     expect(value(r, /^Households \(not counting/)).toBe(3);
-    expect(value(r, /used the app/)).toBe(3); // F0001 (device), F0002 (settings), F0003 (signed up)
+    expect(value(r, /used the app/)).toBe(3); // F0001 (signed in), F0002 (settings), F0003 (signed up)
+    expect(value(r, /parent who signed in/)).toBe(2); // F0001, F0003
+    expect(value(r, /last 7 days/)).toBe(2);
+    expect(value(r, /last 30 days/)).toBe(2);
     expect(value(r, /^Phones and computers/)).toBe(2);
     expect(value(r, /phone notifications/)).toBe(1); // F0001's device
     expect(value(r, /getting email/)).toBe(2); // F0001 and F0003 by default; Priya turned it off
     expect(value(r, /text messages/)).toBe(1);
-    expect(value(r, /no household yet/)).toBe(2);
+    expect(value(r, /no household yet/)).toBe(3); // the treasurer, new.parent (settings), visitor (device)
     expect(r.containsContactInfo).toBe(false);
     expect(JSON.stringify(r.rows)).not.toMatch(/@|Nguyen|Thompson|F000/);
+    expect(r.notes?.join(' ')).not.toMatch(/leaves no trace/);
+  });
+
+  it('counts households active in the last 7 and 30 days by New York calendar day', () => {
+    // Opened Oct 14, 10:30 PM in New York (Oct 15 in UTC): 7 days before today, so not "the last 7 days".
+    const h = harness({
+      tables: {
+        'Sign-ins': [
+          { Email: PARENT, 'Last Opened App': '2026-10-15T02:30:00.000Z', 'Sign-ins': 1 },
+          { Email: NGUYEN, 'Last Signed In': '2026-09-22T12:00:00.000Z', 'Sign-ins': 1 }, // 29 days ago
+        ],
+      },
+    });
+    const r = report(h, 'app-usage', {}, h.signIn(TREASURER));
+    expect(value(r, /last 7 days/)).toBe(0);
+    expect(value(r, /last 30 days/)).toBe(2);
+    expect(value(r, /parent who signed in/)).toBe(2);
   });
 
   it('says when email notifications are switched off', () => {
     const r = report(harness({ settings: { EMAIL_ENABLED: 'FALSE' } }), 'app-usage');
     expect(r.notes).toContain('Email notifications are switched off in Settings (EMAIL_ENABLED), so nobody gets them right now.');
   });
+});
+
+describe('app-activity ("Who\'s using the app")', () => {
+  // Sample Sign-ins (New York times): Jordan (F0001) first signed in 2026-09-06, last 2026-09-21,
+  // opened the app 2026-10-20 7:30 AM, 2 sign-ins; Marcus (F0003, pending) signed in 2026-10-19 9:10 PM
+  // and opened it at 9:20 PM; the treasurer (no household) signed in 3 times. The Nguyens never did.
+  // Jordan's phone has notifications on. report() signs the treasurer in again, now (2026-10-21 10:00 AM).
+
+  it('lists households and people with no household, most recently active first, never-used last', () => {
+    const r = report(harness(), 'app-activity');
+    expect(r.title).toBe("Who's using the app");
+    expect(r.filters).toEqual({});
+    expect(r.columns.map((c) => [c.key, c.type])).toEqual([
+      ['who', 'text'],
+      ['familyId', 'text'],
+      ['status', 'text'],
+      ['lastOpened', 'date'],
+      ['daysSince', 'number'],
+      ['lastSignedIn', 'date'],
+      ['signIns', 'number'],
+      ['devices', 'number'],
+      ['notSignedIn', 'number'],
+    ]);
+    expect(r.rows).toEqual([
+      {
+        who: TREASURER,
+        familyId: null,
+        status: 'No household',
+        lastOpened: '2026-10-21',
+        daysSince: 0,
+        lastSignedIn: '2026-10-21',
+        signIns: 4,
+        devices: 0,
+        notSignedIn: null,
+      },
+      {
+        who: 'Jordan Thompson & Casey Thompson',
+        familyId: 'F0001',
+        status: 'Active',
+        lastOpened: '2026-10-20',
+        daysSince: 1,
+        lastSignedIn: '2026-09-21',
+        signIns: 2,
+        devices: 1,
+        notSignedIn: 1, // Casey
+      },
+      {
+        who: 'Marcus Ortiz',
+        familyId: 'F0003',
+        status: 'Pending',
+        lastOpened: '2026-10-19',
+        daysSince: 2,
+        lastSignedIn: '2026-10-19',
+        signIns: 1,
+        devices: 0,
+        notSignedIn: 0,
+      },
+      {
+        who: 'Priya Nguyen',
+        familyId: 'F0002',
+        status: 'Active',
+        lastOpened: null,
+        daysSince: null,
+        lastSignedIn: null,
+        signIns: 0,
+        devices: 0,
+        notSignedIn: 1,
+      },
+    ]);
+    expect(r.totals).toEqual({ signIns: 7, devices: 1, notSignedIn: 2 });
+    expect(r.notes?.[0]).toBe('2 of 3 households have used the app, 2 in the last 30 days.');
+    expect(r.notes).toContain(
+      "1 person used the app with an email that is on no household: board members, families who haven't signed up yet, or parents using a different email than the one in Families.",
+    );
+    // The treasurer's email is in the table, so the app warns before a download.
+    expect(r.containsContactInfo).toBe(true);
+  });
+
+  it('adds up a household’s parents and counts settings or a phone as having used the app', () => {
+    const h = harness({
+      tables: {
+        'Sign-ins': [
+          { Email: PARENT, 'Last Signed In': '2026-10-01T14:00:00.000Z', 'Last Opened App': '2026-10-02T14:00:00.000Z', 'Sign-ins': 2 },
+          { Email: PARENT2, 'Last Signed In': '2026-10-05T14:00:00.000Z', 'Last Opened App': '2026-10-04T14:00:00.000Z', 'Sign-ins': 3 },
+        ],
+      },
+    });
+    // Priya saved her settings before the app noted sign-ins; someone else only turned on notifications.
+    push(h, 'Preferences', { Email: NGUYEN, FamilyID: 'F0002', Prefs: '{}' });
+    push(h, 'Devices', { Email: 'visitor@example.com', Token: 'demo-device-visitor' });
+    const admin = h.signIn(TREASURER);
+    const r = report(h, 'app-activity', {}, admin);
+    expect(pick(r, 'who', 'lastOpened', 'daysSince', 'lastSignedIn', 'signIns', 'devices', 'notSignedIn')).toEqual([
+      [TREASURER, '2026-10-21', 0, '2026-10-21', 1, 0, null],
+      // Latest of the two parents: Casey signed in on Oct 5, after Jordan last opened it on Oct 2.
+      ['Jordan Thompson & Casey Thompson', '2026-10-05', 16, '2026-10-05', 5, 1, 0],
+      // No dates: Priya saved settings and Marcus signed up (pending) before sign-ins were noted. By household ID.
+      // Marcus signed up in the app, so he signed in: not counted as not signed in.
+      ['Priya Nguyen', null, null, null, 0, 0, 0],
+      ['Marcus Ortiz', null, null, null, 0, 0, 0],
+      ['visitor@example.com', null, null, null, 0, 1, null],
+    ]);
+    expect(r.notes).toContain(
+      'Some households with no dates used the app before it started noting sign-ins (they signed up, saved settings or turned on notifications). They come before the households with no sign of using the app.',
+    );
+    expect(r.notes?.[0]).toBe('3 of 3 households have used the app, 1 in the last 30 days.');
+    expect(r.notes).toContain(
+      "2 people used the app with an email that is on no household: board members, families who haven't signed up yet, or parents using a different email than the one in Families.",
+    );
+  });
+
+  it('filters by school or group (a household with a matching student), leaving out people with no household', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    const elementary = report(h, 'app-activity', { school: 'elementary' }, admin);
+    expect(elementary.filters).toEqual({ school: 'Elementary' });
+    expect(pick(elementary, 'familyId')).toEqual([['F0002']]); // Ethan
+    expect(elementary.notes).toContain('People with no household are listed only when no school or group is picked.');
+    expect(elementary.notes?.[0]).toBe('0 of 1 household has used the app, 0 in the last 30 days.');
+    expect(elementary.containsContactInfo).toBe(false);
+    // Liam sings in the Chorus; so does Sofia, whose household is still pending.
+    expect(pick(report(h, 'app-activity', { ensemble: 'Chorus' }, admin), 'familyId')).toEqual([['F0001'], ['F0003']]);
+  });
+
+  it('leaves out inactive households and their parents, who are not "no household" either', () => {
+    const h = harness();
+    h.services.db.tables.Families!.find((f) => f.FamilyID === 'F0003')!.Status = 'Inactive';
+    const admin = h.signIn(TREASURER);
+    const r = report(h, 'app-activity', {}, admin);
+    expect(pick(r, 'familyId', 'who', 'status')).toEqual([
+      [null, TREASURER, 'No household'],
+      ['F0001', 'Jordan Thompson & Casey Thompson', 'Active'],
+      ['F0002', 'Priya Nguyen', 'Active'],
+    ]);
+    expect(r.notes).toContain('1 parent of inactive households used the app. Inactive households are not listed.');
+    expect(r.notes?.join(' ')).toMatch(/^1 of 2 households .* 1 person used the app with an email that is on no household/);
+    // App usage doesn't count Marcus as someone with no household either: only the treasurer.
+    const usage = report(h, 'app-usage', {}, admin);
+    expect(usage.rows.find((row) => /no household yet/.test(String(row.metric)))?.value).toBe(1);
+  });
+
+  it('on the day of the update, says earlier sign-ins are not known and counts a pending household’s signer as signed in', () => {
+    // Nothing noted yet: every family signed in before the update, if at all.
+    const h = harness({ tables: { 'Sign-ins': [], Preferences: [], Devices: [] } });
+    const admin = h.signIn(TREASURER);
+    h.services.db.tables['Sign-ins'] = [];
+    const r = report(h, 'app-activity', {}, admin);
+    expect(r.notes?.[0]).toBe('1 of 3 households have used the app, 0 in the last 30 days.');
+    expect(r.notes?.[1]).toBe('Sign-ins and app openings are noted from the app update that added the Sign-ins tab; earlier sign-ins are not known.');
+    expect(pick(r, 'familyId', 'status', 'notSignedIn')).toEqual([
+      ['F0003', 'Pending', 0], // Marcus signed up in the app
+      ['F0001', 'Active', 2],
+      ['F0002', 'Active', 1],
+    ]);
+    // With no pending household, the note is still there.
+    h.services.db.tables.Families = h.services.db.tables.Families!.filter((f) => f.Status !== 'Pending');
+    expect(report(h, 'app-activity', {}, admin).notes).toContain(
+      'Sign-ins and app openings are noted from the app update that added the Sign-ins tab; earlier sign-ins are not known.',
+    );
+  });
+
 });

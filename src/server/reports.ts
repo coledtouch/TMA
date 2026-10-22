@@ -12,6 +12,7 @@ import { formatCents } from '../shared/money';
 import type {
   ActivityAccount,
   IsoDate,
+  IsoDateTime,
   Report,
   ReportCell,
   ReportColumn,
@@ -22,10 +23,32 @@ import type {
 } from '../shared/types';
 import { guardianName, guardianNames } from './access';
 import { inWriteLock, type Ctx } from './context';
-import { studentName, type ActivityRec, type EnrollmentRec, type FamilyRec, type StudentRec } from './data';
+import {
+  lastActive,
+  latest,
+  studentName,
+  type ActivityRec,
+  type EnrollmentRec,
+  type FamilyRec,
+  type SignInRec,
+  type StudentRec,
+} from './data';
 import { badRequest } from './errors';
 import { prefsFor } from './prefs';
-import { canonical, errorMessage, idKey, isBlank, isEmail, isKnown, joinList, nyDate, plural, truncate } from './util';
+import {
+  canonical,
+  daysBetween,
+  errorMessage,
+  idKey,
+  isBlank,
+  isEmail,
+  isKnown,
+  joinList,
+  nyDate,
+  plural,
+  truncate,
+  unique,
+} from './util';
 import * as v from './validate';
 
 export const REPORT_KINDS: readonly ReportKind[] = [
@@ -37,6 +60,7 @@ export const REPORT_KINDS: readonly ReportKind[] = [
   'roster',
   'open-items',
   'app-usage',
+  'app-activity',
 ];
 
 /** Report titles; the sheet menu writes each to a tab named "Report: <title>". */
@@ -49,6 +73,7 @@ export const REPORT_TITLES: Readonly<Record<ReportKind, string>> = {
   roster: 'Roster',
   'open-items': 'Open items',
   'app-usage': 'App usage',
+  'app-activity': "Who's using the app",
 };
 
 /** Most rows one report returns. Past it, a note says how many were left out (totals still count them). */
@@ -64,6 +89,7 @@ const FILTERS_FOR: Readonly<Record<ReportKind, ReadonlyArray<keyof ReportFilters
   roster: ['school', 'ensemble'],
   'open-items': [],
   'app-usage': [],
+  'app-activity': ['school', 'ensemble'],
 };
 
 type Row = Record<string, ReportCell>;
@@ -893,40 +919,105 @@ function openItems(ctx: Ctx): Table {
 }
 
 // ---------------------------------------------------------------------------
+// Using the app (app-usage, app-activity): the Sign-ins, Preferences and Devices tabs
+// ---------------------------------------------------------------------------
+
+/** Signs that people used the app, by email. */
+interface Usage {
+  signIns: Map<string, SignInRec>;
+  /** Emails with a Preferences row (saved their notification settings). */
+  prefs: Set<string>;
+  /** Phones and computers with notifications on, per email. */
+  devices: Map<string, number>;
+  /** Every email with a Sign-ins, Preferences or Devices row. */
+  emails: Set<string>;
+}
+
+function usageOf(ctx: Ctx): Usage {
+  const signIns = ctx.m.signIns();
+  const prefs = new Set(ctx.m.preferences().keys());
+  const devices = new Map<string, number>();
+  for (const d of ctx.m.devices()) if (d.email) devices.set(d.email, (devices.get(d.email) ?? 0) + 1);
+  const emails = new Set<string>([...signIns.keys(), ...prefs, ...devices.keys()]);
+  return { signIns, prefs, devices, emails };
+}
+
+/** This email has used the app: it signed in, saved settings or turned on notifications. */
+function hasUsed(u: Usage, email: string): boolean {
+  return u.emails.has(email);
+}
+
+/** Guardian emails of a household, once each. */
+function guardianEmails(family: FamilyRec): string[] {
+  return unique(family.guardians.map((g) => g.email).filter(isEmail));
+}
+
+/** Whole days from the New York calendar date of `at` to today (0 = today; never negative). */
+function daysAgo(ctx: Ctx, at: IsoDateTime): number {
+  return Math.max(0, daysBetween(nyDate(new Date(at)), ctx.today));
+}
+
+interface Activity {
+  /** Latest time any of these emails opened the app or signed in. */
+  seen?: IsoDateTime;
+  lastSignedIn?: IsoDateTime;
+  signIns: number;
+  devices: number;
+}
+
+function activityOf(u: Usage, emails: readonly string[]): Activity {
+  const out: Activity = { signIns: 0, devices: 0 };
+  for (const email of emails) {
+    const rec = u.signIns.get(email);
+    out.devices += u.devices.get(email) ?? 0;
+    if (!rec) continue;
+    out.seen = latest(out.seen, lastActive(rec));
+    out.lastSignedIn = latest(out.lastSignedIn, rec.lastSignedIn);
+    out.signIns += rec.count;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // app-usage
 // ---------------------------------------------------------------------------
 
-/** Counts only, no names: households, students, devices and notification choices. Fixed metric order. */
+/** Counts only, no names: households, students, use of the app, devices and notification choices. Fixed metric order. */
 function appUsage(ctx: Ctx): Table {
   const m = ctx.m;
   const settings = m.settings();
   const families = m.families().filter((f) => f.status !== 'Inactive');
-  const prefs = m.preferences();
-  const devices = m.devices();
-  const withDevice = new Set(devices.map((d) => d.email).filter((e) => e !== ''));
+  const u = usageOf(ctx);
   const students = uniqueStudents(ctx);
 
   let used = 0;
+  let signedIn = 0;
+  let week = 0;
+  let month = 0;
   let push = 0;
   let email = 0;
   let sms = 0;
-  const guardianEmails = new Set<string>();
+  // Parents of Inactive households have a household too; they are just not counted above.
+  const onHousehold = new Set<string>(m.families().flatMap(guardianEmails));
   for (const f of families) {
-    const emails = f.guardians.map((g) => g.email).filter(isEmail);
-    emails.forEach((e) => guardianEmails.add(e));
+    const emails = guardianEmails(f);
     const choices = emails.map((e) => ({ email: e, prefs: prefsFor(ctx, e) }));
-    if (f.status === 'Pending' || emails.some((e) => prefs.has(e) || withDevice.has(e))) used += 1;
-    if (choices.some((c) => c.prefs.channels.push && withDevice.has(c.email))) push += 1;
+    if (f.status === 'Pending' || emails.some((e) => hasUsed(u, e))) used += 1;
+    if (emails.some((e) => u.signIns.has(e))) signedIn += 1;
+    const seen = activityOf(u, emails).seen;
+    const days = seen ? daysAgo(ctx, seen) : Infinity;
+    if (days < 7) week += 1;
+    if (days < 30) month += 1;
+    if (choices.some((c) => c.prefs.channels.push && u.devices.has(c.email))) push += 1;
     if (choices.some((c) => c.prefs.channels.email)) email += 1;
     if (choices.some((c) => c.prefs.channels.sms)) sms += 1;
   }
-  const noHousehold = new Set<string>();
-  prefs.forEach((_, e) => {
-    if (!guardianEmails.has(e)) noHousehold.add(e);
+  let noHousehold = 0;
+  u.emails.forEach((e) => {
+    if (!onHousehold.has(e)) noHousehold += 1;
   });
-  withDevice.forEach((e) => {
-    if (!guardianEmails.has(e)) noHousehold.add(e);
-  });
+  let devices = 0;
+  u.devices.forEach((n) => (devices += n));
 
   const metrics: Array<[string, number]> = [
     ['Households (not counting inactive ones)', families.length],
@@ -934,16 +1025,19 @@ function appUsage(ctx: Ctx): Table {
     ['Households waiting for review', families.filter((f) => f.status === 'Pending').length],
     ['Active students', students.filter((s) => s.status === 'Active').length],
     ['Students waiting for review', students.filter((s) => s.status === 'Pending').length],
-    ['Households that have used the app (signed up, saved settings or turned on notifications)', used],
-    ['Phones and computers with notifications on', devices.length],
+    ['Households that have used the app (signed in, signed up, saved settings or turned on notifications)', used],
+    ['Households with a parent who signed in', signedIn],
+    ['Households that opened the app in the last 7 days', week],
+    ['Households that opened the app in the last 30 days', month],
+    ['Phones and computers with notifications on', devices],
     ['Households getting phone notifications', push],
     ['Households getting email', email],
     ['Households getting text messages', sms],
-    ['Parents who changed their notification settings', prefs.size],
-    ['People who signed in but have no household yet', noHousehold.size],
+    ['Parents who changed their notification settings', u.prefs.size],
+    ['People who signed in but have no household yet', noHousehold],
   ];
   const notes = [
-    'Signing in leaves no trace in the sheet, so more households may use the app than counted here.',
+    "Sign-ins and app openings count from the app update that added the Sign-ins tab. Who's using the app lists them household by household.",
     'Parents who never changed their settings get phone notifications (on phones where they turned them on) and email.',
   ];
   if (!settings.emailEnabled) notes.push('Email notifications are switched off in Settings (EMAIL_ENABLED), so nobody gets them right now.');
@@ -956,6 +1050,151 @@ function appUsage(ctx: Ctx): Table {
   };
 }
 
+// ---------------------------------------------------------------------------
+// app-activity ("Who's using the app")
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per household (Active or Pending) and, with no school or group picked, one per email
+ * that used the app but is on no such household. Sorted most recently active first, then those
+ * that used the app before it noted sign-ins, then those that never used it; ties by household ID,
+ * households before people with none.
+ */
+function appActivity(ctx: Ctx, f: ReportFilters): Table {
+  const m = ctx.m;
+  const u = usageOf(ctx);
+  const filtered = Boolean(f.school || f.ensemble);
+
+  interface Entry {
+    /** 0 = has a date, 1 = used the app before sign-ins were noted, 2 = never used it. */
+    rank: number;
+    seen: IsoDateTime;
+    key: string;
+    household: boolean;
+    row: Row;
+  }
+  const entries: Entry[] = [];
+  const onHousehold = new Set<string>();
+  const dateOf = (at: IsoDateTime | undefined) => (at ? nyDate(new Date(at)) : null);
+  interface Who {
+    who: string;
+    familyId: string | null;
+    status: string;
+    notSignedIn: number | null;
+  }
+  const add = (a: Activity, used: boolean, key: string, w: Who) => {
+    entries.push({
+      rank: a.seen ? 0 : used ? 1 : 2,
+      seen: a.seen ?? '',
+      key,
+      household: w.familyId !== null,
+      row: {
+        who: w.who,
+        familyId: w.familyId,
+        status: w.status,
+        lastOpened: dateOf(a.seen),
+        daysSince: a.seen ? daysAgo(ctx, a.seen) : null,
+        lastSignedIn: dateOf(a.lastSignedIn),
+        signIns: a.signIns,
+        devices: a.devices,
+        notSignedIn: w.notSignedIn,
+      },
+    });
+  };
+
+  let households = 0;
+  let used = 0;
+  let month = 0;
+  /** Guardian emails of Inactive households: not listed, and not "no household" either. */
+  const inactive = new Set<string>();
+  for (const family of m.families()) {
+    const emails = guardianEmails(family);
+    if (family.status === 'Inactive') {
+      emails.forEach((e) => inactive.add(e));
+      continue;
+    }
+    emails.forEach((e) => onHousehold.add(e));
+    if (filtered && !m.studentsOfFamily(family.id).some((s) => studentMatches(s, f))) continue;
+    const a = activityOf(u, emails);
+    const hasUsedApp = family.status === 'Pending' || emails.some((e) => hasUsed(u, e));
+    households += 1;
+    if (hasUsedApp) used += 1;
+    if (a.seen && daysAgo(ctx, a.seen) < 30) month += 1;
+    const notNoted = emails.filter((e) => !hasUsed(u, e)).length;
+    add(a, hasUsedApp, family.id, {
+      who: guardianNames(family),
+      familyId: family.id,
+      status: family.status,
+      // A household waiting for review was signed up in the app, so one of its parents signed in.
+      notSignedIn: family.status === 'Pending' && notNoted === emails.length ? Math.max(0, notNoted - 1) : notNoted,
+    });
+  }
+
+  let people = 0;
+  let inactiveParents = 0;
+  if (!filtered) {
+    u.emails.forEach((email) => {
+      if (onHousehold.has(email)) return;
+      if (inactive.has(email)) {
+        inactiveParents += 1;
+        return;
+      }
+      people += 1;
+      add(activityOf(u, [email]), true, email, { who: email, familyId: null, status: 'No household', notSignedIn: null });
+    });
+  }
+
+  entries.sort(
+    (a, b) =>
+      a.rank - b.rank ||
+      (a.seen === b.seen ? 0 : a.seen > b.seen ? -1 : 1) ||
+      Number(b.household) - Number(a.household) ||
+      cmpText(a.key, b.key),
+  );
+
+  const notes = [
+    `${used} of ${plural(households, 'household')} ${households === 1 ? 'has' : 'have'} used the app, ${month} in the last 30 days.`,
+    'Sign-ins and app openings are noted from the app update that added the Sign-ins tab; earlier sign-ins are not known.',
+    'Last opened app is the latest time anyone in the household opened the app or signed in. Opening the app is noted at most once every 6 hours.',
+    "Parents not signed in yet counts parents with an email in Families who have no sign-in, saved settings or notifications noted. A household waiting for review was signed up in the app, so one of its parents counts as signed in.",
+  ];
+  if (entries.some((e) => e.rank === 1 && e.household)) {
+    notes.push(
+      'Some households with no dates used the app before it started noting sign-ins (they signed up, saved settings or turned on notifications). They come before the households with no sign of using the app.',
+    );
+  }
+  if (people > 0) {
+    const who = people === 1 ? '1 person' : `${people} people`;
+    notes.push(
+      `${who} used the app with an email that is on no household: board members, families who haven't signed up yet, or parents using a different email than the one in Families.`,
+    );
+  }
+  if (inactiveParents > 0) {
+    notes.push(`${inactiveParents === 1 ? '1 parent' : `${inactiveParents} parents`} of inactive households used the app. Inactive households are not listed.`);
+  }
+  if (filtered) notes.push('People with no household are listed only when no school or group is picked.');
+
+  return {
+    description:
+      "One row per household, and per person who signed in with no household yet: when they last opened the app and signed in, how many times they signed in, and their phones with notifications on. Most recently active first; households with no sign of using the app come last.",
+    columns: [
+      col('who', 'Household'),
+      col('familyId', 'Household ID'),
+      col('status', 'Status'),
+      col('lastOpened', 'Last opened app', 'date'),
+      col('daysSince', 'Days since opened', 'number'),
+      col('lastSignedIn', 'Last signed in', 'date'),
+      col('signIns', 'Sign-ins', 'number'),
+      col('devices', 'Phones with notifications', 'number'),
+      col('notSignedIn', 'Parents not signed in yet', 'number'),
+    ],
+    rows: entries.map((e) => e.row),
+    totals: sum(entries.map((e) => e.row), ['signIns', 'devices', 'notSignedIn']),
+    notes,
+    narrow: 'Pick a school or group to see the rest.',
+  };
+}
+
 const BUILDERS: Readonly<Record<ReportKind, (ctx: Ctx, f: ReportFilters) => Table>> = {
   'trip-balances': tripBalances,
   'student-funds': studentFunds,
@@ -965,4 +1204,5 @@ const BUILDERS: Readonly<Record<ReportKind, (ctx: Ctx, f: ReportFilters) => Tabl
   roster,
   'open-items': (ctx) => openItems(ctx),
   'app-usage': (ctx) => appUsage(ctx),
+  'app-activity': appActivity,
 };

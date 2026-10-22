@@ -34,7 +34,8 @@ will maintain it and for contributors adding features. Contracts live in code:
 * The treasurer keeps working in **the same spreadsheet**. The app reads it, reconciles
   balances, notices changes and notifies families.
 * **Minimal personal data**: parent name, email, optional cell, and each student's name,
-  grade, school and groups. No addresses, SSNs or card numbers.
+  grade, school and groups, plus when each parent signed in and last opened the app (so the board can
+  see who uses it). No addresses, SSNs or card numbers.
 
 ## 2. Components
 
@@ -134,6 +135,13 @@ e2e/          Playwright tests (demo, demo inside a live build) and README scree
   enrollments, payments or requests through a reused ID. Redemption IDs are `R-` + first 8 hex chars of a uuid. Announcement IDs are `A-` + 8 hex.
   Treasurer rows may have any ID text. Students with blank `StudentID` are ignored (logged).
 * `Ledger` rows with blank StudentID or zero amount are ignored.
+* **Sign-ins**: one row per email (trimmed, lower-cased). Rows repeating an email count as one person:
+  the earliest First Signed In, the latest Last Signed In and Last Opened App, the highest Sign-ins
+  count (a pasted copy must not double it), and the FamilyID of the row with the latest times. The
+  next write for that email (§4) writes those values to that row and blanks the others. A blank or
+  non-numeric count is 0. Timestamps are read like every other app timestamp (`parseTimestamp`;
+  typed text is New York time) and written as `Date`s, so they round-trip whatever the spreadsheet's
+  time zone (see "Dates").
 * **Never** store derived values in treasurer tabs except the documented columns
   (Redemptions.Status/Decided/…, Announcements.Sent, Families/Students rows created by sign-up).
 
@@ -182,6 +190,30 @@ Passwordless email codes. No Google account is required for parents.
 4. `TOKEN_SECRET` is created by `setup()` (64 random hex chars) if missing. If it is missing at
    request time, answer `NOT_CONFIGURED`.
 5. **Admins** are the emails in `Settings.ADMIN_EMAILS` (comma-separated). Admins may also be parents.
+6. **Sign-ins tab** (`src/server/sign-ins.ts`), so the board can see who uses the app. One row per
+   email: `Email`, `FamilyID` (the household the email belongs to at that moment, `familyForEmail`;
+   blank if none yet), `First Signed In`, `Last Signed In`, `Last Opened App`, `Sign-ins` (count).
+   Nothing else: no code, IP address, device or browser.
+   * A successful `auth.verifyCode` adds the row (First = Last = Last Opened App = now, count 1) or
+     updates it (Last Signed In and Last Opened App = now, count + 1, First kept; set if blank).
+   * `me.bootstrap` notes `Last Opened App` = now (and the current FamilyID), at most once every
+     6 hours per email: the cache key `opened:<email>` (21600 s) is set after each write, including the
+     sign-in's, so the first page load after signing in writes nothing. If the cache forgot early but
+     the row's Last Opened App is under 6 hours old (and nothing else changed), nothing is written.
+     Someone who signed in before the tab existed gets a row with only Last Opened App and count 0.
+   * Both are **best effort**: the core first looks up the household, then takes the script lock with
+     `withLock(fn, {waitMs})`: 5000 ms for a sign-in (`SIGN_IN_LOCK_WAIT_MS`), 1500 ms for an opening
+     (`OPENED_LOCK_WAIT_MS`). It reads the tab fresh under it and upserts (duplicates merged, §3). A busy
+     lock, a failed write or a cache error is logged to the console only and never fails the sign-in or
+     the bootstrap. After a skipped write the cache key is set for 10 minutes (`OPENED_RETRY_SECONDS`),
+     so the app tries again later rather than on every page load. The tab is created by Set up, or by
+     the first write if Set up hasn't run.
+   * A **skipped sign-in is kept**, not lost: the cache key `signin-pending:<email>` holds
+     `{count, first, last}` for 6 hours (`PENDING_SIGN_IN_SECONDS`). The next write for that email that
+     gets the lock (an opening or a sign-in) reads it under the lock, adds it (count + its count; Last
+     Signed In = the later of the row's and its last; First Signed In = its first if blank) and removes
+     the key. Only a sign-in whose person doesn't open the app again within those 6 hours stays
+     missing; their row then looks like one from before the tab existed until they sign in again.
 
 ## 5. API (src/server/app.ts → router)
 
@@ -197,7 +229,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 
 | Action | Behavior |
 | --- | --- |
-| `me.bootstrap` | Build `Bootstrap` for the caller (see §5.1). |
+| `me.bootstrap` | Build `Bootstrap` for the caller (see §5.1). Then note that the caller opened the app (§4 "Sign-ins tab": at most every 6 hours, best effort, after the bootstrap is built and outside any write). |
 | `household.save` | See §5.2. Returns fresh Bootstrap. |
 | `prefs.save` | Sanitize: channel/topic booleans; schools/ensembles must be in Settings lists; `smsPhone` must be a US/Canada (NANP) number: 10 digits, or 11 starting with 1, with a valid area code and exchange; anything else, including international and premium numbers, is removed (stored prefs are re-sanitized on read). Upsert `Preferences` row for the caller's email. `sms` may only be true when `Settings.SMS_ENABLED` and a phone is set. |
 | `push.register` | `token` is the browser's `PushSubscription` as JSON (≤ 4096 chars), checked the way the push Worker checks it (`src/server/push-subscription.ts`): endpoint `https://` on the default port, no credentials, ≤ 2048 chars, host on the Worker's allowlist (§9.1; otherwise `BAD_REQUEST` "This browser's push service isn't supported. Try Chrome, Safari, Firefox or Edge."); `p256dh` a 65-byte P-256 point, `auth` 16 bytes (base64url or base64). Stored as the canonical token `{"endpoint","keys":{"p256dh","auth"}}`: host lower-cased, keys base64url without padding, no `expirationTime`. In `mode==='demo'` only, a `demo-…` token is accepted instead. Anything else (including old-style tokens) → `BAD_REQUEST`. Rate limit 30 per email per hour. Upsert `Devices` **by endpoint**, so a browser that re-subscribes with new keys updates its row: set Email, FamilyID, Token, User Agent, Last Seen. The device moves to whoever signs in on it. Max 10 devices per email; drop the least recently seen. Returns the device count for the email. |
@@ -283,7 +315,8 @@ families and the dashboard see.
   school year.
 * **Size**: at most `MAX_REPORT_ROWS` = 5,000 rows. Past that, the first 5,000 in sort order are returned,
   a note says how many there were and how to narrow the report, and the totals still cover every row.
-* **Privacy**: admin-only. No push tokens, notification JSON or secrets ever appear. A roster request
+* **Privacy**: admin-only. No push tokens, notification JSON or secrets ever appear. Running a report
+  never writes a Sign-ins row (only `auth.verifyCode` and `me.bootstrap` do). A roster request
   (contact details) adds one Log row, `report` "Roster with contact details (<school, group or all
   students>, N students) viewed by <admin email>", taking the write lock just for that row as auth's
   rate-limit row does; if the lock is busy, only the row is skipped. Other reports log nothing.
@@ -301,7 +334,8 @@ families and the dashboard see.
 | `payments` | Every Payments row in the range, oldest first, then sheet order: amount, fee covered, gross, method, reference, payer email, status. | dates, activity | Completed rows only (a note says so) |
 | `roster` | One per Active student (last name, first name): grade, school, groups, instrument, household ID and status, member, both guardians' name, email and phone. | school, group | none |
 | `open-items` | Pending fund requests, Pending households, Pending students of verified households, then payments with Status Pending; oldest first within each. Names only, no emails. | none | none |
-| `app-usage` | A fixed list of counts: households (all, verified, pending), students, households that used the app (Pending, or a guardian with a Preferences or Devices row), devices, households getting push, email or texts (stored prefs or the defaults, as §6 decides), people with settings but no household. No names. | none | none |
+| `app-usage` | A fixed list of counts: households (all, verified, pending), students, households that used the app (Pending, or a guardian with a Sign-ins, Preferences or Devices row), households with a guardian who has a Sign-ins row, households last seen (latest Last Opened App or Last Signed In of its guardians, New York calendar days) in the last 7 and 30 days, devices, households getting push, email or texts (stored prefs or the defaults, as §6 decides), parents with saved settings, and emails with a Sign-ins, Preferences or Devices row but on no household at all (a parent of an Inactive household is on one). No names. | none | none |
+| `app-activity` ("Who's using the app") | One per Active or Pending household (Inactive left out), then, unfiltered, one per email with a Sign-ins, Preferences or Devices row that is on no household at all (its email in the first column, status `No household`; this makes `containsContactInfo` true). Parents of Inactive households are not listed; a note counts those who used the app. Columns: household (guardian names), household ID, status, last opened app (latest Last Opened App or Last Signed In of its guardians, as a New York date), days since, last signed in, sign-ins (sum), phones with notifications (Devices rows of its guardians), parents not signed in yet (guardian emails with no Sign-ins, Preferences or Devices row; for a Pending household where that is every guardian, one fewer, since someone signed it up in the app). Sorted: with a date, latest first; then no date but used the app (Pending, settings or a device: before sign-ins were noted); then no sign of use; ties by household ID, households first. Notes: "N of M households have used the app, K in the last 30 days", always that sign-ins before the update that added the Sign-ins tab are not known, and how to read the rest. | school, group (households with a non-Inactive student who matches; people with no household are left out) | sign-ins, phones, parents not signed in yet |
 
 **In the sheet** (`src/gas/reports-sheet.ts`): *TMA App → Reports* has one item per report. Each writes
 the report with its default filters to a tab named `Report: <title>` (found by name, capitals ignored,
@@ -467,7 +501,10 @@ into `report.errors` so one failure doesn't block the rest. Rules for every step
 ## 8. Setup (src/server/setup.ts)
 
 `setup({seedSampleData})`: `ensureTable` for every table in `TABLE_ORDER`. Write missing Settings keys
-with their defaults and the `Notes`. Create TOKEN_SECRET if missing. If `seedSampleData` and the Families,
+with their defaults and the `Notes`. A Settings value that still equals an earlier default exactly
+(`OLD_SETTING_DEFAULTS` in `src/shared/schema.ts`, runs of spaces and line breaks ignored) gets today's
+default (`updatedSettings` in the report). Today that is the old `PRIVACY_NOTE`, from before the app noted
+sign-ins. Any other text the treasurer typed is left alone. Create TOKEN_SECRET if missing. If `seedSampleData` and the Families,
 Students and Ledger tables are all empty → write the sample data from `src/server/sample-data.ts`.
 Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / repair tabs*) also creates
 `PUSH_RELAY_SECRET` and links the push Worker (§9).
@@ -499,6 +536,10 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   TMA monthly meeting (+~12 days, 7:00 PM, TRHS Library, everyone); Jazz Night.
 * Settings: defaults + `ADMIN_EMAILS = treasurer@example.com`, `ONLINE_PAYMENTS = TRUE`,
   `PAYPAL_CLIENT_ID = demo` (demo only; production keeps defaults).
+* Demo only (like the demo device): Sign-ins rows for `parent@example.com` (2 sign-ins, opened the app
+  yesterday), `ortiz@example.com` (signed up 2 days ago) and `treasurer@example.com` (no household,
+  3 sign-ins), so *Who's using the app* has something to show. The Nguyens never signed in.
+  Production seeding writes no Sign-ins rows.
 
 ## 9. Apps Script adapter (src/gas → apps-script/Code.js)
 
@@ -507,7 +548,7 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   that Apps Script can see: `function doGet(e)`, `function doPost(e)`, `function onOpen()`,
   `function syncTick()`, `function dailyTick()`, `function setupTma()`, `function setupTmaWithSampleData()`,
   `function installTriggers()`, `function sendTestPushToMe()`, `function showTmaStatus()`, and one per
-  sheet report (`function reportTripBalances()` … `function reportAppUsage()`, §5.4). A menu item can
+  sheet report (`function reportTripBalances()` … `function reportAppUsage()`, `function reportAppActivity()`, §5.4). A menu item can
   only call a top-level function, so a new report needs its name in this list too.
 * `doPost(e)`: parse `e.postData.contents`, call `app.handle`, and return
   `ContentService.createTextOutput(JSON.stringify(res)).setMimeType(JSON)`.
@@ -518,7 +559,10 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   Add the header note from `TABLES[t].note` to A1 when creating. Dates are converted between the
   spreadsheet's and the script's time zones when they differ (`SheetTimeZone`, see §3 "Dates"); the
   two zones are looked up once per execution.
-* Cache: `CacheService.getScriptCache()`. Lock: `LockService.getScriptLock().waitLock(20000)`.
+* Cache: `CacheService.getScriptCache()`. Lock: `LockService.getScriptLock().waitLock(20000)`, or the
+  shorter `waitMs` a caller asks for (the Sign-ins notes: 5000 ms for a sign-in, 1500 ms for an opening;
+  never more than 20000). Re-entrant:
+  a nested call in the same execution reuses the held lock.
 * Crypto: `Utilities.computeHmacSha256Signature`, uuid via `Utilities.getUuid()`, digits via uuid
   hex → numbers (rejection sampling).
 * Mailer (`src/gas/mail.ts`): §6 "Email delivery". Through the push Worker's `POST /email` (via
@@ -790,7 +834,7 @@ export function PayPalCheckout(props: {
   (approve/deny with optional note), new households (approve, link to the existing student record via a
   candidate radio list, reject), compose announcement (title, body, link, audience checkboxes, channel
   toggles, preview, send), run sync now, recent activity log, and a **Reports** card.
-* **Reports** (`#/reports`, admins only; §5.4): a list of the 8 reports, then one report per address
+* **Reports** (`#/reports`, admins only; §5.4): a list of the 9 reports, then one report per address
   (`#/reports?kind=trip-balances`), so Back works. Only the filters the report uses are shown (activity,
   school, group, from/to dates starting at this school year, "Include paid in full"); the report runs again
   400 ms after a filter changes, and an end date before the start date is explained, not sent. Results: the
@@ -926,6 +970,13 @@ export function PayPalCheckout(props: {
   formats, formula-looking text kept as text, no other tab touched, and Set up and the sync leaving them alone.
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
   status and filter, validation messages, admin-only, the row cap and the roster's Log row.
+* `src/server/sign-ins.test.ts`: the Sign-ins upsert (new row, update, household filled in later, no
+  code or device stored), the 6-hour throttle on openings, a busy lock or failing write or cache
+  that skips the row without breaking sign-in or bootstrap, a skipped sign-in kept and added by the
+  next write, duplicate rows merged on read and repaired by the next write, and New York calendar days.
+  `src/gas/sign-ins.test.ts` runs the same writes through the SheetStore and LockService fakes: the
+  short lock wait, the tab made (hidden) on first write, a skipped sign-in kept in CacheService, and
+  exact times with a far-away spreadsheet time zone.
 * `workers/push`: its own Vitest config (`workers/push/vitest.config.ts`), run by `npm test` after the
   app's tests, by `npm run test:worker` alone, and by the Worker's deploy workflow; `npm run typecheck`
   includes `workers/push/tsconfig.json`. It checks the RFC 8291 Appendix A vector

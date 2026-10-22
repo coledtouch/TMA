@@ -589,7 +589,8 @@ ready"* with a **Reload** button. The demo copy on GitHub Pages updates the same
    changed too, update it the same way.
 3. **Deploy → Manage deployments** → **Edit** (pencil) → *Version:* **New version** → **Deploy**.
    The URL stays the same.
-4. In the spreadsheet: **TMA App → Set up / repair tabs** (adds any new columns or settings).
+4. In the spreadsheet: **TMA App → Set up / repair tabs** (adds any new columns or settings, and
+   updates default texts you never changed, such as the privacy note).
 
 Do steps 2 and 3 together. The menu and schedules use the saved code right away, but the app keeps
 using the previously deployed version until step 3. If Google asks for permissions again, run

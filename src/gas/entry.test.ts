@@ -151,6 +151,7 @@ describe('sheet menu and schedules', () => {
           ['Reports › Roster', 'reportRoster'],
           ['Reports › Open items', 'reportOpenItems'],
           ['Reports › App usage', 'reportAppUsage'],
+          ["Reports › Who's using the app", 'reportAppActivity'],
           ['Send me a test notification', 'sendTestPushToMe'],
           ['Set up / repair tabs', 'setupTma'],
           ['Install schedules', 'installTriggers'],
@@ -201,12 +202,14 @@ describe('sheet menu and schedules', () => {
       seeded: false,
       secretsInitialized: [],
       addedSettings: ['EMAIL_VIA', 'NEW_SIGNUPS_PER_HOUR'],
+      updatedSettings: ['PRIVACY_NOTE'],
     });
     gas.scriptApp.newTrigger('syncTick').timeBased().everyMinutes(15).create();
     gas.scriptApp.newTrigger('dailyTick').timeBased().everyDays(1).create();
     setupTma();
     const message = gas.ui.alerts[0].message;
     expect(message).toContain('Added settings (with their defaults): EMAIL_VIA, NEW_SIGNUPS_PER_HOUR');
+    expect(message).toContain("Updated settings you hadn't changed to the new default text: PRIVACY_NOTE");
     expect(message).not.toContain('New deployment');
     expect(message).toContain('Nothing else to do.');
     expect(message).toContain('Manage deployments → pencil → New version');

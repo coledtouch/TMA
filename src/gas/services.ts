@@ -3,7 +3,7 @@
  * execution: every web request, trigger run and menu click starts fresh.
  */
 import type { SecretName, SettingKey } from '../shared/schema';
-import type { Cache, Crypto, Logger, Secrets, Services } from '../server/services';
+import type { Cache, Crypto, LockOptions, Logger, Secrets, Services } from '../server/services';
 import { createGasMailer, type GasMailer } from './mail';
 import { createPayPalGateway } from './paypal';
 import { createPushRelaySender, type PushRelaySender } from './push-relay';
@@ -104,10 +104,12 @@ export interface LockHooks {
 /**
  * Re-entrant runner around LockService.getScriptLock(): nested calls in the
  * same execution reuse the held lock instead of waiting on themselves.
+ * `options.waitMs` waits less than `timeoutMs` (never more) before waitLock
+ * gives up and throws.
  */
-export function createScriptLock(hooks: LockHooks, timeoutMs = LOCK_TIMEOUT_MS): <T>(fn: () => T) => T {
+export function createScriptLock(hooks: LockHooks, timeoutMs = LOCK_TIMEOUT_MS): <T>(fn: () => T, options?: LockOptions) => T {
   let depth = 0;
-  return function withLock<T>(fn: () => T): T {
+  return function withLock<T>(fn: () => T, options?: LockOptions): T {
     if (depth > 0) {
       depth += 1;
       try {
@@ -116,8 +118,9 @@ export function createScriptLock(hooks: LockHooks, timeoutMs = LOCK_TIMEOUT_MS):
         depth -= 1;
       }
     }
+    const wait = options?.waitMs;
     const lock = LockService.getScriptLock();
-    lock.waitLock(timeoutMs);
+    lock.waitLock(typeof wait === 'number' && Number.isFinite(wait) ? clamp(Math.floor(wait), 1, timeoutMs) : timeoutMs);
     depth = 1;
     try {
       hooks.onAcquire();

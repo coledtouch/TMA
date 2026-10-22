@@ -164,6 +164,31 @@ describe('writeReportTab', () => {
     expect(t.numberFormats.get('3,1')).toBe('m/d/yyyy');
   });
 
+  it("writes who's using the app: dates as dates, counts as numbers, a blank for never", () => {
+    const services = sampleSheet();
+    const { sheet } = runSheetReport(services, spreadsheet(), 'app-activity');
+    expect(sheet.getName()).toBe("Report: Who's using the app");
+    const t = tab("Report: Who's using the app");
+    const rows = t.dump();
+    expect(rows[1]).toEqual([
+      'Household', 'Household ID', 'Status', 'Last opened app', 'Days since opened', 'Last signed in', 'Sign-ins',
+      'Phones with notifications', 'Parents not signed in yet',
+    ]);
+    // Sample Sign-ins: Jordan opened the app yesterday, Marcus 2 days ago, the treasurer 3 days ago.
+    expect(rows.slice(2, 7)).toEqual([
+      ['Jordan Thompson & Casey Thompson', 'F0001', 'Active', serial(-1), 1, serial(-30), 2, 1, 1],
+      ['Marcus Ortiz', 'F0003', 'Pending', serial(-2), 2, serial(-2), 1, 0, 0],
+      ['treasurer@example.com', '', 'No household', serial(-3), 3, serial(-20), 3, 0, ''],
+      ['Priya Nguyen', 'F0002', 'Active', '', '', '', 0, 0, 1],
+      ['Total', '', '', '', '', '', 6, 1, 2],
+    ]);
+    expect(t.numberFormats.get('3,4')).toBe('m/d/yyyy');
+    expect(t.numberFormats.get('3,5')).toBe('#,##0');
+    expect(t.numberFormats.get('7,7')).toBe('#,##0');
+    // Reading the report writes nothing, not even a Sign-ins row.
+    expect(tab('Sign-ins').dump()).toHaveLength(4);
+  });
+
   it('says "Nothing to show." for an empty report and leaves the totals out', () => {
     loadTabs({});
     const services = createGasServices();

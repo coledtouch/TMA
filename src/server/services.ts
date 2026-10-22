@@ -203,8 +203,19 @@ export interface Services {
   push: PushSender;
   payments: PaymentGateway;
   logger: Logger;
-  /** Run fn while holding the script-wide write lock (LockService in Apps Script). */
-  withLock<T>(fn: () => T): T;
+  /**
+   * Run fn while holding the script-wide write lock (LockService in Apps Script). Throws, without
+   * running fn, when the lock can't be had in time.
+   */
+  withLock<T>(fn: () => T, options?: LockOptions): T;
+}
+
+export interface LockOptions {
+  /**
+   * Wait at most this long (ms) for the lock instead of the usual wait (Apps Script: 20 s). For
+   * best-effort writes, such as noting a sign-in, that must never keep anyone waiting.
+   */
+  waitMs?: number;
 }
 
 export type { IsoDateTime };

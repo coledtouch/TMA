@@ -102,7 +102,8 @@ The numbers are worked out the same way as everywhere else in the app, so they m
 | **Payments** | Every Payments row this school year. The totals count only `Completed` payments. |
 | **Roster** | Each active student with grade, school, groups, instrument, and both parents' names, emails and phone numbers. **Keep it private.** When a board member opens it in the app, the Log tab notes who. |
 | **Open items** | What is waiting on you: fund requests to decide, new households and students to review, and payments still clearing. |
-| **App usage** | Counts only, no names: households signed up and verified, how many use the app, and how many get phone notifications, email or texts. |
+| **App usage** | Counts only, no names: households signed up and verified, how many use the app, how many opened it in the last 7 and 30 days, and how many get phone notifications, email or texts. |
+| **Who's using the app** | One line per household: when its parents last opened the app and signed in, how many times they signed in, phones with notifications, and how many of its parents haven't signed in yet. Most recent first; households with no sign of using the app come last. Sign-ins from before the update that added this report are not known, so for the first months some families who do use the app show no dates. People who signed in with an email that is on no household are listed too, by email (often a parent using a different email than the one in Families). Inactive households are left out. Pick a school or group in the app to see just those families. |
 
 **About the `Report: …` tabs**
 
@@ -345,7 +346,7 @@ app uses it on the next request. You don't need to redeploy.
 | `MIN_PAYMENT` | 5.00 | Smallest online payment, in dollars. |
 | `OTHER_PAYMENT_INSTRUCTIONS` | Checks payable to "Timberlane Music Association", P.O. Box 420, Plaistow, NH 03865… | Shown to families under "Other ways to pay". |
 | `DONATE_URL` | TMA's donate page | Link for the Donate button under *More → Help & contact*. |
-| `PRIVACY_NOTE` | TMA only stores what it needs… | Shown in the app under *More → Your privacy*. |
+| `PRIVACY_NOTE` | TMA only stores what it needs… | Shown in the app under *More → Your privacy*. If it still has the old default text, *Set up / repair tabs* changes it to the new default, which mentions the Sign-ins tab. Set up never changes text you edited. **If you edited it, add this sentence yourself:** *The app also notes when each parent signs in and last opened it, so TMA can see who is using it.* |
 | `REMINDER_DAYS` | 14, 7, 1 | Send payment reminders this many days before an activity's Due Date (only to students with something left to pay). |
 | `EMAIL_ENABLED` | TRUE | `FALSE` stops notification emails (push still works). **Sign-in codes are always emailed.** |
 | `EMAIL_VIA` | cloudflare | Which way the app's emails go out. `cloudflare` = from **noreply@mytma.org** through TMA's push Worker (Cloudflare Email Sending, see [SETUP.md](SETUP.md#email-from-noreplymytmaorg)); if the Worker can't send one, that email goes out with Gmail instead. `gmail` = always from the Google account that runs the script. |
@@ -366,6 +367,7 @@ them.** You can look at them with *View → Hidden sheets*.
 | --- | --- |
 | **Preferences** | Each parent's notification choices (schools, groups, topics, push/email/text). |
 | **Devices** | One row per phone or computer where a parent turned on notifications: the parent's email, household, the browser's **push subscription** (a web address at Apple, Google, Mozilla or Microsoft, plus two keys used to lock each message so that only that browser can read it; not a phone number), the device type and when it was last seen. Rows that the push service reports as expired are removed automatically. |
+| **Sign-ins** | One row per email that signed in to the app: its household (blank if none yet), when it first and last signed in, when it last opened the app, and how many times it signed in. Nothing else (no device or location). Opening the app is noted at most once every 6 hours. A sign-in lasts 120 days (`SESSION_DAYS`), so most people rarely sign in again; **Last Opened App** shows who still uses it. A row with no sign-in dates is usually someone who signed in before the app kept this tab and has opened it since. Once in a while it is a sign-in the app couldn't note because the sheet was busy, from someone who didn't open the app again that day. The report *Who's using the app* reads this tab. |
 | **Log** | What the app did: notifications sent, approvals, errors. Board members also see the latest entries in the app under *Board tools → Recent activity*. |
 | **_Snapshot** | The last balance the app saw for each student, used to notice changes. |
 | **_Sent** | Which reminders were already sent, so nobody gets the same reminder twice. |

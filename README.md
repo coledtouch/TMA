@@ -41,8 +41,9 @@ keeps balances straight and notifies families when something changes.
 * **Approve fund requests** and **verify new households** in the app (*More → Board tools*) or
   in the sheet.
 * **Send announcements** to everyone or only to some schools and groups, by push, email or text.
-* **Reports**: trip balances, student funds, fundraiser totals, payments, a roster and more, in the
-  app (*Board tools → Reports*, download as CSV or print) or in the sheet (*TMA App → Reports*).
+* **Reports**: trip balances, student funds, fundraiser totals, payments, a roster, who's using the
+  app and more, in the app (*Board tools → Reports*, download as CSV or print) or in the sheet
+  (*TMA App → Reports*).
   Each one is worked out from the sheet when you open it.
 * Automatic **payment-due reminders** and **"concert tomorrow"** reminders.
 
@@ -160,7 +161,8 @@ The full design, including every API action, notification message and scheduled 
 ## Privacy in short
 
 * **Collected:** parent names, emails, an optional cell number, and each student's first and last
-  name, grade, school, groups and (optionally) instrument. Plus each family's notification choices.
+  name, grade, school, groups and (optionally) instrument. Plus each family's notification choices,
+  and when each parent signed in and last opened the app (so the board can see who uses it).
 * **Not collected:** home addresses, birthdates, Social Security numbers, card or bank numbers,
   student emails or phone numbers, or any school records.
 * **Where it lives:** in TMA's own Google Sheet, in TMA's Google account. There is no separate
