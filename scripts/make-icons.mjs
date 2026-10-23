@@ -260,6 +260,37 @@ const hasArt = (y) => {
 while (owlBottom > 0 && hasArt(owlBottom)) owlBottom -= 1;
 const owl = await sharp(owlArt, raw).extract(bbox(owlArt, owlBottom)).png().toBuffer();
 
+// The MUSIC bar: the last band of rows with artwork in it (TIMBERLANE is the
+// band above it, the owl the one above that).
+const hasInk = (y) => {
+  for (let x = 0; x < W; x += 1) if (owlArt[(y * W + x) * 4 + 3] >= 8) return true;
+  return false;
+};
+let musicBottom = H - 1;
+while (musicBottom > 0 && !hasInk(musicBottom)) musicBottom -= 1;
+let musicTop = musicBottom;
+while (musicTop > 0 && hasInk(musicTop - 1)) musicTop -= 1;
+const musicRows = Buffer.from(owlArt.subarray(musicTop * W * 4, (musicBottom + 1) * W * 4));
+const musicArt = { raw: { width: W, height: musicBottom + 1 - musicTop, channels: 4 } };
+const music = await sharp(musicRows, musicArt).extract(bbox(musicRows, musicBottom + 1 - musicTop)).png().toBuffer();
+
+// App icon artwork: the owl over the MUSIC bar, as wide as each other. On a
+// phone's home screen the whole logo shrinks TIMBERLANE to a few pixels tall;
+// these two stay readable, and the app's name (TMA) is shown under the icon.
+const { width: musicWidth, height: musicHeight } = await sharp(music).metadata();
+const owlForIcon = await sharp(owl).resize({ width: musicWidth, kernel: 'lanczos3' }).png().toBuffer();
+const { height: owlHeight } = await sharp(owlForIcon).metadata();
+const iconGap = Math.round(musicWidth * 0.06);
+const appMark = await sharp({
+  create: { width: musicWidth, height: owlHeight + iconGap + musicHeight, channels: 4, background: CLEAR },
+})
+  .composite([
+    { input: owlForIcon, left: 0, top: 0 },
+    { input: music, left: 0, top: owlHeight + iconGap },
+  ])
+  .png()
+  .toBuffer();
+
 /** 256-colour PNGs: a third of the size, and they look the same. */
 const PNG = { compressionLevel: 9, palette: true, quality: 95, effort: 10 };
 const LOGO_WIDTH = 800; // sign-in shows it 240 CSS px wide, so this is sharp at 3x
@@ -297,14 +328,31 @@ async function mask(input, size, radius, out) {
     .toFile(out);
 }
 
-// App icons: the whole logo on white. Android masks "maskable" icons to a
-// circle or squircle, so there it fits inside the middle 80% (the safe zone):
-// the logo's corners stay within a circle of 40% of the icon size.
-const safe = 0.8 / Math.hypot(1, crop.height / crop.width);
-await square(logoLight, 192, 0.9, WHITE, 'public/icons/icon-192.png');
-await square(logoLight, 512, 0.9, WHITE, 'public/icons/icon-512.png');
-await square(logoLight, 512, safe, WHITE, 'public/icons/maskable-512.png');
-await sharp(await square(logoLight, 180, 0.86, WHITE))
+/**
+ * The largest share of the icon `art` can fill (as `square`'s scale) with every
+ * drawn pixel inside a circle of `radius` (a fraction of the icon size) around
+ * the centre. Fitting the drawn shape rather than its bounding box lets the
+ * artwork grow as far as the safe zone really allows.
+ */
+async function circleFit(art, radius) {
+  const { data, info: fit } = await sharp(art).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let far = 0;
+  for (let y = 0; y < fit.height; y += 1) {
+    for (let x = 0; x < fit.width; x += 1) {
+      if (data[(y * fit.width + x) * 4 + 3] < 24) continue;
+      far = Math.max(far, Math.hypot(x + 0.5 - fit.width / 2, y + 0.5 - fit.height / 2));
+    }
+  }
+  return (radius * Math.max(fit.width, fit.height)) / far;
+}
+
+// App icons: the owl and MUSIC on white. Android masks "maskable" icons to a
+// circle or squircle, so there every drawn pixel stays inside the middle 80%
+// (the safe zone): a circle of 40% of the icon size.
+await square(appMark, 192, 0.84, WHITE, 'public/icons/icon-192.png');
+await square(appMark, 512, 0.84, WHITE, 'public/icons/icon-512.png');
+await square(appMark, 512, await circleFit(appMark, 0.4), WHITE, 'public/icons/maskable-512.png');
+await sharp(await square(appMark, 180, 0.8, WHITE))
   .flatten({ background: '#ffffff' }) // iOS shows transparency as black
   .removeAlpha()
   .png(PNG)

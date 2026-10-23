@@ -864,7 +864,9 @@ export function PayPalCheckout(props: {
 * Logo and icons: all made by `npm run icons` (scripts/make-icons.mjs) from the official artwork
   `public/brand/tma-music-logo-source.webp`. The sign-in logo is transparent (`brand/tma-logo-light.webp`,
   `brand/tma-logo-dark.webp`), the header shows the owl on a white disc (`brand/tma-owl-mark.png`), app
-  icons show the whole logo on white, and the favicons (32, 64) and notification badge show just the owl.
+  icons show the owl over the MUSIC bar on white (the whole logo is unreadable at home-screen size; the
+  maskable icon keeps every drawn pixel inside the 80% safe circle), and the favicons (32, 64) and
+  notification badge show just the owl.
 
 ### Service worker (src/web/sw.ts, vite-plugin-pwa injectManifest)
 
