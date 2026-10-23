@@ -1,0 +1,57 @@
+# Checks every push and pull request: types, unit tests (the app's and both
+# Cloudflare Workers': workers/push and workers/app), both builds, and that
+# the committed apps-script/Code.js matches the TypeScript it is built from
+# (volunteers copy that file straight into Apps Script, so it must be current).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (app, service worker, Apps Script, Workers)
+        run: npm run typecheck
+
+      - name: Unit tests (app, then the Workers)
+        run: npm test
+
+      - name: Build the web app (demo build, no backend variables)
+        run: npm run build:web
+
+      - name: Build the Apps Script bundle
+        run: npm run build:gas
+
+      - name: Check apps-script/Code.js is up to date
+        run: |
+          # git status also catches a Code.js that was never committed.
+          if [ -n "$(git status --porcelain -- apps-script/Code.js)" ]; then
+            echo "::error file=apps-script/Code.js::apps-script/Code.js is out of date. Run npm run build:gas and commit apps-script/Code.js"
+            git --no-pager diff --stat -- apps-script/Code.js
+            exit 1
+          fi
+          echo "apps-script/Code.js matches the source."

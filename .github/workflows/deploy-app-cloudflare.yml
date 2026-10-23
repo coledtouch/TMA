@@ -1,0 +1,125 @@
+# Builds the web app and publishes it at https://mytma.org on Cloudflare
+# (Worker "tma-app" in workers/app, serving dist/ as static assets). This is
+# the only place the real app is served (see docs/SETUP.md, step 7).
+#
+# Uses the same repository secrets as the push Worker:
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+# (the mytma.org zone must be in that same Cloudflare account) and this
+# repository variable (Settings → Secrets and variables → Actions → Variables).
+# It is public: it ends up in the app's JavaScript.
+#   VITE_API_URL   Apps Script web app URL (ends in /exec) of the spreadsheet
+#                  the app works on. While it is not set, mytma.org works on
+#                  TMA's test spreadsheet (TEST_API_URL below); set it to the
+#                  real spreadsheet's URL to go live. Either way
+#                  https://mytma.org/?demo is the demo link for the board.
+# Changing the variable starts no workflow: run this one by hand afterwards
+# (Actions → Deploy app to mytma.org (Cloudflare) → Run workflow). The run's
+# summary shows which backend the app was built with.
+# Without the secrets the workflow still tests and builds, then skips the deploy.
+name: Deploy app to mytma.org (Cloudflare)
+
+on:
+  push:
+    # The PR branch is listed so mytma.org is live before merge. Remove it
+    # once merged.
+    branches: [main, claude/laughing-goodall-h7za8l]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'workers/app/**'
+      - '.github/workflows/deploy-app-cloudflare.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-cloudflare
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # TMA's test spreadsheet ("TMA App - Test Data"), used only while the
+      # VITE_API_URL variable is unset. Going live = setting the variable.
+      TEST_API_URL: https://script.google.com/macros/s/AKfycbxwPf9fdNK8kNu9objZgwTcANg-11Qgr2AiuIPzSxXXSQAe98T1EXPBQ2pU5sENTeYAFA/exec
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Check for the Cloudflare secrets
+        id: secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=App not deployed::Add the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to publish mytma.org."
+          fi
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            workers/push/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test the front-door Worker
+        run: |
+          npx vitest run --config workers/app/vitest.config.ts
+          npx tsc -p workers/app/tsconfig.json --noEmit
+
+      - name: Build the web app
+        run: npm run build:web
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || env.TEST_API_URL }}
+
+      - name: Report the backend
+        env:
+          VARIABLE: ${{ vars.VITE_API_URL }}
+        run: |
+          if [ -n "$VARIABLE" ]; then
+            echo "Backend (VITE_API_URL): $VARIABLE" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Backend::The app works on the spreadsheet behind $VARIABLE"
+          else
+            echo "Backend: TMA's TEST spreadsheet ($TEST_API_URL), because the VITE_API_URL variable is not set." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Test spreadsheet::VITE_API_URL is not set, so mytma.org works on TMA's test spreadsheet. To go live, set the variable to the real spreadsheet's /exec URL and run this workflow again."
+          fi
+
+      # Same pinned Wrangler as the push Worker (workers/push/package-lock.json).
+      - name: Install Wrangler
+        if: steps.secrets.outputs.deploy == 'true'
+        run: npm ci --prefix workers/push --no-audit --no-fund
+
+      - name: Deploy to Cloudflare
+        if: steps.secrets.outputs.deploy == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: workers/push/node_modules/.bin/wrangler deploy --config workers/app/wrangler.toml
+
+      - name: Check https://mytma.org
+        if: steps.secrets.outputs.deploy == 'true'
+        run: |
+          # A new custom domain needs a few minutes for DNS and its certificate,
+          # so a failed check is only a warning.
+          if curl -fsS --retry 10 --retry-delay 15 --retry-all-errors --max-time 15 -o /dev/null https://mytma.org/; then
+            echo "### App deployed: https://mytma.org" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=mytma.org not answering yet::The deploy finished but https://mytma.org did not answer yet. New domains can take a few minutes."
+          fi

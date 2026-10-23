@@ -1,0 +1,77 @@
+# Publishes the DEMO of the web app to GitHub Pages at
+# https://<owner>.github.io/<repo>/: sample families, simulated PayPal and push.
+#
+# It never builds the real app, whatever VITE_API_URL says. Every GitHub Pages
+# site of one owner shares the origin https://<owner>.github.io, so any of
+# them could read the sign-in (a 120-day session) and cached family data the
+# real app keeps in the browser. The real app is served only from its own
+# address, https://mytma.org (.github/workflows/deploy-app-cloudflare.yml).
+#
+# One-time setup (optional; see docs/SETUP.md, step 7):
+#   Settings → Pages → Source: GitHub Actions
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    # The PR branch is listed so the board can try the prototype before merge
+    # (the github-pages environment allows it). Remove it once merged.
+    branches: [main, claude/laughing-goodall-h7za8l]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; let a running deployment finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the web app (demo only)
+        run: npm run build:web
+        env:
+          # Always empty: see the top of this file.
+          VITE_API_URL: ''
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
+
+      # upload-pages-artifact v4+ leaves out files and folders whose names start
+      # with a dot. The Vite build has none; if one is ever needed, set
+      # include-hidden-files: true.
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

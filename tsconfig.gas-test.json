@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.gas.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["google-apps-script", "node", "vitest/globals"]
+  },
+  "include": ["src/gas/**/*.test.ts", "src/gas/testing"],
+  "exclude": []
+}
