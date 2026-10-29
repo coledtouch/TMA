@@ -673,6 +673,14 @@ export function TickReportView({ report }: { report: TickReport }) {
             {n.push} push · {n.email} email · {n.sms} text
           </dd>
         </div>
+        {report.calendars ? (
+          <div>
+            <dt>Calendar events</dt>
+            <dd>
+              {report.calendars.added} added · {report.calendars.updated} changed · {report.calendars.removed} removed
+            </dd>
+          </div>
+        ) : null}
       </dl>
       {report.waiting ? (
         <p className="callout callout-info small">
@@ -683,6 +691,13 @@ export function TickReportView({ report }: { report: TickReport }) {
               : `${report.waiting} rows typed in the sheet changed in the last few minutes. They go out at a later sync, once they stop changing.`}
           </span>
         </p>
+      ) : null}
+      {report.notes && report.notes.length > 0 ? (
+        <ul className="callout callout-info small report-errors" aria-label="Notes">
+          {report.notes.map((note, i) => (
+            <li key={i}>{note}</li>
+          ))}
+        </ul>
       ) : null}
       {report.errors.length > 0 ? (
         <ul className="callout callout-warning small report-errors">
@@ -723,8 +738,8 @@ function SyncCard({ onDone }: { onDone(): void }) {
       </h2>
       <div className="card">
         <p className="small">
-          The app checks the sheet every 15 minutes: it posts approved requests, notices new credits and sends queued
-          announcements. Run it now after editing the sheet.
+          The app checks the sheet every 15 minutes: it posts approved requests, notices new credits, sends queued
+          announcements and copies events from linked calendars (Calendars tab). Run it now after editing the sheet.
         </p>
         <button type="button" className="btn btn-secondary btn-block" onClick={run} disabled={busy}>
           <Icon name="refresh" /> {busy ? 'Running…' : 'Run sync now'}

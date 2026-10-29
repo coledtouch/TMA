@@ -72,7 +72,7 @@ are **Active**.
 | A parent asks to use funds for a trip | Approve or deny it in the app (*More → Board tools → Fund requests*), **or** type `Approved`/`Denied` in the **Status** column of **Redemptions**. | A notification: *"Funds applied to Florida 2027"* or *"Funds request not approved"*. |
 | A new family signs up in the app | Review it in the app (*More → Board tools → New households*). If you already track their student, pick that record so the history and balance carry over. If the card says *Check the sheet before approving*, fix what it lists first. | *"You're all set! TMA verified your household."* |
 | You want to tell families something | Write it in the app (*Board tools → Send an announcement*), or add a row to **Announcements** and leave **Sent** blank. | Push/email to the families whose school, group and topic choices match. |
-| A concert or meeting is scheduled | Add a row to **Events**. | It shows under News, and a reminder goes out the day before. |
+| A concert or meeting is scheduled | Add a row to **Events**. Or, if it is on a [linked calendar](#calendars), just keep the calendar up to date: the app copies it. | It shows under News, and a reminder goes out the day before. |
 
 **Approve fund requests in the app when you can.** The app re-checks that the student still has
 enough available funds and that the trip still has that much left to pay. When you type `Approved`
@@ -313,7 +313,44 @@ before (in the morning run, about 8 AM).
 | **Title** | Required. | `HS Winter Concert` |
 | **Location** | | `TRHS Auditorium` |
 | **Details** | | `Students arrive 6:15 PM in concert black.` |
-| **Schools**, **Ensembles** | Who it's for, as in Announcements. **Blank = everyone.** | `High School` |
+| **Schools**, **Ensembles** | Who it's for, as in Announcements. **Blank = everyone.** (*Groups* is also accepted.) | `High School` |
+| **Source** | **Leave blank** on rows you type. The app fills it on rows it copies from a [linked calendar](#calendars): the calendar's Name, shown on the event in the app. | `Music Dept` |
+| **Calendar Event** | **Leave blank.** On copied rows: which calendar event the row is (the app finds the row again with it). | `3f2a9c1b7e:abc123:20261212T000000Z` |
+
+**Rows with a Source come from a linked calendar. Change those in the calendar, not here.** At each
+sync the app updates them from the calendar: what you type into them is replaced within a few hours,
+and a row whose event was cancelled, deleted or made private is removed (only for dates from yesterday
+on; rows of past events stay as history). The app gives them IDs like `CAL-3f2a9c1b7e`. Rows without
+a Source are yours: the app never changes or removes them. If you clear a copied row's Source, that row
+becomes yours too: the app stops updating it and doesn't copy that event again.
+
+### Calendars
+
+Google Calendars (or other calendars' iCal links) whose events the app copies into **Events** at every
+sync, from yesterday through `CALENDAR_DAYS` days ahead (180 unless you change it). How to find a
+calendar's ID and share it with TMA's Google account: [SETUP.md → Link Google Calendars](SETUP.md#link-google-calendars).
+
+| Column | Meaning | Example |
+| --- | --- | --- |
+| **Name** | Shown on each of its events in the app, and put in the Events **Source** column. Keep it short. | `Music Dept` |
+| **Calendar** | The Google **Calendar ID**, or an iCal address starting with `https://`. (Also accepted: *Calendar ID*, *Link*.) | `abc123@group.calendar.google.com` |
+| **Schools**, **Groups** | Who its events are for, as in Events. **Blank or `Everyone` = everyone.** Use the names in Settings `SCHOOLS` / `ENSEMBLES`. A misspelled name matches no family, just as in a row you type, and the Log says so: check the spelling. | `Middle School` |
+| **On** | `FALSE` stops copying it, and removes its upcoming rows from Events. **Blank = on.** | `TRUE` |
+
+One event can be sent to other families than its calendar's by adding lines like `Schools: High
+School` or `Groups: Jazz Band, Chorus` to the event's description in the calendar. Families don't
+see those lines.
+
+An event that is on two linked calendars gets one row in Events, under the Name of the calendar
+higher in this tab. It goes to the families of both calendars, with one reminder.
+
+The app only **reads** these calendars, never changes them, and never copies private events.
+*TMA App → Status* shows one line per calendar: *OK* with how many events it copies, or why it can't
+be read. If a calendar can't be read, its rows in Events are left as they were.
+
+Don't rename or delete this tab. Without it, the rows copied from calendars stay in Events but are
+no longer updated, and *Run sync now* and the Log say so. To stop copying a calendar, set its **On**
+to `FALSE` instead.
 
 ---
 
@@ -354,6 +391,7 @@ app uses it on the next request. You don't need to redeploy.
 | `PUSH_RELAY_URL` | https://tma-push.coleciprari.workers.dev | Web address of TMA's push Worker on Cloudflare, which delivers phone notifications. **Leave the default** unless TMA moves the Worker. Changing it takes more than this cell: follow [SETUP.md step 5F](SETUP.md#f-moving-to-another-cloudflare-account), which ends with *TMA App → Set up / repair tabs*. Anything that isn't an `https://` address (for example `off`) turns phone notifications off; email still works. |
 | `TOKEN_VERSION` | 1 | Change it (e.g. to `2`) to **sign everyone out** of the app, for example after a board member leaves or a phone is lost. Everyone simply signs in again with a new code. |
 | `SESSION_DAYS` | 120 | How many days a sign-in lasts (1–400). |
+| `CALENDAR_DAYS` | 180 | How far ahead to copy events from [linked calendars](#calendars) (7 to 400 days). Events from yesterday on are copied. |
 | `NEW_SIGNUPS_PER_HOUR` | 30 | Sign-in codes per hour, across everyone, to emails TMA hasn't verified yet (new families, households still waiting for review). It stops strangers from using up the day's emails. **Raise it (up to 500) on a launch day**, when many families sign up at once, and lower it again afterwards. |
 
 ---

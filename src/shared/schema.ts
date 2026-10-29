@@ -21,6 +21,7 @@ export type TableName =
   | 'Redemptions'
   | 'Announcements'
   | 'Events'
+  | 'Calendars'
   | 'Preferences'
   | 'Devices'
   | 'Sign-ins'
@@ -151,8 +152,22 @@ export const TABLES: Readonly<Record<TableName, TableDef>> = {
     note: 'News for families. Leave Sent blank and the app sends it on its next run (Schools/Ensembles blank = everyone).',
   },
   Events: {
-    headers: ['ID', 'Date', 'Time', 'Title', 'Location', 'Details', 'Schools', 'Ensembles'],
-    note: 'Concerts, meetings, deadlines. Families get a reminder the day before.',
+    headers: ['ID', 'Date', 'Time', 'Title', 'Location', 'Details', 'Schools', 'Ensembles', 'Source', 'Calendar Event'],
+    aliases: {
+      Ensembles: ['Groups'],
+      Source: ['Calendar Name', 'From Calendar'],
+      'Calendar Event': ['Calendar Event ID', 'Calendar Key'],
+    },
+    note: 'Concerts, meetings, deadlines. Families get a reminder the day before. Rows with a Source are copied from a linked calendar (Calendars tab): change those in the calendar, not here.',
+  },
+  Calendars: {
+    headers: ['Name', 'Calendar', 'Schools', 'Groups', 'On'],
+    aliases: {
+      Calendar: ['Calendar ID', 'Calendar Link', 'iCal Link', 'Link', 'Address'],
+      Groups: ['Ensembles'],
+      On: ['Enabled', 'Active'],
+    },
+    note: 'Google Calendars (Calendar ID) or iCal links (https://….ics) whose events the app copies into Events every 15 minutes. Schools/Groups blank = everyone. On: TRUE/FALSE (blank = on).',
   },
   Preferences: {
     headers: ['Email', 'FamilyID', 'Prefs', 'Updated'],
@@ -204,6 +219,7 @@ export const TABLE_ORDER: readonly TableName[] = [
   'Redemptions',
   'Announcements',
   'Events',
+  'Calendars',
   'Settings',
   'Preferences',
   'Devices',
@@ -242,6 +258,8 @@ export const SETTING_DEFAULTS = {
   TOKEN_VERSION: '1',
   SESSION_DAYS: '120',
   NEW_SIGNUPS_PER_HOUR: '30',
+  /** Linked calendars (Calendars tab): copy events from yesterday through this many days ahead. */
+  CALENDAR_DAYS: '180',
 } as const;
 
 export type SettingKey = keyof typeof SETTING_DEFAULTS;

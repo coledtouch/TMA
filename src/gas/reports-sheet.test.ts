@@ -1,6 +1,6 @@
 import * as nodeCrypto from 'node:crypto';
 import { createApp } from '../server/app';
-import { sampleData } from '../server/sample-data';
+import { sampleCalendarEvents, sampleData } from '../server/sample-data';
 import type { CellValue, RowData } from '../server/services';
 import { TEST_NOW } from '../server/test-helpers';
 import { TABLE_ORDER, TABLES, type TableName } from '../shared/schema';
@@ -17,7 +17,7 @@ import {
   writeReportTab,
 } from './reports-sheet';
 import { createGasServices, type GasServices } from './services';
-import { FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
+import { calendarApiItems, FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
 
 type Spreadsheet = GoogleAppsScript.Spreadsheet.Spreadsheet;
 
@@ -48,6 +48,8 @@ function cell(value: CellValue | undefined): string | number | boolean | Date {
 /** The sample sheet as of TEST_NOW (Wed 2026-10-21, 10:00 New York), without the queued announcement. */
 function sampleSheet(): GasServices {
   loadTabs({ ...sampleData(TEST_NOW, { demoSettings: true }), Announcements: [] });
+  // The sample's linked "Music Dept" calendar, through the Calendar advanced service.
+  gas.calendar.handler = () => ({ items: calendarApiItems(sampleCalendarEvents(TEST_NOW)) });
   const services = createGasServices();
   services.clock = { now: () => TEST_NOW };
   return services;

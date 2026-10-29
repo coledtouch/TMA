@@ -46,6 +46,10 @@ keeps balances straight and notifies families when something changes.
   (*TMA App → Reports*).
   Each one is worked out from the sheet when you open it.
 * Automatic **payment-due reminders** and **"concert tomorrow"** reminders.
+* **Linked calendars** (optional): events on TMA's Google Calendar, the music department's concert
+  calendar or any iCal link show up in the app by themselves, tagged with the calendar's name. The
+  app only reads calendars and never copies private events. See
+  [docs/SETUP.md → Link Google Calendars](docs/SETUP.md#link-google-calendars).
 
 ## Try the demo
 

@@ -60,17 +60,27 @@ describe('me.bootstrap for a verified family', () => {
       'Winter Concert volunteers needed',
       'Poinsettia credits posted',
     ]);
+    // Two come from the demo's linked "Music Dept" calendar: the auditions (High School + Chorus,
+    // from its description) and the winter break (everyone).
     expect(thompson.events.map((e) => e.title)).toEqual([
       'Jazz Night',
+      'Spring musical auditions',
       'TMA monthly meeting',
       'Middle School Winter Concert',
       'High School Winter Concert',
+      'Winter break: no rehearsals',
     ]);
+    expect(thompson.events.find((e) => e.title === 'Spring musical auditions')).toMatchObject({
+      source: 'Music Dept',
+      time: '3:00 PM',
+      audience: { schools: ['High School'], ensembles: ['Chorus'] },
+    });
+    expect(thompson.events.find((e) => e.title === 'Jazz Night')?.source).toBeUndefined();
 
     // Nguyens: High School + Elementary; Orchestra. No HS+Chorus item, no Jazz Night, no MS concert.
     const nguyen = h.ok('me.bootstrap', {}, h.signIn(NGUYEN));
     expect(nguyen.announcements.map((a) => a.title)).toEqual(['Florida 2027 deposit reminder', 'Poinsettia credits posted']);
-    expect(nguyen.events.map((e) => e.title)).toEqual(['TMA monthly meeting', 'High School Winter Concert']);
+    expect(nguyen.events.map((e) => e.title)).toEqual(['TMA monthly meeting', 'High School Winter Concert', 'Winter break: no rehearsals']);
     // Unsent (future) announcement is never shown.
     expect(JSON.stringify(nguyen)).not.toContain('information night');
   });
@@ -82,7 +92,7 @@ describe('me.bootstrap for a verified family', () => {
     const b = h.ok('me.bootstrap', {}, token);
     expect(b.prefs.schools).toEqual(['Middle School']);
     expect(b.announcements.map((a) => a.title)).toEqual(['Poinsettia credits posted']);
-    expect(b.events.map((e) => e.title)).toEqual(['TMA monthly meeting', 'Middle School Winter Concert']);
+    expect(b.events.map((e) => e.title)).toEqual(['TMA monthly meeting', 'Middle School Winter Concert', 'Winter break: no rehearsals']);
 
     const admin = h.ok('me.bootstrap', {}, h.signIn(TREASURER));
     expect(admin.me).toMatchObject({ isAdmin: true, familyId: null, familyStatus: 'None', name: 'treasurer' });

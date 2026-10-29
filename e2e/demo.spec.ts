@@ -45,6 +45,12 @@ test('parent pays and redeems, treasurer approves, parent is notified', async ({
   await expect(page.getByText('Available activity funds').first()).toBeVisible();
   await expect(page.getByText('$440.00').first()).toBeVisible(); // Avery: $640 − $200 pending
 
+  // --- News: events from the linked "Music Dept" calendar carry its tag ---------
+  await tab(page, 'News');
+  const auditions = page.getByRole('listitem').filter({ hasText: 'Spring musical auditions' });
+  await expect(auditions.locator('.source-tag')).toHaveText('From the calendar: Music Dept');
+  await expect(page.getByRole('listitem').filter({ hasText: 'TMA monthly meeting' }).locator('.source-tag')).toHaveCount(0);
+
   // --- Ask to use $100 of Avery's funds for Florida ----------------------------
   await tab(page, 'Trips');
   const useFunds = page.getByRole('button', { name: 'Use activity funds' }).first();

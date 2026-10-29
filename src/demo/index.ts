@@ -24,7 +24,13 @@ import type {
   TickReport,
 } from '../shared/types';
 import { createApp } from '../server/app';
-import { createFakePaymentGateway, createMemoryServices, type MemoryDb, type MemoryServices } from '../server/memory';
+import {
+  createFakePaymentGateway,
+  createMemoryServices,
+  createSampleCalendarSource,
+  type MemoryDb,
+  type MemoryServices,
+} from '../server/memory';
 import { sampleData } from '../server/sample-data';
 import type { App, CellValue, PushResult, PushSender, RowData } from '../server/services';
 import { idKey, nyDate } from '../server/util';
@@ -77,7 +83,8 @@ declare global {
   }
 }
 
-const DEMO_DB_VERSION = 1;
+/** 2: the sample data gained a linked calendar (Calendars tab, "Music Dept" events). */
+const DEMO_DB_VERSION = 2;
 /** Sample dates are relative to the seed day; start fresh when a saved demo gets this old. */
 const DEMO_MAX_AGE_DAYS = 30;
 const SAVE_DEBOUNCE_MS = 300;
@@ -288,6 +295,8 @@ export function createDemoClient(options: DemoClientOptions = {}): DemoClient {
       secrets: { TOKEN_SECRET: DEMO_TOKEN_SECRET },
       push,
       payments: createFakePaymentGateway(),
+      // The sample "Music Dept" calendar, fixed to the day the demo was set up like the rest of it.
+      calendars: createSampleCalendarSource(new Date(seededAt)),
       onChange: scheduleSave,
     });
     services = created;

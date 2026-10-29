@@ -14,6 +14,7 @@
 import { centsToDollars } from '../shared/money';
 import type { TableName } from '../shared/schema';
 import type { TickReport } from '../shared/types';
+import { syncCalendars, type CalendarFetch } from './calendars';
 import type { Ctx } from './context';
 import type { AnnouncementRec, RedemptionRec } from './data';
 import { announcementNotice, creditNotice, debitNotice, eventTomorrowNotice, paymentReminderNotice } from './messages';
@@ -56,12 +57,17 @@ function step(ctx: Ctx, report: TickReport, name: string, fn: () => void): void 
   }
 }
 
-/** Every ~15 minutes. */
-export function runSync(ctx: Ctx): TickReport {
+/**
+ * Every ~15 minutes. `calendars` is what fetchCalendars read before the write lock was taken
+ * (null: no Calendars tab, which syncCalendars reports while copied rows remain; undefined: not
+ * read, so the calendar step is skipped).
+ */
+export function runSync(ctx: Ctx, calendars?: CalendarFetch | null): TickReport {
   const report = emptyReport(ctx.now);
   step(ctx, report, 'redemptions', () => postSheetDecisions(ctx, report));
   step(ctx, report, 'balances', () => detectBalanceChanges(ctx, report));
   step(ctx, report, 'announcements', () => sendQueuedAnnouncements(ctx, report));
+  if (calendars !== undefined) step(ctx, report, 'calendars', () => syncCalendars(ctx, report, calendars));
   return report;
 }
 

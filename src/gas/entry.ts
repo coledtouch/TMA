@@ -7,6 +7,7 @@
  * authorization, so module scope must not touch any Apps Script service.
  */
 import { createApp } from '../server/app';
+import { calendarStatusLines } from '../server/calendars';
 import { canonicalP256Key } from '../server/push-subscription';
 import { REPORT_TITLES } from '../server/reports';
 import type { App } from '../server/services';
@@ -347,6 +348,7 @@ export function showTmaStatus(): void {
     ...pushStatus(services, health),
     `Text messages (Twilio): ${services.sms.enabled() ? 'configured' : 'not configured'}; SMS setting ${yes(services.flag('SMS_ENABLED'))}`,
     ...emailStatus(services, health),
+    ...safely(() => calendarStatusLines(services), ['Calendars: could not be checked (see Executions)']),
     `Version: ${VERSION}`,
   ];
   if (!present.includes('TOKEN_SECRET')) lines.push('', 'TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.');
@@ -419,6 +421,8 @@ export function summarizeTick(report: TickReport): string {
     `reminders: ${report.remindersSent}`,
     `sent push ${n.push}, email ${n.email}, sms ${n.sms}`,
   ];
+  const c = report.calendars;
+  if (c) parts.push(`calendar events: ${c.added} added, ${c.updated} changed, ${c.removed} removed`);
   if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
   if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
   return `${parts.join(' · ')}.`;

@@ -192,7 +192,7 @@ describe('demo client', () => {
     flushSave();
 
     const stored = JSON.parse(localStorage.getItem(DEMO_DB_KEY)!) as { version: number; tables: object };
-    expect(stored.version).toBe(1);
+    expect(stored.version).toBe(2);
 
     const second = newClient();
     await signIn(second, PARENT);
@@ -222,6 +222,22 @@ describe('demo client', () => {
     expect(report.rows.find((r) => r.familyId === 'F0001')).toMatchObject({ signIns: 3, daysSince: 0 });
   });
 
+  it('shows the sample "Music Dept" calendar’s events with their tag, and its sync changes nothing', async () => {
+    const client = newClient();
+    await signIn(client, PARENT);
+    const data = await client.call('me.bootstrap', {});
+    const fromCalendar = data.events.filter((e) => e.source === 'Music Dept');
+    expect(fromCalendar.map((e) => e.title)).toEqual(['Spring musical auditions', 'Winter break: no rehearsals']);
+    expect(fromCalendar[0]).toMatchObject({ time: '3:00 PM', audience: { schools: ['High School'], ensembles: ['Chorus'] } });
+    expect(fromCalendar[0].details).toBe('Sign up for a time slot outside the chorus room. Bring a one-minute song.');
+    expect(fromCalendar[1].details).toMatch(/^Through \w{3} \d{1,2}\.\nRehearsals start again after the break/);
+    // The private staff event in the same calendar is never copied.
+    expect(JSON.stringify(data)).not.toContain('Music staff planning');
+    const report = await client.demo.addCredit('S0001', 1000, 'Bake sale');
+    expect(report.errors).toEqual([]);
+    expect(report.calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 0, removed: 0 });
+  });
+
   it('keeps a session across reloads', async () => {
     const first = newClient();
     await signIn(first, PARENT);
@@ -235,8 +251,10 @@ describe('demo client', () => {
     for (const saved of [
       '{not json',
       JSON.stringify({ version: 99, seededAt: new Date().toISOString(), tables: {} }),
-      JSON.stringify({ version: 1, seededAt: new Date().toISOString(), tables: { Ledger: 'oops' } }),
-      JSON.stringify({ version: 1, seededAt: '2020-01-01T00:00:00.000Z', tables: { Families: [], Settings: [{}] } }),
+      // A demo saved before the sample data had a linked calendar starts again, so the tag shows.
+      JSON.stringify({ version: 1, seededAt: new Date().toISOString(), tables: { Families: [], Settings: [{ Key: 'ORG_NAME' }] } }),
+      JSON.stringify({ version: 2, seededAt: new Date().toISOString(), tables: { Ledger: 'oops' } }),
+      JSON.stringify({ version: 2, seededAt: '2020-01-01T00:00:00.000Z', tables: { Families: [], Settings: [{}] } }),
     ]) {
       localStorage.setItem(DEMO_DB_KEY, saved);
       const client = newClient();

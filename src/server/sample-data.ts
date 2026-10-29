@@ -7,9 +7,71 @@
  * Balances: Avery $640, Liam $85, Maya $410, Ethan $35, Sofia (S0005) $520.
  */
 import { SETTING_DEFAULTS, type SettingKey, type TableName } from '../shared/schema';
-import type { RowData } from './services';
+import { buildCalendarRow, calendarHash } from './calendar-rows';
+import type { CalendarEvent, RowData } from './services';
 import { SETTING_NOTES } from './settings';
-import { addDays, nyDate, nyLocalToDate, shortDate } from './util';
+import { addDays, nyDate, nyLocalToDate, shortDate, splitList } from './util';
+
+/**
+ * The demo's linked calendar (Calendars tab). Its ID is an address at example.com (an account's
+ * own calendar ID is its address), so it can't belong to anybody. Its events come from
+ * sampleCalendarEvents.
+ */
+export const DEMO_CALENDAR = { name: 'Music Dept', id: 'music-dept@example.com' } as const;
+
+/**
+ * What the demo's "Music Dept" calendar holds, relative to `today` (the day the demo was set up).
+ * One timed event whose description chooses its audience, one multi-day all-day event, and a
+ * private event the sync must skip.
+ */
+export function sampleCalendarEvents(today: Date): CalendarEvent[] {
+  const base = nyDate(today);
+  const at = (offset: number, hour: number, minute = 0): string => {
+    const [y, m, d] = addDays(base, offset).split('-').map((n) => parseInt(n, 10));
+    return nyLocalToDate(y, m, d, hour, minute).toISOString();
+  };
+  return [
+    {
+      uid: 'demo-musical-auditions',
+      start: { dateTime: at(9, 15) },
+      end: { dateTime: at(9, 17) },
+      title: 'Spring musical auditions',
+      location: 'TRHS Auditorium',
+      description:
+        '<p>Sign up for a time slot outside the chorus room. Bring a one-minute song.</p><p>Schools: High School<br>Groups: Chorus</p>',
+    },
+    {
+      uid: 'demo-winter-break',
+      start: { date: addDays(base, 55) },
+      end: { date: addDays(base, 64) },
+      title: 'Winter break: no rehearsals',
+      location: '',
+      description: 'Rehearsals start again after the break. Practice at home!',
+    },
+    {
+      uid: 'demo-planning',
+      start: { dateTime: at(20, 14) },
+      end: { dateTime: at(20, 15) },
+      title: 'Music staff planning',
+      location: 'Band room',
+      description: '',
+      private: true,
+    },
+  ];
+}
+
+/** The Events rows a sync of the demo calendar writes (the demo starts in step with its calendar). */
+function sampleCalendarRows(today: Date): RowData[] {
+  const known = { schools: splitList(SETTING_DEFAULTS.SCHOOLS, /,/), ensembles: splitList(SETTING_DEFAULTS.ENSEMBLES, /,/) };
+  const source = { name: DEMO_CALENDAR.name, hash: calendarHash({ kind: 'google', id: DEMO_CALENDAR.id }), schools: [], ensembles: [] };
+  const rows: RowData[] = [];
+  for (const event of sampleCalendarEvents(today)) {
+    if (event.private || event.cancelled) continue;
+    const built = buildCalendarRow(source, event, known);
+    if (built) rows.push(built.row);
+  }
+  return rows;
+}
 
 const TREASURER = 'treasurer@example.com';
 const TMA_SITE = 'https://sites.google.com/view/timberlanemusicassociation/home';
@@ -329,6 +391,9 @@ export function sampleData(today: Date, opts: { demoSettings?: boolean } = {}): 
       },
     ];
     // So the demo's "Who's using the app" report has something to show. The Nguyens never signed in.
+    // A linked calendar and the rows it put into Events, so News shows the "Music Dept" tag.
+    data.Calendars = [{ Name: DEMO_CALENDAR.name, Calendar: DEMO_CALENDAR.id, Schools: '', Groups: '', On: true }];
+    data.Events = [...(data.Events ?? []), ...sampleCalendarRows(today)];
     data['Sign-ins'] = [
       signIn('parent@example.com', 'F0001', at(-45, 19, 2), at(-30, 18, 55), at(-1, 7, 30), 2),
       signIn('ortiz@example.com', 'F0003', at(-2, 21, 10), at(-2, 21, 10), at(-2, 21, 20), 1),

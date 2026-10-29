@@ -285,6 +285,33 @@ class SpreadsheetStore implements SheetStore {
     this.rowCache.delete(table);
   }
 
+  /**
+   * Delete whole rows, bottom-up and one call per run of adjacent rows. Sheets refuses to delete
+   * every row below the frozen header, so a spare empty row is added first when that would happen.
+   */
+  deleteRows(table: TableName, rowNumbers: readonly number[]): void {
+    this.withLock(() => {
+      const layout = this.layout(table);
+      if (!layout) return;
+      const { sheet } = layout;
+      const lastRow = sheet.getLastRow();
+      const rows = Array.from(new Set(rowNumbers))
+        .filter((n) => Number.isInteger(n) && n >= 2 && n <= lastRow)
+        .sort((a, b) => b - a);
+      if (rows.length === 0) return;
+      const keep = Math.max(1, sheet.getFrozenRows());
+      if (sheet.getMaxRows() - rows.length <= keep) sheet.insertRowsAfter(sheet.getMaxRows(), 1);
+      let i = 0;
+      while (i < rows.length) {
+        let j = i + 1;
+        while (j < rows.length && rows[j] === rows[j - 1] - 1) j += 1;
+        sheet.deleteRows(rows[j - 1], j - i);
+        i = j;
+      }
+      this.rowCache.delete(table);
+    });
+  }
+
   overwrite(table: TableName, rows: RowData[]): void {
     this.withLock(() => {
       const layout = this.writableLayout(table, rows);

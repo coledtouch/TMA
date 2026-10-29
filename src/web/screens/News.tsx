@@ -74,12 +74,24 @@ export function News() {
   );
 }
 
+/** Which linked calendar an event came from (Calendars tab Name), e.g. "Music Dept". */
+function SourceTag({ source }: { source: string }) {
+  return (
+    <span className="source-tag" title={`From the ${source} calendar`}>
+      <Icon name="calendar" size={13} />
+      <span className="visually-hidden">From the calendar: </span>
+      <span className="source-tag-name">{source}</span>
+    </span>
+  );
+}
+
 function EventCard({ event }: { event: EventItem }) {
   const when = [formatWeekdayDate(event.date), event.time].filter(Boolean).join(' · ');
   return (
     <li className="card event-card">
       <DateBadge date={event.date} />
       <div className="event-main">
+        {event.source ? <SourceTag source={event.source} /> : null}
         <h3 className="card-title">{event.title}</h3>
         <p className="muted small">
           {when}

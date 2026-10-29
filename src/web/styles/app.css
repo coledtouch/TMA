@@ -1092,6 +1092,32 @@ a.list-row:hover {
   flex: 1;
 }
 
+/* Which linked calendar an event came from ("Music Dept"). */
+.source-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 1px 8px 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--info-bg);
+  color: var(--info);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.source-tag .icon {
+  flex: none;
+}
+
+.source-tag-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .announcement {
   gap: 8px;
 }

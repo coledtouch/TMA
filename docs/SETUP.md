@@ -18,6 +18,7 @@ come from `noreply@mytma.org` (see [Email from noreply@mytma.org](#email-from-no
 | [6](#6-online-payments-paypal) | Online payments (PayPal). Optional, can be done later. | 15 min plus PayPal's approval |
 | [7](#7-put-the-app-online-at-mytmaorg) | Put the app online at `https://mytma.org`. Already running: connect it to this spreadsheet. | 10 min |
 | [8](#8-optional-text-messages-twilio) | Text messages (Twilio). Optional, **costs money**. | 20 min plus carrier approval |
+| [Calendars](#link-google-calendars) | Link Google Calendars (or iCal links) so their events appear in the app. Optional. | 10 min |
 | [9](#9-go-live-checklist-and-test-plan) | Go-live checklist and test | 30 min |
 | [10](#10-updating-the-app-later) | Updating the app later | |
 | [11](#11-troubleshooting) | Troubleshooting | |
@@ -73,15 +74,17 @@ but they see **no money information** until the treasurer verifies the household
       is TMA's own script running in TMA's own account.
    3. Google lists what the script may do. In plain words: view and change **only this
       spreadsheet** (not the rest of TMA's Drive), show its menu, **send email as TMA**, connect to
-      outside services (PayPal, TMA's push Worker, Twilio), **run on a schedule**, and see which
-      Google account is using it. Click **Allow**.
+      outside services (PayPal, TMA's push Worker, Twilio), **run on a schedule**, see which
+      Google account is using it, and **read calendars** this account can see (*See and download any
+      calendar you can access using your Google Calendar*; read only, for
+      [linked calendars](#link-google-calendars)). Click **Allow**.
 
    The *Execution log* at the bottom should end with *Execution completed*. Just before that it
    says *Push: linked this sheet to the push Worker* and *Push: saved the Worker's public key*.
    If it shows a ⚠ line about push instead, carry on and see [step 5](#5-push-notifications-cloudflare-free).
 7. Go back to the spreadsheet tab and **reload the page**. After a few seconds a **TMA App** menu
    appears next to *Help*, and the tabs Families, Students, Ledger, Activities, Enrollments,
-   Payments, Redemptions, Announcements, Events and Settings exist. (A few system tabs are hidden.
+   Payments, Redemptions, Announcements, Events, Calendars and Settings exist. (A few system tabs are hidden.
    See [SHEET.md](SHEET.md#hidden-system-tabs).)
 
 From now on, **TMA App → Set up / repair tabs** re-creates anything missing (tabs, columns, settings).
@@ -530,6 +533,136 @@ Families then see a **Text messages** option with a *Cell number for texts* box 
 guardians of households TMA has verified (Active) and to the board members in `ADMIN_EMAILS`, so
 someone who just signed up can't run up TMA's Twilio bill.
 
+## Link Google Calendars
+
+Optional. The app can copy events from Google Calendars into the **Events** tab every 15 minutes.
+They then show under **News** in the app, and families get the usual reminder the day before, just
+like events typed into the sheet. You can link several calendars, for example a TMA calendar and the
+music department's concert calendar.
+
+The app only **reads** calendars. It never adds, changes or deletes anything in them.
+
+### A. Updating a spreadsheet that is already running
+
+Linked calendars need a new permission (reading calendars) and a new Google service (Google
+Calendar). So this update needs **both** files, and one approval. Do these four steps together, on a
+computer, signed in as TMA's Google account:
+
+1. **Paste the new code.** Open `apps-script/Code.js` on GitHub → **Copy raw file**. In Apps Script,
+   open `Code.gs`, select everything, paste, and **Save**.
+2. **Paste the new manifest.** In Apps Script, click **Project Settings** (⚙) and tick **Show
+   "appsscript.json" manifest file in editor**. Click **Editor** (`< >`), open `appsscript.json`,
+   select everything, paste `apps-script/appsscript.json` from GitHub the same way, and **Save**.
+3. **Approve the new permission.** Go to the spreadsheet and reload the page. Click **TMA App → Set
+   up / repair tabs**. Google asks for permission again, like the first time
+   ([step 1](#1-create-the-spreadsheet-and-add-the-script), item 6). The new line is *See and download
+   any calendar you can access using your Google Calendar*. That is read-only access. Click **Allow**.
+   Set up then adds the **Calendars** tab, the **Source** and **Calendar Event** columns in Events,
+   and the `CALENDAR_DAYS` setting.
+4. **Deploy a new version.** **Deploy → Manage deployments** → select the active deployment →
+   **Edit** (pencil) → *Version:* **New version** → **Deploy**. The web address stays the same.
+
+Don't wait between the steps. Until you approve in step 3, Google won't run the 15-minute sync. Until
+step 4, the app keeps using the old version.
+
+### B. Find a Google Calendar's ID
+
+1. Open [Google Calendar](https://calendar.google.com) on a computer.
+2. On the left, under *My calendars* or *Other calendars*, point at the calendar, click **⋮** and
+   choose **Settings and sharing**. (Or click the gear ⚙ → **Settings**, then the calendar on the left.)
+3. Scroll down to **Integrate calendar**. Copy the **Calendar ID**. It looks like
+   `abc123@group.calendar.google.com`. A Google account's own main calendar has the account's email
+   address as its ID.
+
+The calendar's *Public URL* (`https://calendar.google.com/calendar/embed?src=…`) works too: the app
+finds the ID in it.
+
+### C. Let TMA's Google account read it
+
+The script runs as TMA's Google account (`timberlanemusictma@gmail.com`), so that account must be
+able to see the calendar's events:
+
+* **A calendar made in TMA's account:** nothing to do.
+* **Someone else's calendar:** its owner opens the calendar's **Settings and sharing** → **Share with
+  specific people or groups** → **Add people and groups**, types TMA's Google account, picks **See
+  all event details**, and clicks **Send**. (*See only free/busy* is not enough.)
+* **A public calendar:** if *Access permissions → Make available to public* is on with *See all event
+  details*, anyone can read it, so nothing needs to be shared.
+* **School district accounts** often block sharing outside the district. If the music department's
+  calendar is on a district account and sharing with TMA's account doesn't work, ask whether the
+  calendar can be made public, or use its iCal address (D).
+
+### D. The iCal address (for any other calendar)
+
+Most calendar programs can give an **iCal** address (ending in `.ics`), and the app can read that
+instead of a Calendar ID: Google Calendar (*Integrate calendar → Public address in iCal format*, or
+*Secret address in iCal format* for a calendar that isn't public), Outlook (*Publish a calendar*, the
+ICS link), or a school website's calendar feed. Paste the whole address, starting with `https://`.
+Addresses starting with `webcal://` work too; `http://` ones don't.
+
+A **secret** iCal address works like a password: anyone who has it can read that calendar. It sits in
+the spreadsheet, so keep the list of people who can open the spreadsheet short. The app never writes
+it to the Log.
+
+### E. Add it to the Calendars tab
+
+One row per calendar:
+
+| Name | Calendar | Schools | Groups | On |
+| --- | --- | --- | --- | --- |
+| Music Dept | `abc123@group.calendar.google.com` | | | TRUE |
+| TMA Board | `https://calendar.example.com/tma.ics` | | Band, Chorus | |
+
+* **Name** is what families see on the event's tag in the app, e.g. *Music Dept*.
+* **Calendar** is the Calendar ID (B) or the iCal address (D).
+* **Schools** and **Groups** say who the calendar's events are for, as in the Events tab. Blank (or
+  `Everyone`) = everyone. Use the names in Settings `SCHOOLS` and `ENSEMBLES`. A misspelled name
+  matches no family, and the Log tab says so once a day.
+* **On**: `FALSE` stops copying that calendar. Blank means on.
+
+Then click **TMA App → Run sync now**, and check **TMA App → Status**. It has one line per calendar:
+*Calendar "Music Dept": OK ✓, 24 events*, or the reason it can't be read (see
+[Troubleshooting](#11-troubleshooting)).
+
+### F. Choosing who one event is for
+
+To send one event to fewer (or more) families than the calendar's Schools and Groups, add a line to
+the event's **description** in the calendar:
+
+```
+Schools: Middle School
+Groups: Jazz Band, Chorus
+```
+
+(`Ensembles:` works too, and `Groups: Everyone` means everyone.) These lines are not shown to
+families. A name that isn't in Settings `SCHOOLS` or `ENSEMBLES` matches no family, as in a row you
+type, and the Log tab says so once a day. Check the spelling.
+
+### G. Good to know
+
+* **Change linked events in the calendar, not in the sheet.** At each sync the app brings the
+  Events tab up to date with the calendar: new events are added, changes copied, and events that were
+  cancelled, deleted or made private are removed. Changes typed into a calendar row in the sheet are
+  replaced within a few hours. Rows you type by hand (with no **Source**) are never touched.
+* The app copies events from **yesterday through 180 days ahead** (Settings `CALENDAR_DAYS`, 7 to
+  400). Rows for past events stay in the sheet as history.
+* **Private events are never copied.** Neither are cancelled events, or Google's out-of-office,
+  focus-time and working-location entries.
+* **Reminders** work as for typed events: one reminder the day before, around 8 AM. If an event is
+  edited after its reminder went out, families don't get it again. If it moves to another day or
+  time, it counts as a new event, so families get a reminder before the new day.
+* **An event on two linked calendars** (for example a concert on both the music department's
+  calendar and TMA's) gets one row, under the calendar higher in the Calendars tab. It goes to the
+  families of both calendars, and they get one reminder.
+* Up to 10 calendars and 500 events per calendar. Repeating events are copied one row per day they
+  happen. A repeating pattern the app can't follow is left out (Status counts it as unreadable),
+  never guessed.
+* If a calendar can't be read (not shared any more, a broken link), its rows in Events stay as they
+  were, the other calendars still sync, and the Log tab gets one line about it per day.
+* **Don't rename or delete the Calendars tab.** To stop copying a calendar, set its **On** to
+  `FALSE`: its upcoming rows then leave Events. Without the tab, the copied rows stay but are no
+  longer updated, so a cancelled event would still get its reminder.
+
 ## 9. Go-live checklist and test plan
 
 **Checklist**
@@ -548,6 +681,8 @@ someone who just signed up can't run up TMA's Twilio bill.
       spreadsheet's). `APP_URL` is `https://mytma.org/`.
 - [ ] `mytma.org` has **Auto-renew** on, with a payment method TMA controls ([step 7](#7-put-the-app-online-at-mytmaorg)).
 - [ ] Only the treasurer and one or two board members can edit the spreadsheet (*Share* button).
+- [ ] If calendars are linked: **TMA App → Status** shows *OK ✓* for each one, and their events
+      appear under News in the app ([Link Google Calendars](#link-google-calendars)).
 
 **Test plan** (two people, two phones, about 30 minutes)
 
@@ -586,7 +721,10 @@ ready"* with a **Reload** button. The demo copy on GitHub Pages updates the same
 
 1. Open `apps-script/Code.js` on GitHub → **Copy raw file**.
 2. Apps Script → `Code.gs` → select all → paste → **Save**. If `apps-script/appsscript.json`
-   changed too, update it the same way.
+   changed too, update it the same way (*Project Settings → Show "appsscript.json" manifest file in
+   editor*), and then run **TMA App → Set up / repair tabs** from the spreadsheet **before** step 3,
+   so you can approve any new permission. (The update that added linked calendars changed it: see
+   [Link Google Calendars, A](#a-updating-a-spreadsheet-that-is-already-running).)
 3. **Deploy → Manage deployments** → **Edit** (pencil) → *Version:* **New version** → **Deploy**.
    The URL stays the same.
 4. In the spreadsheet: **TMA App → Set up / repair tabs** (adds any new columns or settings, and
@@ -672,6 +810,29 @@ needs step 3 (deploy a new version). What each report shows: [SHEET.md → Repor
 * **Where to see what happened:** the hidden **Log** tab (*View → Hidden sheets*), *Board tools →
   Recent activity* in the app, and **Executions** in the Apps Script sidebar for errors.
   Google may also email the TMA account a "Summary of failures".
+
+**Linked calendars** (*TMA App → Status* has one line per calendar)
+
+* **"the Google Calendar service is missing … Paste the new appsscript.json".** Only `Code.js` was
+  updated. Paste `apps-script/appsscript.json` too and approve the permission
+  ([Link Google Calendars, A](#a-updating-a-spreadsheet-that-is-already-running)).
+* **"the app isn't allowed to read calendars yet".** Run **TMA App → Set up / repair tabs** from the
+  spreadsheet and click **Allow**.
+* **"not found, or not shared with this Google account".** Check the Calendar ID (copy it again, step
+  B), and share the calendar with TMA's Google account with *See all event details* (step C). Google
+  gives the same answer for a wrong ID and for a calendar TMA's account can't see.
+* **"not shared with this Google account".** The calendar is shared, but not with event details, or
+  the owner's organization (often a school district) doesn't allow it. Use its iCal address (step D).
+* **"the iCal link failed (HTTP 404)" or "didn't return a calendar".** The address is wrong, or the
+  calendar isn't published any more. Copy its iCal address again.
+* **"The Calendars tab is missing".** Someone renamed or deleted it. Rename it back to `Calendars`.
+  If it is gone, run **TMA App → Set up / repair tabs**: it adds an empty Calendars tab, and the next
+  sync removes the upcoming rows copied from calendars. Then add the calendars again (step E).
+* **"… is not in Settings SCHOOLS or ENSEMBLES, so it matches no family's choices".** A school or
+  group name in the Calendars tab, or in an event's description, is misspelled (or was renamed in
+  Settings). Fix it to match Settings `SCHOOLS` or `ENSEMBLES`.
+* **An event shows for the wrong families.** Check the calendar's Schools and Groups in the Calendars
+  tab, and any *Schools:* / *Groups:* lines in the event's description (step F).
 
 **PayPal**
 
@@ -805,4 +966,6 @@ the day's emails and lock families out. When a cap is hit, those sign-ins see *"
 paused for a while"* and the Log tab gets one `auth` row per hour. A verified family can still ask
 for 5 codes an hour for its own email.
 
-The 15-minute sync takes a few seconds per run, far below the scheduled-time limit.
+The 15-minute sync takes a few seconds per run, far below the scheduled-time limit. Each
+[linked calendar](#link-google-calendars) adds one or two requests per sync (about 100 a day), well
+within Google's limits.

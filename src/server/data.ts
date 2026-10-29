@@ -424,6 +424,8 @@ export function mapEvent(row: StoredRow, settings: AppSettings): EventRec | null
   if (location) e.location = location;
   const details = str(d.Details);
   if (details) e.details = details;
+  const source = str(d.Source);
+  if (source) e.source = source.slice(0, 60);
   return e;
 }
 
@@ -608,6 +610,7 @@ export function toEvent(e: EventRec): EventItem {
   if (e.time) out.time = e.time;
   if (e.location) out.location = e.location;
   if (e.details) out.details = e.details;
+  if (e.source) out.source = e.source;
   return out;
 }
 

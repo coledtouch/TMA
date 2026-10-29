@@ -289,6 +289,8 @@ describe('Admin', () => {
     expect(within(report).getByText('Balance changes').nextSibling).toHaveTextContent('2');
     expect(within(report).getByText('3 push · 2 email · 0 text')).toBeInTheDocument();
     expect(within(report).queryByText(/typed in the sheet changed/)).not.toBeInTheDocument();
+    // No calendar linked: no calendar line.
+    expect(within(report).queryByText('Calendar events')).not.toBeInTheDocument();
   });
 
   it('says when rows typed in the sheet are still waiting to settle', async () => {
@@ -311,6 +313,31 @@ describe('Admin', () => {
     await user.click(screen.getByRole('button', { name: 'Run sync now' }));
     const report = await screen.findByLabelText('Sync report');
     expect(within(report).getByText(/2 rows typed in the sheet changed in the last few minutes/)).toBeInTheDocument();
+  });
+
+  it('shows what the linked calendars changed, and notes and calendar problems', async () => {
+    const api = fakeApi({
+      'admin.overview': () => makeOverview(),
+      'admin.runSync': () => ({
+        ranAt: '2026-10-21T12:00:00.000Z',
+        balanceChanges: 0,
+        redemptionsPosted: 0,
+        announcementsSent: 0,
+        remindersSent: 0,
+        notifications: { push: 0, email: 0, sms: 0 },
+        errors: ['Calendar "TMA Board": not found, or not shared with this Google account (HTTP 404).'],
+        calendars: { read: 1, failed: 1, added: 2, updated: 1, removed: 0 },
+        notes: ['Calendar "Music Dept": "Jazz Bnad" is not in Settings SCHOOLS or ENSEMBLES.'],
+      }),
+    });
+    renderScreen(<Admin />, { api, data: adminData() });
+    const user = userEvent.setup();
+    await screen.findByText('Recent activity');
+    await user.click(screen.getByRole('button', { name: 'Run sync now' }));
+    const report = await screen.findByLabelText('Sync report');
+    expect(within(report).getByText('Calendar events').nextSibling).toHaveTextContent('2 added · 1 changed · 0 removed');
+    expect(within(report).getByLabelText('Notes')).toHaveTextContent('"Jazz Bnad" is not in Settings');
+    expect(within(report).getByText(/TMA Board.*not shared with this Google account/)).toBeInTheDocument();
   });
 
   it('shows an error with retry when the overview fails', async () => {

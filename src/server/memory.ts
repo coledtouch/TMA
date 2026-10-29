@@ -9,7 +9,13 @@
  */
 import { normalizeHeader, TABLES, type SecretName, type TableName } from '../shared/schema';
 import type { PushMessage } from '../shared/types';
+import { basicZones, looksLikeIcs, parseIcs, type ZoneResolver } from './ics';
+import { DEMO_CALENDAR, sampleCalendarEvents } from './sample-data';
 import type {
+  CalendarFeed,
+  CalendarProblem,
+  CalendarRef,
+  CalendarSource,
   Cache,
   CaptureResult,
   CellValue,
@@ -26,7 +32,7 @@ import type {
   Store,
   StoredRow,
 } from './services';
-import { MailReserveError } from './services';
+import { CalendarReadError, MailReserveError } from './services';
 import { hmacSha256Hex, sha256Hex, toHex } from './sha256';
 
 export interface MemoryDb {
@@ -56,6 +62,8 @@ export interface MemoryServicesOptions {
   /** VAPID public key the push sender reports (default: the custom sender's, else ''). */
   pushPublicKey?: string;
   payments?: PaymentGateway;
+  /** Linked calendars (default: the sample "Music Dept" calendar, as of the first `now`). */
+  calendars?: CalendarSource;
   /** Called after every store mutation (the demo persists `db` here). */
   onChange?: (db: MemoryDb) => void;
 }
@@ -150,7 +158,9 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
   return {
     columns(table) {
       const headers = visible(table);
-      return headers === undefined ? TABLES[table].headers.slice() : headers === null ? null : headers.slice();
+      if (headers !== undefined) return headers === null ? null : headers.slice();
+      // As in the sheet: a tab that was never created (or was deleted) is missing.
+      return db.tables[table] ? TABLES[table].headers.slice() : null;
     },
     ensureTable(table) {
       if (db.tables[table]) return { created: false, addedColumns: [] };
@@ -193,7 +203,103 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
       db.tables[table] = rows.map((row) => clean(table, row));
       changed();
     },
+    deleteRows(table, rowNumbers) {
+      const rows = db.tables[table];
+      if (!rows) return;
+      // Bottom-up, so the row numbers still to delete don't move.
+      for (const rowNumber of Array.from(new Set(rowNumbers)).sort((a, b) => b - a)) {
+        const index = rowNumber - 2;
+        if (!Number.isInteger(rowNumber) || index < 0 || index >= rows.length) throw new Error(`Row ${rowNumber} of ${table} does not exist`);
+        rows.splice(index, 1);
+      }
+      changed();
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Calendars
+// ---------------------------------------------------------------------------
+
+/** Wall-clock fields of an instant in `timeZone` (Intl; the browser and Node have it). */
+function wallIn(at: number, timeZone: string): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+  const parts: Record<string, string> = {};
+  const format = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  for (const part of format.formatToParts(new Date(at))) parts[part.type] = part.value;
+  return { y: +parts.year, mo: +parts.month, d: +parts.day, h: +parts.hour % 24, mi: +parts.minute, s: +parts.second };
+}
+
+/**
+ * Any IANA zone through Intl (the demo and tests); UTC and New York without it. Apps Script uses
+ * Utilities instead (src/gas/calendar.ts).
+ */
+export const intlZones: ZoneResolver = (zone, w) => {
+  const basic = basicZones(zone, w);
+  if (basic !== null) return basic;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+  } catch {
+    return null;
+  }
+  const target = Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
+  let t = target;
+  for (let i = 0; i < 4; i++) {
+    const p = wallIn(t, zone);
+    const diff = Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s) - target;
+    if (diff === 0) break;
+    t -= diff;
+  }
+  return t;
+};
+
+/** What a memory calendar answers: events, iCal text (parsed like a real link), or a problem. */
+export type MemoryCalendarFeed = CalendarFeed | { ics: string } | { problem: CalendarProblem; detail?: string };
+
+/**
+ * A CalendarSource for tests: answers by Google Calendar ID (case-insensitive) or iCal link.
+ * Calendars it doesn't know are "not found". Every read is recorded in `reads`.
+ */
+export function createMemoryCalendarSource(
+  feeds: Record<string, MemoryCalendarFeed | (() => MemoryCalendarFeed)> = {},
+): CalendarSource & { feeds: Record<string, MemoryCalendarFeed | (() => MemoryCalendarFeed)>; reads: CalendarRef[] } {
+  const reads: CalendarRef[] = [];
+  const find = (ref: CalendarRef) => {
+    const wanted = ref.kind === 'google' ? ref.id.toLowerCase() : ref.url;
+    const key = Object.keys(feeds).find((k) => (ref.kind === 'google' ? k.toLowerCase() : k) === wanted);
+    return key === undefined ? undefined : feeds[key];
+  };
+  return {
+    feeds,
+    reads,
+    read(ref, range) {
+      reads.push({ ...ref });
+      const entry = find(ref);
+      const feed = typeof entry === 'function' ? entry() : entry;
+      if (!feed) throw new CalendarReadError(ref.kind === 'google' ? 'not_found' : 'link_failed', ref.kind === 'google' ? 'HTTP 404' : 'HTTP 404');
+      if ('problem' in feed) throw new CalendarReadError(feed.problem, feed.detail ?? '');
+      if ('ics' in feed) {
+        if (!looksLikeIcs(feed.ics)) throw new CalendarReadError('not_ical');
+        const parsed = parseIcs(feed.ics, { range, maxEvents: range.maxEvents, zones: intlZones });
+        return { events: parsed.events, unsupported: parsed.unsupported, capped: parsed.capped };
+      }
+      const events = feed.events.slice(0, range.maxEvents);
+      return { events, unsupported: feed.unsupported, capped: feed.capped || feed.events.length > range.maxEvents };
+    },
+  };
+}
+
+/** The sample "Music Dept" calendar (src/server/sample-data.ts), as of the day the sample data was made. */
+export function createSampleCalendarSource(seededAt: Date): ReturnType<typeof createMemoryCalendarSource> {
+  return createMemoryCalendarSource({ [DEMO_CALENDAR.id]: { events: sampleCalendarEvents(seededAt), unsupported: 0, capped: false } });
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +509,7 @@ export function createMemoryServices(opts: MemoryServicesOptions = {}): MemorySe
     },
     push,
     payments: opts.payments ?? createFakePaymentGateway(),
+    calendars: opts.calendars ?? createSampleCalendarSource(clock.now()),
     logger,
     // One caller at a time in tests and the demo, so the lock is always free (waitMs doesn't matter).
     withLock: <T>(fn: () => T): T => fn(),

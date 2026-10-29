@@ -190,6 +190,8 @@ export interface EventItem {
   location?: string;
   details?: string;
   audience: Audience;
+  /** The linked calendar it was copied from (Calendars tab Name, e.g. "Music Dept"); absent for rows typed by hand. */
+  source?: string;
 }
 
 export type NotificationTopic = 'balance' | 'payments' | 'reminders' | 'announcements';
@@ -446,6 +448,21 @@ export interface TickReport {
    * minutes: they are acted on at a later sync, once they stop changing. Absent when none.
    */
   waiting?: number;
+  /** Linked calendars copied into the Events tab this run. Absent when no calendar is linked. */
+  calendars?: CalendarTickReport;
+  /** Things worth knowing that are not errors (e.g. a calendar with more events than the app copies). */
+  notes?: string[];
+}
+
+export interface CalendarTickReport {
+  /** Calendars read this run. */
+  read: number;
+  /** Calendars that could not be read; their rows in the Events tab were left as they were. */
+  failed: number;
+  /** Events tab rows added, changed and removed. */
+  added: number;
+  updated: number;
+  removed: number;
 }
 
 export interface SetupReport {

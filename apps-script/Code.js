@@ -188,8 +188,22 @@ var TMA = (() => {
       note: "News for families. Leave Sent blank and the app sends it on its next run (Schools/Ensembles blank = everyone)."
     },
     Events: {
-      headers: ["ID", "Date", "Time", "Title", "Location", "Details", "Schools", "Ensembles"],
-      note: "Concerts, meetings, deadlines. Families get a reminder the day before."
+      headers: ["ID", "Date", "Time", "Title", "Location", "Details", "Schools", "Ensembles", "Source", "Calendar Event"],
+      aliases: {
+        Ensembles: ["Groups"],
+        Source: ["Calendar Name", "From Calendar"],
+        "Calendar Event": ["Calendar Event ID", "Calendar Key"]
+      },
+      note: "Concerts, meetings, deadlines. Families get a reminder the day before. Rows with a Source are copied from a linked calendar (Calendars tab): change those in the calendar, not here."
+    },
+    Calendars: {
+      headers: ["Name", "Calendar", "Schools", "Groups", "On"],
+      aliases: {
+        Calendar: ["Calendar ID", "Calendar Link", "iCal Link", "Link", "Address"],
+        Groups: ["Ensembles"],
+        On: ["Enabled", "Active"]
+      },
+      note: "Google Calendars (Calendar ID) or iCal links (https://….ics) whose events the app copies into Events every 15 minutes. Schools/Groups blank = everyone. On: TRUE/FALSE (blank = on)."
     },
     Preferences: {
       headers: ["Email", "FamilyID", "Prefs", "Updated"],
@@ -240,6 +254,7 @@ var TMA = (() => {
     "Redemptions",
     "Announcements",
     "Events",
+    "Calendars",
     "Settings",
     "Preferences",
     "Devices",
@@ -273,7 +288,9 @@ var TMA = (() => {
     PUSH_RELAY_URL: "https://tma-push.coleciprari.workers.dev",
     TOKEN_VERSION: "1",
     SESSION_DAYS: "120",
-    NEW_SIGNUPS_PER_HOUR: "30"
+    NEW_SIGNUPS_PER_HOUR: "30",
+    /** Linked calendars (Calendars tab): copy events from yesterday through this many days ahead. */
+    CALENDAR_DAYS: "180"
   };
   var OLD_SETTING_DEFAULTS = {
     // Before the app noted sign-ins (the Sign-ins tab).
@@ -286,6 +303,86 @@ var TMA = (() => {
   }
 
   // src/server/sha256.ts
+  var K = [
+    1116352408,
+    1899447441,
+    3049323471,
+    3921009573,
+    961987163,
+    1508970993,
+    2453635748,
+    2870763221,
+    3624381080,
+    310598401,
+    607225278,
+    1426881987,
+    1925078388,
+    2162078206,
+    2614888103,
+    3248222580,
+    3835390401,
+    4022224774,
+    264347078,
+    604807628,
+    770255983,
+    1249150122,
+    1555081692,
+    1996064986,
+    2554220882,
+    2821834349,
+    2952996808,
+    3210313671,
+    3336571891,
+    3584528711,
+    113926993,
+    338241895,
+    666307205,
+    773529912,
+    1294757372,
+    1396182291,
+    1695183700,
+    1986661051,
+    2177026350,
+    2456956037,
+    2730485921,
+    2820302411,
+    3259730800,
+    3345764771,
+    3516065817,
+    3600352804,
+    4094571909,
+    275423344,
+    430227734,
+    506948616,
+    659060556,
+    883997877,
+    958139571,
+    1322822218,
+    1537002063,
+    1747873779,
+    1955562222,
+    2024104815,
+    2227730452,
+    2361852424,
+    2428436474,
+    2756734187,
+    3204031479,
+    3329325298
+  ];
+  var INITIAL_HASH = [
+    1779033703,
+    3144134277,
+    1013904242,
+    2773480762,
+    1359893119,
+    2600822924,
+    528734635,
+    1541459225
+  ];
+  var BLOCK_BYTES = 64;
+  function rotr(x, n) {
+    return x >>> n | x << 32 - n;
+  }
   function utf8Encode(text2) {
     const out = [];
     for (let i = 0; i < text2.length; i++) {
@@ -342,6 +439,77 @@ var TMA = (() => {
       i += extra + 1;
     }
     return out;
+  }
+  function sha256(bytes) {
+    const length = bytes.length;
+    const paddedLength = Math.ceil((length + 9) / BLOCK_BYTES) * BLOCK_BYTES;
+    const m = new Uint8Array(paddedLength);
+    for (let i = 0; i < length; i++) m[i] = bytes[i] & 255;
+    m[length] = 128;
+    const bitsHigh = Math.floor(length / 536870912);
+    const bitsLow = length * 8 >>> 0;
+    for (let i = 0; i < 4; i++) {
+      m[paddedLength - 8 + i] = bitsHigh >>> 24 - 8 * i & 255;
+      m[paddedLength - 4 + i] = bitsLow >>> 24 - 8 * i & 255;
+    }
+    const h = INITIAL_HASH.slice();
+    const w = new Int32Array(64);
+    for (let offset = 0; offset < paddedLength; offset += BLOCK_BYTES) {
+      for (let t = 0; t < 16; t++) {
+        const j = offset + t * 4;
+        w[t] = m[j] << 24 | m[j + 1] << 16 | m[j + 2] << 8 | m[j + 3];
+      }
+      for (let t = 16; t < 64; t++) {
+        const x = w[t - 15];
+        const y = w[t - 2];
+        const s0 = rotr(x, 7) ^ rotr(x, 18) ^ x >>> 3;
+        const s1 = rotr(y, 17) ^ rotr(y, 19) ^ y >>> 10;
+        w[t] = w[t - 16] + s0 + w[t - 7] + s1 | 0;
+      }
+      let a = h[0];
+      let b = h[1];
+      let c = h[2];
+      let d = h[3];
+      let e = h[4];
+      let f = h[5];
+      let g = h[6];
+      let hh = h[7];
+      for (let t = 0; t < 64; t++) {
+        const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+        const ch = e & f ^ ~e & g;
+        const t1 = hh + s1 + ch + K[t] + w[t] | 0;
+        const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+        const maj = a & b ^ a & c ^ b & c;
+        const t2 = s0 + maj | 0;
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1 | 0;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2 | 0;
+      }
+      h[0] = h[0] + a | 0;
+      h[1] = h[1] + b | 0;
+      h[2] = h[2] + c | 0;
+      h[3] = h[3] + d | 0;
+      h[4] = h[4] + e | 0;
+      h[5] = h[5] + f | 0;
+      h[6] = h[6] + g | 0;
+      h[7] = h[7] + hh | 0;
+    }
+    const out = [];
+    for (const word of h) out.push(word >>> 24 & 255, word >>> 16 & 255, word >>> 8 & 255, word & 255);
+    return out;
+  }
+  function toHex(bytes) {
+    let out = "";
+    for (let i = 0; i < bytes.length; i++) out += (bytes[i] & 255).toString(16).padStart(2, "0");
+    return out;
+  }
+  function sha256Hex(message) {
+    return toHex(sha256(utf8Encode(message)));
   }
 
   // src/server/util.ts
@@ -589,8 +757,8 @@ var TMA = (() => {
   function validDate(year, month, day) {
     if (!Number.isInteger(year) || year < 1900 || year > 2200) return null;
     if (!Number.isInteger(month) || month < 1 || month > 12) return null;
-    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (!Number.isInteger(day) || day < 1 || day > daysInMonth) return null;
+    const daysInMonth2 = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    if (!Number.isInteger(day) || day < 1 || day > daysInMonth2) return null;
     return isoDate(year, month, day);
   }
   function serialToDate(serial) {
@@ -694,6 +862,9 @@ var TMA = (() => {
       hours = d.getHours();
       minutes = d.getMinutes();
     }
+    return timeText(hours, minutes);
+  }
+  function timeText(hours, minutes) {
     const suffix = hours >= 12 ? "PM" : "AM";
     const h12 = hours % 12 === 0 ? 12 : hours % 12;
     return `${h12}:${pad2(minutes)} ${suffix}`;
@@ -1062,7 +1233,8 @@ var TMA = (() => {
     PUSH_RELAY_URL: "Web address of the TMA push Worker on Cloudflare. Leave the default unless TMA moves it.",
     TOKEN_VERSION: "Change this number to sign everyone out of the app.",
     SESSION_DAYS: "How many days a sign-in lasts.",
-    NEW_SIGNUPS_PER_HOUR: "Sign-in codes per hour, across everyone, to emails TMA has not verified yet (new families). Raise it for a launch day."
+    NEW_SIGNUPS_PER_HOUR: "Sign-in codes per hour, across everyone, to emails TMA has not verified yet (new families). Raise it for a launch day.",
+    CALENDAR_DAYS: "Linked calendars (Calendars tab): copy their events into Events from yesterday through this many days ahead (7 to 400)."
   };
   function settingKey(value) {
     return str(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -1081,18 +1253,30 @@ var TMA = (() => {
     }
     return values;
   }
-  function buildSettings(rows, services) {
-    var _a, _b;
-    const values = readSettingValues(rows);
-    const get = (key) => {
+  function settingGetter(values) {
+    return (key) => {
       const v = values.get(key);
       return v === void 0 || v === "" ? SETTING_DEFAULTS[key] : v;
     };
+  }
+  function listSetting(get, key) {
+    const items = uniqueBy(splitList(get(key), /[,;\n\r]+/), (s) => s.toLowerCase());
+    return items.length > 0 ? items : splitList(SETTING_DEFAULTS[key], /,/);
+  }
+  function calendarDaysSetting(get) {
+    const days = Math.round(Number(get("CALENDAR_DAYS")));
+    return Number.isFinite(days) && days >= 7 && days <= 400 ? days : Number(SETTING_DEFAULTS.CALENDAR_DAYS);
+  }
+  function calendarSettings(rows) {
+    const get = settingGetter(readSettingValues(rows));
+    return { schools: listSetting(get, "SCHOOLS"), ensembles: listSetting(get, "ENSEMBLES"), calendarDays: calendarDaysSetting(get) };
+  }
+  function buildSettings(rows, services) {
+    var _a, _b;
+    const values = readSettingValues(rows);
+    const get = settingGetter(values);
     const bool2 = (key) => parseBool(get(key), parseBool(SETTING_DEFAULTS[key], false));
-    const list2 = (key) => {
-      const items = uniqueBy(splitList(get(key), /[,;\n\r]+/), (s) => s.toLowerCase());
-      return items.length > 0 ? items : splitList(SETTING_DEFAULTS[key], /,/);
-    };
+    const list2 = (key) => listSetting(get, key);
     const safely3 = (fn) => {
       try {
         return fn();
@@ -1149,7 +1333,8 @@ var TMA = (() => {
       onlinePaymentsSetting,
       tokenVersion: get("TOKEN_VERSION").trim().replace(/\.0+$/, "") || "1",
       sessionDays: Number.isFinite(sessionDays) && sessionDays >= 1 && sessionDays <= 400 ? sessionDays : 120,
-      newSignupsPerHour: Number.isFinite(newSignups) && newSignups >= 1 && newSignups <= 500 ? newSignups : Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR)
+      newSignupsPerHour: Number.isFinite(newSignups) && newSignups >= 1 && newSignups <= 500 ? newSignups : Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR),
+      calendarDays: calendarDaysSetting(get)
     };
   }
 
@@ -1418,6 +1603,8 @@ var TMA = (() => {
     if (location) e.location = location;
     const details = str(d.Details);
     if (details) e.details = details;
+    const source = str(d.Source);
+    if (source) e.source = source.slice(0, 60);
     return e;
   }
   function signInCount(value) {
@@ -1580,6 +1767,7 @@ var TMA = (() => {
     if (e.time) out.time = e.time;
     if (e.location) out.location = e.location;
     if (e.details) out.details = e.details;
+    if (e.source) out.source = e.source;
     return out;
   }
   function studentName(s) {
@@ -2104,6 +2292,21 @@ var TMA = (() => {
       const patch = {};
       for (const c of columns) patch[c] = "";
       this.update(table, rowNumber, patch);
+    }
+    /**
+     * Delete rows (rows below move up). Without the store's deleteRows, blank them instead (the
+     * columns given). Row numbers must come from a fresh read under the write lock.
+     */
+    deleteRows(table, rowNumbers, columns) {
+      const rows = Array.from(new Set(rowNumbers)).sort((a, b) => b - a);
+      if (rows.length === 0) return;
+      if (!this.store.deleteRows) {
+        for (const row of rows) this.clear(table, row, columns);
+        return;
+      }
+      this.store.deleteRows(table, rows);
+      this.cache.delete(table);
+      this.bump(table);
     }
     overwrite(table, rows) {
       this.store.overwrite(table, rows);
@@ -2911,6 +3114,16 @@ var TMA = (() => {
       this.remaining = remaining;
     }
   };
+  var CalendarReadError = class extends Error {
+    constructor(problem, detail = "") {
+      super(detail ? `${problem} (${detail})` : problem);
+      __publicField(this, "problem");
+      __publicField(this, "detail");
+      this.name = "CalendarReadError";
+      this.problem = problem;
+      this.detail = detail;
+    }
+  };
 
   // src/server/sign-ins.ts
   var SIGN_IN_LOCK_WAIT_MS = 5e3;
@@ -3292,6 +3505,634 @@ var TMA = (() => {
       settings: { ...settings.pub, schools: settings.pub.schools.slice(), ensembles: settings.pub.ensembles.slice() },
       serverTime: ctx.now.toISOString()
     };
+  }
+
+  // src/server/calendar-rows.ts
+  var MAX_TITLE = 120;
+  var MAX_LOCATION = 200;
+  var MAX_DETAILS = 1e3;
+  var MAX_CALENDAR_NAME = 40;
+  var CALENDAR_HASH_CHARS = 10;
+  var MAX_ADDRESS = 2e3;
+  var CALENDAR_ROW_COLUMNS = [
+    "ID",
+    "Date",
+    "Time",
+    "Title",
+    "Location",
+    "Details",
+    "Schools",
+    "Ensembles",
+    "Source",
+    "Calendar Event"
+  ];
+  var GOOGLE_ID = /^[^\s@<>"',;]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$/i;
+  var SAFE_LINK = /^https:\/\/[^\s<>"'`]+$/i;
+  function decodeComponent(value) {
+    try {
+      return decodeURIComponent(value.replace(/\+/g, " "));
+    } catch {
+      return value;
+    }
+  }
+  function queryParam(link, name) {
+    const m = new RegExp(`[?&]${name}=([^&#]*)`, "i").exec(link);
+    return m ? decodeComponent(m[1]) : null;
+  }
+  function parseCalendarAddress(value) {
+    const text2 = String(value != null ? value : "").trim().replace(/^<|>$/g, "").replace(/^"|"$/g, "").trim();
+    if (!text2) return { problem: "blank" };
+    if (text2.length > MAX_ADDRESS) return { problem: "bad" };
+    if (/^http:\/\//i.test(text2)) return { problem: "http" };
+    const link = /^webcal:\/\//i.test(text2) ? `https://${text2.slice("webcal://".length)}` : text2;
+    if (/^https:\/\//i.test(link)) {
+      if (!SAFE_LINK.test(link)) return { problem: "bad" };
+      if (/^https:\/\/calendar\.google\.com\/calendar\//i.test(link)) {
+        const src = queryParam(link, "src");
+        if (src && GOOGLE_ID.test(src.trim())) return { ref: { kind: "google", id: src.trim() } };
+        const cid = queryParam(link, "cid");
+        if (cid) {
+          const decoded = base64UrlDecode(cid.trim().replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_"));
+          const id2 = decoded ? decoded.trim() : "";
+          if (GOOGLE_ID.test(id2)) return { ref: { kind: "google", id: id2 } };
+          if (GOOGLE_ID.test(cid.trim())) return { ref: { kind: "google", id: cid.trim() } };
+        }
+      }
+      return { ref: { kind: "ical", url: link } };
+    }
+    if (GOOGLE_ID.test(text2)) return { ref: { kind: "google", id: text2 } };
+    return { problem: "bad" };
+  }
+  function calendarHash(ref) {
+    const identity = ref.kind === "google" ? `google:${ref.id.toLowerCase()}` : `ical:${ref.url}`;
+    return sha256Hex(identity).slice(0, CALENDAR_HASH_CHARS);
+  }
+  function calendarKeyHash(key) {
+    const m = /^([0-9a-f]{10}):/.exec(key);
+    return m ? m[1] : null;
+  }
+  function calendarProblemText(problem, detail = "") {
+    const extra = detail ? ` (${detail})` : "";
+    switch (problem) {
+      case "blank":
+        return "the Calendar column is empty. Put a Google Calendar ID or an https:// iCal link there";
+      case "http":
+        return "iCal links must start with https:// (not http://)";
+      case "bad":
+      case "bad_address":
+        return "the Calendar column is not a Google Calendar ID (like abc123@group.calendar.google.com) or an https:// iCal link";
+      case "no_service":
+        return 'the Google Calendar service is missing in Apps Script. Paste the new appsscript.json, then run TMA App → Set up / repair tabs (docs/SETUP.md, "Link Google Calendars")';
+      case "no_permission":
+        return "the app isn't allowed to read calendars yet. Run TMA App → Set up / repair tabs and approve the new permission";
+      case "not_found":
+        return `not found, or not shared with this Google account${extra}. Check the Calendar ID, and share the calendar with TMA's Google account (or make it public)`;
+      case "not_shared":
+        return `not shared with this Google account${extra}. Share it with TMA's Google account ("See all event details"), or make it public`;
+      case "busy":
+        return `Google was busy${extra}. The app tries again at the next sync`;
+      case "link_failed":
+        return `the iCal link failed${extra || " (no answer)"}. Check the link; it must be the calendar's iCal (.ics) address`;
+      case "not_ical":
+        return "the link didn't return a calendar (.ics) file. Use the calendar's iCal address";
+      case "too_big":
+        return `the iCal file is too big${extra}`;
+      default:
+        return `could not be read${extra}`;
+    }
+  }
+  var NAMED_ENTITIES = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+    ndash: "–",
+    mdash: "—",
+    hellip: "…",
+    rsquo: "’",
+    lsquo: "‘",
+    rdquo: "”",
+    ldquo: "“",
+    bull: "•",
+    middot: "·",
+    copy: "©"
+  };
+  function decodeEntities(text2) {
+    return text2.replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,8});/gi, (whole, code) => {
+      var _a;
+      if (code[0] === "#") {
+        const n = code[1] === "x" || code[1] === "X" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+        if (!Number.isFinite(n) || n < 32 || n > 1114111 || n >= 55296 && n <= 57343) return n === 9 || n === 10 ? String.fromCharCode(n) : "";
+        return String.fromCodePoint(n);
+      }
+      return (_a = NAMED_ENTITIES[code.toLowerCase()]) != null ? _a : whole;
+    });
+  }
+  function stripTags(html) {
+    return html.replace(/<[^>]*>/g, "");
+  }
+  function htmlToText(input) {
+    let s = String(input != null ? input : "");
+    if (!/<[a-z!/][^>]*>/i.test(s)) return decodeEntities(s);
+    s = s.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "");
+    s = s.replace(/<!--[\s\S]*?-->/g, "");
+    s = s.replace(
+      /<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a\s*>/gi,
+      (_m, dq, sq, bare, inner) => {
+        var _a, _b;
+        const href = decodeEntities(((_b = (_a = dq != null ? dq : sq) != null ? _a : bare) != null ? _b : "").trim());
+        const label = decodeEntities(stripTags(inner)).trim();
+        const isLink = /^https?:\/\/[^\s<>"']+$/i.test(href);
+        if (!isLink) return label;
+        if (!label || label === href || label.replace(/^https?:\/\//i, "") === href.replace(/^https?:\/\//i, "")) return href;
+        return `${label} (${href})`;
+      }
+    );
+    s = s.replace(/<br\s*\/?>/gi, "\n");
+    s = s.replace(/<li\b[^>]*>/gi, "\n• ");
+    s = s.replace(/<\/(p|div|li|h[1-6]|tr|ul|ol|blockquote|table)\s*>/gi, "\n");
+    s = s.replace(/<(p|div|h[1-6]|tr|ul|ol|blockquote|table)\b[^>]*>/gi, "\n");
+    s = stripTags(s);
+    return decodeEntities(s);
+  }
+  function knownNames(value, known) {
+    const names = [];
+    const unknown = [];
+    for (const item of splitList(value)) {
+      if (isKnown(item, known)) names.push(canonical(item, known));
+      else unknown.push(item);
+    }
+    return { names: uniqueBy(names, (s) => s.toLowerCase()), unknown: uniqueBy(unknown, (s) => s.toLowerCase()) };
+  }
+  var AUDIENCE_LINE = /^\s*(schools?|groups?|ensembles?)\s*:\s*(.*?)\s*$/i;
+  var EVERYONE = /^(everyone|everybody|all|all families)\.?$/i;
+  function audienceNames(value, known) {
+    if (EVERYONE.test(String(value != null ? value : "").trim())) return { names: [], unknown: [] };
+    const found = knownNames(value, known);
+    return { names: found.names.length > 0 ? found.names : found.unknown, unknown: found.unknown };
+  }
+  function audienceFromText(text2, defaults, known) {
+    const audience = { schools: defaults.schools.slice(), ensembles: defaults.ensembles.slice() };
+    const unknown = [];
+    const kept = [];
+    for (const line of text2.split("\n")) {
+      const m = AUDIENCE_LINE.exec(line);
+      if (!m) {
+        kept.push(line);
+        continue;
+      }
+      const list2 = /^school/i.test(m[1]) ? "schools" : "ensembles";
+      const found = audienceNames(m[2], known[list2]);
+      unknown.push(...found.unknown);
+      if (found.names.length > 0 || EVERYONE.test(m[2].trim())) audience[list2] = found.names;
+    }
+    return { text: kept.join("\n"), audience, unknown };
+  }
+  function localStart(event) {
+    if ("date" in event.start) return /^\d{4}-\d{2}-\d{2}$/.test(event.start.date) ? { date: event.start.date, time: "" } : null;
+    const at = new Date(event.start.dateTime);
+    if (Number.isNaN(at.getTime())) return null;
+    const p = nyParts(at);
+    return { date: isoDate(p.year, p.month, p.day), time: timeText(p.hour, p.minute) };
+  }
+  function lastDay(event, start) {
+    if (!event.end) return null;
+    let last = null;
+    if ("date" in event.end) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(event.end.date)) last = addDays(event.end.date, -1);
+    } else {
+      const end = new Date(event.end.dateTime);
+      if (!Number.isNaN(end.getTime())) {
+        const p = nyParts(end);
+        const endDate = isoDate(p.year, p.month, p.day);
+        last = p.hour === 0 && p.minute === 0 ? addDays(endDate, -1) : endDate;
+      }
+    }
+    return last && last > start ? last : null;
+  }
+  function calendarEventKey(hash, event) {
+    const uid = event.uid.trim();
+    const uidPart = /^[A-Za-z0-9._@+-]{1,80}$/.test(uid) ? uid : `h${sha256Hex(uid).slice(0, 16)}`;
+    const start = "date" in event.start ? event.start.date.replace(/-/g, "") : event.start.dateTime.replace(/[-:]|\.\d{3}/g, "");
+    return `${hash}:${uidPart}:${start}`;
+  }
+  function calendarEventIdentity(key) {
+    return key.slice(key.indexOf(":") + 1);
+  }
+  function mergeAudience(a, b) {
+    const merge = (x, y) => x.length === 0 || y.length === 0 ? [] : uniqueBy([...x, ...y], (s) => s.toLowerCase());
+    return { schools: merge(a.schools, b.schools), ensembles: merge(a.ensembles, b.ensembles) };
+  }
+  function calendarRowId(key) {
+    return `CAL-${sha256Hex(key).slice(0, 10)}`;
+  }
+  function buildCalendarRow(source, event, known) {
+    const start = localStart(event);
+    if (!start) return null;
+    const key = calendarEventKey(source.hash, event);
+    const plain = cleanText(htmlToText(event.description), true);
+    const { text: text2, audience, unknown } = audienceFromText(plain, { schools: source.schools, ensembles: source.ensembles }, known);
+    const last = lastDay(event, start.date);
+    const details = [last ? `Through ${shortDate(last)}.` : "", cleanText(text2, true)].filter((s) => s !== "").join("\n");
+    const row = {
+      ID: calendarRowId(key),
+      Date: start.date,
+      Time: start.time,
+      Title: truncate(cleanText(event.title) || "Untitled event", MAX_TITLE),
+      Location: truncate(cleanText(event.location), MAX_LOCATION),
+      Details: truncate(details, MAX_DETAILS),
+      Schools: joinList(audience.schools),
+      Ensembles: joinList(audience.ensembles),
+      Source: source.name,
+      "Calendar Event": key
+    };
+    return { key, date: start.date, row, audience, unknown };
+  }
+
+  // src/server/calendars.ts
+  var MAX_CALENDARS = 10;
+  var MAX_EVENTS_PER_CALENDAR = 500;
+  var MAX_ROW_CHANGES = 300;
+  var FETCH_BUDGET_MS = 12e4;
+  var FINGERPRINT_KEY = "calendar-sync:fingerprint";
+  var CACHE_TTL_SECONDS = 21600;
+  function readCalendarDefs(ctx) {
+    const columns = ctx.db.columns("Calendars");
+    if (columns === null) return null;
+    if (columns !== void 0 && !columns.includes("Calendar")) {
+      throw new Error('The Calendars tab has no "Calendar" column, so no calendar was read. If the header was renamed, change it back.');
+    }
+    const settings = calendarSettings(ctx.db.rows("Settings"));
+    const defs = [];
+    const seen = /* @__PURE__ */ new Set();
+    let read = 0;
+    for (const stored of ctx.db.rows("Calendars")) {
+      const d = stored.data;
+      if (!str(d.Name) && !str(d.Calendar)) continue;
+      const schools = audienceNames(d.Schools, settings.schools);
+      const groups = audienceNames(d.Groups, settings.ensembles);
+      const parsed = parseCalendarAddress(d.Calendar);
+      const def = {
+        row: stored.rowNumber,
+        name: truncate(cleanText(str(d.Name)), MAX_CALENDAR_NAME) || "Calendar",
+        on: parseBool(d.On, true),
+        ref: "ref" in parsed ? parsed.ref : null,
+        hash: "ref" in parsed ? calendarHash(parsed.ref) : "",
+        schools: schools.names,
+        ensembles: groups.names,
+        unknown: [...schools.unknown, ...groups.unknown]
+      };
+      if ("problem" in parsed) def.problem = calendarProblemText(parsed.problem);
+      if (def.on && def.hash) {
+        if (seen.has(def.hash)) def.duplicate = true;
+        else if (read >= MAX_CALENDARS) def.overLimit = true;
+        else {
+          seen.add(def.hash);
+          read++;
+        }
+      }
+      defs.push(def);
+    }
+    return defs;
+  }
+  function active(def) {
+    return def.on && def.ref !== null && !def.duplicate && !def.overLimit;
+  }
+  function windowOf(ctx) {
+    const days = calendarSettings(ctx.db.rows("Settings")).calendarDays;
+    const from = addDays(ctx.today, -1);
+    const to = addDays(ctx.today, days);
+    const [fy, fm, fd] = from.split("-").map(Number);
+    const [ty, tm, td] = addDays(to, 1).split("-").map(Number);
+    return { from, to, days, start: nyLocalToDate(fy, fm, fd), end: nyLocalToDate(ty, tm, td) };
+  }
+  function fetchCalendars(ctx) {
+    const results = /* @__PURE__ */ new Map();
+    let w;
+    let defs;
+    try {
+      w = windowOf(ctx);
+      defs = readCalendarDefs(ctx);
+    } catch (err) {
+      return { from: ctx.today, to: ctx.today, days: 0, defs: [], results, error: errorMessage(err) };
+    }
+    if (defs === null) return null;
+    const started = ctx.s.clock.now().getTime();
+    for (const def of defs) {
+      if (!active(def) || !def.ref) continue;
+      if (ctx.s.clock.now().getTime() - started > FETCH_BUDGET_MS) {
+        results.set(def.hash, { ok: false, text: "not read this time (the other calendars took too long); the app tries again at the next sync" });
+        continue;
+      }
+      try {
+        const feed = ctx.s.calendars.read(def.ref, { start: w.start, end: w.end, maxEvents: MAX_EVENTS_PER_CALENDAR });
+        results.set(def.hash, { ok: true, feed });
+      } catch (err) {
+        if (err instanceof CalendarReadError) {
+          results.set(def.hash, { ok: false, text: calendarProblemText(err.problem, err.detail) });
+        } else {
+          ctx.s.logger.error(`Calendar "${def.name}" could not be read`, errorMessage(err));
+          results.set(def.hash, { ok: false, text: calendarProblemText("failed") });
+        }
+      }
+    }
+    return { from: w.from, to: w.to, days: w.days, defs, results };
+  }
+  function rowsForCalendar(def, feed, range, known) {
+    const out = {
+      def,
+      rows: [],
+      private: 0,
+      cancelled: 0,
+      duplicates: 0,
+      unsupported: feed.unsupported,
+      capped: feed.capped,
+      unknown: def.unknown.slice()
+    };
+    const keys = /* @__PURE__ */ new Set();
+    for (const event of feed.events) {
+      if (event.cancelled) {
+        out.cancelled++;
+        continue;
+      }
+      if (event.private) {
+        out.private++;
+        continue;
+      }
+      const built = buildCalendarRow({ name: def.name, hash: def.hash, schools: def.schools, ensembles: def.ensembles }, event, known);
+      if (!built) {
+        out.unsupported++;
+        continue;
+      }
+      if (built.date < range.from || built.date > range.to) continue;
+      if (keys.has(built.key)) {
+        out.duplicates++;
+        continue;
+      }
+      if (out.rows.length >= MAX_EVENTS_PER_CALENDAR) {
+        out.capped = true;
+        continue;
+      }
+      keys.add(built.key);
+      out.rows.push(built);
+      for (const name of built.unknown) if (!out.unknown.some((u) => u.toLowerCase() === name.toLowerCase())) out.unknown.push(name);
+    }
+    return out;
+  }
+  function sameValue(column, stored, wanted, known) {
+    if (column === "Date") return parseDate(stored) === wanted;
+    if (column === "Time") return parseTimeText(stored) === wanted;
+    if (column === "Schools") return joinList(parseList(stored, known.schools)) === wanted;
+    if (column === "Ensembles") return joinList(parseList(stored, known.ensembles)) === wanted;
+    return str(stored) === str(wanted);
+  }
+  function planCalendarRows(rows, wanted, read, failed, range, known) {
+    var _a;
+    const plan = { updates: [], inserts: [], deletes: [] };
+    const inWindow = (row) => {
+      const date = parseDate(row.data.Date);
+      return date !== null && date >= range.from && date <= range.to;
+    };
+    const byKey = /* @__PURE__ */ new Map();
+    const handKeys = /* @__PURE__ */ new Set();
+    for (const row of rows) {
+      if (!str(row.data.Source)) {
+        const typedKey = str(row.data["Calendar Event"]);
+        if (typedKey) handKeys.add(typedKey);
+        continue;
+      }
+      const key = str(row.data["Calendar Event"]);
+      const hash = key ? calendarKeyHash(key) : null;
+      if (!hash || failed.has(hash)) continue;
+      const list2 = (_a = byKey.get(key)) != null ? _a : [];
+      list2.push(row);
+      byKey.set(key, list2);
+    }
+    byKey.forEach((list2, key) => {
+      const want = wanted.get(key);
+      if (!want) {
+        for (const row of list2) if (inWindow(row)) plan.deletes.push(row.rowNumber);
+        return;
+      }
+      const [first, ...repeats] = list2;
+      const patch = {};
+      for (const column of CALENDAR_ROW_COLUMNS) {
+        if (!sameValue(column, first.data[column], want.row[column], known)) patch[column] = want.row[column];
+      }
+      if (Object.keys(patch).length > 0) plan.updates.push({ row: first.rowNumber, key, patch });
+      for (const row of repeats) plan.deletes.push(row.rowNumber);
+    });
+    wanted.forEach((want, key) => {
+      var _a2;
+      if (!byKey.has(key) && !handKeys.has(key) && read.has((_a2 = calendarKeyHash(key)) != null ? _a2 : "")) plan.inserts.push({ ...want.row });
+    });
+    plan.deletes.sort((a, b) => b - a);
+    return plan;
+  }
+  function logOncePerDay(ctx, prefix, detail) {
+    const cacheKey = `calendar-log:${sha256Hex(prefix).slice(0, 16)}:${ctx.today}`;
+    try {
+      if (ctx.s.cache.get(cacheKey)) return;
+      const already = ctx.m.logEntries().some((e) => e.kind === "calendar" && e.detail.startsWith(prefix) && e.at !== "" && nyDate(new Date(e.at)) === ctx.today);
+      ctx.s.cache.put(cacheKey, "1", CACHE_TTL_SECONDS);
+      if (already) return;
+    } catch (err) {
+      ctx.s.logger.error("Calendar log check failed", errorMessage(err));
+    }
+    ctx.log("calendar", detail);
+  }
+  function listNames(names) {
+    const shown = names.slice(0, 5).map((n) => `"${truncate(n, 40)}"`);
+    return names.length > 5 ? `${shown.join(", ")} and ${names.length - 5} more` : shown.join(", ");
+  }
+  function rowNotes(r, days) {
+    const notes = [];
+    if (r.capped) notes.push(`more than ${MAX_EVENTS_PER_CALENDAR} events in the next ${days} days; only the first ${MAX_EVENTS_PER_CALENDAR} were copied`);
+    if (r.unsupported > 0) notes.push(`${plural(r.unsupported, "event")} (or repeat rules) the app can't read were left out`);
+    if (r.unknown.length > 0) {
+      notes.push(`${listNames(r.unknown)} ${r.unknown.length === 1 ? "is" : "are"} not in Settings SCHOOLS or ENSEMBLES, so ${r.unknown.length === 1 ? "it matches" : "they match"} no family's choices; check the spelling`);
+    }
+    return notes;
+  }
+  function fingerprint(ctx, fetched, read, failed, wanted) {
+    const rows = Array.from(wanted.keys()).sort().map((key) => CALENDAR_ROW_COLUMNS.map((c) => {
+      var _a;
+      return str((_a = wanted.get(key)) == null ? void 0 : _a.row[c]);
+    }));
+    return ctx.s.crypto.hmacSha256Hex("tma-calendars", JSON.stringify([fetched.from, fetched.to, read.slice().sort(), failed.slice().sort(), rows]));
+  }
+  function rowHolding(ctx, key) {
+    ctx.db.refresh("Events");
+    const row = ctx.db.rows("Events").find((r) => str(r.data.Source) !== "" && str(r.data["Calendar Event"]) === key);
+    return row ? row.rowNumber : null;
+  }
+  function reportMissingTab(ctx, report) {
+    const upcoming = ctx.db.rows("Events").filter((r) => {
+      if (!str(r.data.Source) || !calendarKeyHash(str(r.data["Calendar Event"]))) return false;
+      const date = parseDate(r.data.Date);
+      return date !== null && date >= ctx.today;
+    }).length;
+    if (upcoming === 0) return;
+    const text2 = `The Calendars tab is missing (renamed or deleted?), so ${plural(upcoming, "upcoming event")} copied from linked calendars ${upcoming === 1 ? "is" : "are"} no longer kept up to date in Events, and still ${upcoming === 1 ? "gets its" : "get their"} reminder. Rename the tab back to Calendars. To stop linking calendars, run TMA App → Set up / repair tabs instead: it adds an empty Calendars tab, and the next sync removes those rows.`;
+    report.errors.push(`Calendars: ${text2}`);
+    logOncePerDay(ctx, "The Calendars tab is missing", text2);
+  }
+  function syncCalendars(ctx, report, fetched) {
+    var _a, _b, _c, _d;
+    if (fetched === null) {
+      reportMissingTab(ctx, report);
+      return;
+    }
+    if (fetched.error) throw new Error(fetched.error);
+    const known = calendarSettings(ctx.db.rows("Settings"));
+    const range = { from: fetched.from, to: fetched.to };
+    const summary = { read: 0, failed: 0, added: 0, updated: 0, removed: 0 };
+    const notes = [];
+    const read = [];
+    const failed = [];
+    const wanted = /* @__PURE__ */ new Map();
+    const byEvent = /* @__PURE__ */ new Map();
+    for (const def of fetched.defs) {
+      if (!def.on) continue;
+      const label = `"${def.name}"`;
+      if (!def.ref) {
+        summary.failed++;
+        report.errors.push(`Calendar ${label}: ${(_a = def.problem) != null ? _a : calendarProblemText("bad")}.`);
+        logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${(_b = def.problem) != null ? _b : calendarProblemText("bad")}.`);
+        continue;
+      }
+      if (def.duplicate) {
+        notes.push(`Calendar ${label} (Calendars row ${def.row}) is the same calendar as a row above it, so it was skipped.`);
+        continue;
+      }
+      if (def.overLimit) {
+        notes.push(`Calendar ${label} was not read: the app reads at most ${MAX_CALENDARS} calendars.`);
+        continue;
+      }
+      const result = fetched.results.get(def.hash);
+      if (!result) continue;
+      if (!result.ok) {
+        summary.failed++;
+        failed.push(def.hash);
+        report.errors.push(`Calendar ${label}: ${result.text}.`);
+        logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${result.text}. Its rows in Events were left as they were.`);
+        continue;
+      }
+      summary.read++;
+      read.push(def.hash);
+      const r = rowsForCalendar(def, result.feed, range, known);
+      for (const row of r.rows) {
+        const identity = calendarEventIdentity(row.key);
+        const first = byEvent.get(identity);
+        if (first) {
+          first.audience = mergeAudience(first.audience, row.audience);
+          first.row.Schools = joinList(first.audience.schools);
+          first.row.Ensembles = joinList(first.audience.ensembles);
+          continue;
+        }
+        byEvent.set(identity, row);
+        wanted.set(row.key, row);
+      }
+      const calendarNotes = rowNotes(r, fetched.days);
+      if (calendarNotes.length > 0) {
+        for (const note2 of calendarNotes) notes.push(`Calendar ${label}: ${note2}.`);
+        logOncePerDay(ctx, `${label} note`, `${label} note: ${calendarNotes.join("; ")}.`);
+      }
+    }
+    if (notes.length > 0) report.notes = [...(_c = report.notes) != null ? _c : [], ...notes];
+    const fp = fingerprint(ctx, fetched, read, failed, wanted);
+    const listed2 = fetched.defs.some((d) => d.on);
+    if (ctx.s.cache.get(FINGERPRINT_KEY) === fp) {
+      if (listed2) report.calendars = summary;
+      return;
+    }
+    const columns = ctx.db.columns("Events");
+    const missing = columns ? ["Date", "Title", "Source", "Calendar Event"].filter((c) => !columns.includes(c)) : [];
+    if (missing.length > 0) {
+      if (!listed2) return;
+      throw new Error(
+        `The Events tab has no ${missing.map((c) => `"${c}"`).join(", ")} column, so calendar events were not copied. Run TMA App → Set up / repair tabs (it adds the Source and Calendar Event columns); if a header was renamed, change it back.`
+      );
+    }
+    const readSet = new Set(read);
+    const failedSet = new Set(failed);
+    const planNow = () => planCalendarRows(ctx.db.rows("Events"), wanted, readSet, failedSet, range, known);
+    const plan = planNow();
+    const total = plan.updates.length + plan.inserts.length + plan.deletes.length;
+    const updates = plan.updates.slice(0, MAX_ROW_CHANGES);
+    const inserts = plan.inserts;
+    for (const u of updates) {
+      const rowNumber = rowHolding(ctx, u.key);
+      if (rowNumber === null) continue;
+      ctx.db.update("Events", rowNumber, u.patch);
+      summary.updated++;
+    }
+    let deletesLeft = 0;
+    if (plan.deletes.length > 0) {
+      ctx.db.refresh("Events");
+      const all = planNow().deletes;
+      const deletes = all.slice(0, Math.max(0, MAX_ROW_CHANGES - updates.length));
+      if (deletes.length > 0) ctx.db.deleteRows("Events", deletes, CALENDAR_ROW_COLUMNS);
+      summary.removed = deletes.length;
+      deletesLeft = all.length - deletes.length;
+    }
+    if (inserts.length > 0) ctx.db.append("Events", inserts);
+    summary.added = inserts.length;
+    const complete = summary.updated === plan.updates.length && deletesLeft === 0;
+    if (!complete) {
+      report.notes = [...(_d = report.notes) != null ? _d : [], `Calendars: ${plan.updates.length - summary.updated + deletesLeft} more Events rows change at the next sync.`];
+    }
+    if (summary.added + summary.updated + summary.removed > 0) {
+      const names = fetched.defs.filter((d) => active(d) && read.includes(d.hash)).map((d) => d.name);
+      ctx.log(
+        "calendar",
+        `Calendar events copied into Events: ${summary.added} added, ${summary.updated} changed, ${summary.removed} removed${names.length ? ` (${names.join(", ")})` : ""}`
+      );
+    }
+    if (complete) ctx.s.cache.put(FINGERPRINT_KEY, fp, CACHE_TTL_SECONDS);
+    if (listed2 || total > 0) report.calendars = summary;
+  }
+  function calendarStatusLines(services) {
+    var _a;
+    const ctx = createCtx(services);
+    let fetched;
+    try {
+      fetched = fetchCalendars(ctx);
+    } catch (err) {
+      return [`Calendars: could not be checked (${errorMessage(err)})`];
+    }
+    if (fetched === null) return ["Calendars: no Calendars tab yet (TMA App → Set up / repair tabs adds it)"];
+    if (fetched.error) return [`Calendars: ${fetched.error}`];
+    const listed2 = fetched.defs;
+    if (listed2.length === 0) return ['Calendars: none linked (add one in the Calendars tab; see docs/SETUP.md, "Link Google Calendars")'];
+    const known = calendarSettings(ctx.db.rows("Settings"));
+    const lines = [`Calendars (events from ${shortDate(fetched.from)} to ${shortDate(fetched.to)}, Settings CALENDAR_DAYS ${fetched.days}):`];
+    for (const def of listed2) {
+      const label = `Calendar "${def.name}"`;
+      if (!def.on) lines.push(`${label}: off (On is FALSE)`);
+      else if (!def.ref) lines.push(`${label}: ✗ ${(_a = def.problem) != null ? _a : calendarProblemText("bad")}`);
+      else if (def.duplicate) lines.push(`${label}: skipped, the same calendar as a row above`);
+      else if (def.overLimit) lines.push(`${label}: not read (at most ${MAX_CALENDARS} calendars)`);
+      else {
+        const result = fetched.results.get(def.hash);
+        if (!result) continue;
+        if (!result.ok) {
+          lines.push(`${label}: ✗ ${result.text}`);
+          continue;
+        }
+        const r = rowsForCalendar(def, result.feed, fetched, known);
+        const extras = [
+          r.private ? `${r.private} private skipped` : "",
+          r.unsupported ? `${r.unsupported} unreadable skipped` : "",
+          r.capped ? `only the first ${MAX_EVENTS_PER_CALENDAR} copied` : "",
+          r.unknown.length ? `schools/groups not in Settings: ${listNames(r.unknown)}` : ""
+        ].filter(Boolean);
+        lines.push(`${label}: OK ✓, ${plural(r.rows.length, "event")}${extras.length ? ` (${extras.join("; ")})` : ""}`);
+      }
+    }
+    return lines;
   }
 
   // src/server/household.ts
@@ -4895,9 +5736,56 @@ var TMA = (() => {
   };
 
   // src/server/sample-data.ts
+  var DEMO_CALENDAR = { name: "Music Dept", id: "music-dept@example.com" };
+  function sampleCalendarEvents(today) {
+    const base = nyDate(today);
+    const at = (offset, hour, minute = 0) => {
+      const [y, m, d] = addDays(base, offset).split("-").map((n) => parseInt(n, 10));
+      return nyLocalToDate(y, m, d, hour, minute).toISOString();
+    };
+    return [
+      {
+        uid: "demo-musical-auditions",
+        start: { dateTime: at(9, 15) },
+        end: { dateTime: at(9, 17) },
+        title: "Spring musical auditions",
+        location: "TRHS Auditorium",
+        description: "<p>Sign up for a time slot outside the chorus room. Bring a one-minute song.</p><p>Schools: High School<br>Groups: Chorus</p>"
+      },
+      {
+        uid: "demo-winter-break",
+        start: { date: addDays(base, 55) },
+        end: { date: addDays(base, 64) },
+        title: "Winter break: no rehearsals",
+        location: "",
+        description: "Rehearsals start again after the break. Practice at home!"
+      },
+      {
+        uid: "demo-planning",
+        start: { dateTime: at(20, 14) },
+        end: { dateTime: at(20, 15) },
+        title: "Music staff planning",
+        location: "Band room",
+        description: "",
+        private: true
+      }
+    ];
+  }
+  function sampleCalendarRows(today) {
+    const known = { schools: splitList(SETTING_DEFAULTS.SCHOOLS, /,/), ensembles: splitList(SETTING_DEFAULTS.ENSEMBLES, /,/) };
+    const source = { name: DEMO_CALENDAR.name, hash: calendarHash({ kind: "google", id: DEMO_CALENDAR.id }), schools: [], ensembles: [] };
+    const rows = [];
+    for (const event of sampleCalendarEvents(today)) {
+      if (event.private || event.cancelled) continue;
+      const built = buildCalendarRow(source, event, known);
+      if (built) rows.push(built.row);
+    }
+    return rows;
+  }
   var TREASURER = "treasurer@example.com";
   var TMA_SITE = "https://sites.google.com/view/timberlanemusicassociation/home";
   function sampleData(today, opts = {}) {
+    var _a;
     const base = nyDate(today);
     const day = (offset) => addDays(base, offset);
     const at = (offset, hour = 12, minute = 0) => {
@@ -5191,10 +6079,10 @@ var TMA = (() => {
         APP_URL: ""
       };
       data.Settings = Object.keys(SETTING_DEFAULTS).map((key) => {
-        var _a;
+        var _a2;
         return {
           Key: key,
-          Value: (_a = overrides[key]) != null ? _a : SETTING_DEFAULTS[key],
+          Value: (_a2 = overrides[key]) != null ? _a2 : SETTING_DEFAULTS[key],
           Notes: SETTING_NOTES[key]
         };
       });
@@ -5208,6 +6096,8 @@ var TMA = (() => {
           "Last Seen": at(-1, 7, 30)
         }
       ];
+      data.Calendars = [{ Name: DEMO_CALENDAR.name, Calendar: DEMO_CALENDAR.id, Schools: "", Groups: "", On: true }];
+      data.Events = [...(_a = data.Events) != null ? _a : [], ...sampleCalendarRows(today)];
       data["Sign-ins"] = [
         signIn("parent@example.com", "F0001", at(-45, 19, 2), at(-30, 18, 55), at(-1, 7, 30), 2),
         signIn("ortiz@example.com", "F0003", at(-2, 21, 10), at(-2, 21, 10), at(-2, 21, 20), 1),
@@ -5325,11 +6215,12 @@ var TMA = (() => {
       recordError(ctx, report, name, err);
     }
   }
-  function runSync(ctx) {
+  function runSync(ctx, calendars) {
     const report = emptyReport(ctx.now);
     step(ctx, report, "redemptions", () => postSheetDecisions(ctx, report));
     step(ctx, report, "balances", () => detectBalanceChanges(ctx, report));
     step(ctx, report, "announcements", () => sendQueuedAnnouncements(ctx, report));
+    if (calendars !== void 0) step(ctx, report, "calendars", () => syncCalendars(ctx, report, calendars));
     return report;
   }
   function runDaily(ctx) {
@@ -5569,7 +6460,13 @@ var TMA = (() => {
     "admin.decideRedemption": { admin: true, write: true, run: decideRedemption },
     "admin.reviewHousehold": { admin: true, write: true, run: reviewHousehold },
     "admin.announce": { admin: true, write: true, run: announce },
-    "admin.runSync": { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
+    "admin.runSync": {
+      admin: true,
+      write: true,
+      tick: true,
+      prepare: fetchCalendars,
+      run: (ctx, _email, _params, prepared) => runSync(ctx, prepared)
+    },
     // Read-only (no lock); the roster alone takes the lock briefly for its Log row.
     "admin.report": { admin: true, run: runReport }
   };
@@ -5590,10 +6487,11 @@ var TMA = (() => {
     const email2 = authenticate(ctx, req.token);
     if (route.admin && !isAdmin(ctx, email2)) forbidden("Only TMA board members can do that.");
     if (!route.write) return route.run(ctx, email2, p);
+    const prepared = route.prepare ? route.prepare(ctx) : void 0;
     ctx.deliveries = [];
     let result;
     try {
-      result = inWriteLock(ctx, () => route.run(ctx, email2, p));
+      result = inWriteLock(ctx, () => route.run(ctx, email2, p, prepared));
     } finally {
       const sent = flushDeliveries(ctx);
       if (route.tick && result) addCounts(result.notifications, sent);
@@ -5616,7 +6514,7 @@ var TMA = (() => {
         }
       },
       syncTick() {
-        return tick(services, runSync);
+        return tick(services, runSync, fetchCalendars);
       },
       dailyTick() {
         return tick(services, runDaily);
@@ -5627,15 +6525,16 @@ var TMA = (() => {
       }
     };
   }
-  function tick(services, run) {
+  function tick(services, run, prepare) {
     let ctx = null;
     try {
       ctx = createCtx(services);
       const c = ctx;
+      const prepared = prepare ? prepare(c) : void 0;
       c.deliveries = [];
       let report;
       try {
-        report = inWriteLock(c, () => run(c));
+        report = inWriteLock(c, () => run(c, prepared));
       } finally {
         const sent = flushDeliveries(c);
         if (report) addCounts(report.notifications, sent);
@@ -6872,33 +7771,758 @@ Email from the TMA app is working.
     ].join("");
   }
 
-  // src/gas/settings.ts
-  function readSetting(store, key) {
-    let value;
-    for (const row of store.read("Settings")) {
-      if (settingKey2(row.data.Key) === key) value = cellText(row.data.Value);
+  // src/server/ics.ts
+  var NEW_YORK = "America/New_York";
+  var DAY_MS2 = 864e5;
+  var MAX_LINES = 2e5;
+  var MAX_VEVENTS = 2e4;
+  var MAX_VTIMEZONES = 100;
+  var MAX_PERIODS = 5e4;
+  var MAX_WORK = 5e5;
+  var MAX_COLLECTED = 2e4;
+  var MAX_TEXT = 2e4;
+  var NY_ALIASES = /* @__PURE__ */ new Set(["america/new_york", "us/eastern", "est5edt", "america/detroit", "america/toronto", "america/montreal"]);
+  var UTC_NAMES = /^(utc|gmt|z|zulu|universal|etc\/(utc|gmt|zulu|universal|gmt[+-]0))$/i;
+  var WINDOWS_ZONES = {
+    "eastern standard time": NEW_YORK,
+    "us eastern standard time": "America/Indiana/Indianapolis",
+    "central standard time": "America/Chicago",
+    "mountain standard time": "America/Denver",
+    "us mountain standard time": "America/Phoenix",
+    "pacific standard time": "America/Los_Angeles",
+    "atlantic standard time": "America/Halifax",
+    "alaskan standard time": "America/Anchorage",
+    "hawaiian standard time": "Pacific/Honolulu",
+    "gmt standard time": "Europe/London"
+  };
+  var DISPLAY_ZONES = [
+    [/\beastern time \(us (?:&|and) canada\)/i, NEW_YORK],
+    [/\bcentral time \(us (?:&|and) canada\)/i, "America/Chicago"],
+    [/\bmountain time \(us (?:&|and) canada\)/i, "America/Denver"],
+    [/\bpacific time \(us (?:&|and) canada\)/i, "America/Los_Angeles"],
+    [/\batlantic time \(canada\)/i, "America/Halifax"],
+    [/\bindiana \(east\)/i, "America/Indiana/Indianapolis"],
+    [/^\((?:utc|gmt)-07:00\) arizona$/i, "America/Phoenix"],
+    [/^\((?:utc|gmt)-09:00\) alaska$/i, "America/Anchorage"],
+    [/^\((?:utc|gmt)-10:00\) hawaii$/i, "Pacific/Honolulu"]
+  ];
+  var basicZones = (zone, w) => {
+    if (zone === "UTC") return Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
+    if (NY_ALIASES.has(zone.toLowerCase())) return nyLocalToDate(w.year, w.month, w.day, w.hour, w.minute, w.second).getTime();
+    return null;
+  };
+  function normalizeTzid(raw) {
+    const s = raw.replace(/^"|"$/g, "").trim();
+    if (UTC_NAMES.test(s)) return "UTC";
+    const windows = WINDOWS_ZONES[s.toLowerCase()];
+    if (windows) return windows;
+    const display = DISPLAY_ZONES.find(([re]) => re.test(s));
+    if (display) return display[1];
+    const m = /([A-Za-z]+\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?)$/.exec(s);
+    return m ? m[1] : s;
+  }
+  function looksLikeIcs(text2) {
+    return /^\s*(﻿)?BEGIN:VCALENDAR/i.test(text2.slice(0, 2e3)) || /\nBEGIN:VCALENDAR/i.test(text2.slice(0, 2e3));
+  }
+  var PROBE = { year: 2026, month: 1, day: 1, hour: 12, minute: 0, second: 0 };
+  var US_DST_ZONES = {
+    "-240": "America/Halifax",
+    "-300": NEW_YORK,
+    "-360": "America/Chicago",
+    "-420": "America/Denver",
+    "-480": "America/Los_Angeles",
+    "-540": "America/Anchorage"
+  };
+  var NO_DST_ZONES = { "0": "UTC", "-420": "America/Phoenix", "-600": "Pacific/Honolulu" };
+  function parseOffset(value) {
+    const m = /^([+-])(\d{2})(\d{2})(\d{2})?$/.exec(value.trim());
+    if (!m) return null;
+    const minutes = +m[2] * 60 + +m[3];
+    return m[1] === "-" ? -minutes : minutes;
+  }
+  function isYearlyRule(rule, month, byDay) {
+    var _a, _b;
+    const parts = /* @__PURE__ */ new Map();
+    for (const piece of rule.split(";")) {
+      const eq = piece.indexOf("=");
+      if (eq > 0) parts.set(piece.slice(0, eq).trim(), piece.slice(eq + 1).trim());
     }
-    return value === void 0 || value === "" ? SETTING_DEFAULTS[key] : value;
+    for (const key of parts.keys()) if (!["FREQ", "INTERVAL", "BYMONTH", "BYDAY", "WKST"].includes(key)) return false;
+    return parts.get("FREQ") === "YEARLY" && ((_a = parts.get("INTERVAL")) != null ? _a : "1") === "1" && parts.get("BYMONTH") === String(month) && ((_b = parts.get("BYDAY")) != null ? _b : "").replace(/^\+/, "") === byDay;
   }
-  function settingKey2(value) {
-    return cellText(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  function zoneFromVtimezone(tz) {
+    var _a, _b;
+    const latest2 = (kind) => tz.parts.filter((p) => p.kind === kind).reduce((a, b) => a === null || b.start > a.start ? b : a, null);
+    const standard = latest2("STANDARD");
+    const daylight = latest2("DAYLIGHT");
+    if (!standard || standard.offset === null) return null;
+    if (!daylight || daylight.offset === standard.offset && !daylight.rule && !standard.rule) {
+      return (_a = NO_DST_ZONES[String(standard.offset)]) != null ? _a : null;
+    }
+    if (daylight.offset !== standard.offset + 60) return null;
+    if (!isYearlyRule(standard.rule, 11, "1SU") || !isYearlyRule(daylight.rule, 3, "2SU")) return null;
+    return (_b = US_DST_ZONES[String(standard.offset)]) != null ? _b : null;
   }
-  function readFlag(store, key) {
-    return parseFlag(readSetting(store, key), parseFlag(SETTING_DEFAULTS[key], false));
+  function withFileZones(zones, timezones) {
+    const aliases = /* @__PURE__ */ new Map();
+    for (const tz of timezones) {
+      const name = normalizeTzid(tz.tzid);
+      if (!name || aliases.has(name) || zones(name, PROBE) !== null) continue;
+      const zone = zoneFromVtimezone(tz);
+      if (zone && zones(zone, PROBE) !== null) aliases.set(name, zone);
+    }
+    return aliases.size === 0 ? zones : (zone, wall) => {
+      var _a;
+      return zones((_a = aliases.get(zone)) != null ? _a : zone, wall);
+    };
   }
-  var TRUE_WORDS2 = ["true", "yes", "y", "x", "1", "on", "✓", "✔"];
-  var FALSE_WORDS2 = ["false", "no", "n", "0", "off"];
-  function parseFlag(value, fallback) {
-    const word = value.trim().toLowerCase();
-    if (TRUE_WORDS2.includes(word)) return true;
-    if (FALSE_WORDS2.includes(word)) return false;
-    return fallback;
+  function unfoldLines(text2) {
+    const raw = text2.replace(/^﻿/, "").split(/\r\n|\r|\n/);
+    const out = [];
+    for (const line of raw) {
+      if ((line.startsWith(" ") || line.startsWith("	")) && out.length > 0) out[out.length - 1] += line.slice(1);
+      else out.push(line);
+      if (out.length > MAX_LINES) break;
+    }
+    return out;
   }
-  function cellText(value) {
-    if (value === null || value === void 0) return "";
-    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-    if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toISOString();
-    return String(value).trim();
+  function parseContentLine(line) {
+    let i = 0;
+    while (i < line.length && line[i] !== ";" && line[i] !== ":") i++;
+    if (i >= line.length) return null;
+    const name = line.slice(0, i).trim().toUpperCase();
+    if (!name) return null;
+    const params = {};
+    while (line[i] === ";") {
+      i++;
+      const eq = line.indexOf("=", i);
+      if (eq < 0) return null;
+      const key = line.slice(i, eq).trim().toUpperCase();
+      i = eq + 1;
+      let value = "";
+      while (i < line.length && line[i] !== ";" && line[i] !== ":") {
+        if (line[i] === '"') {
+          const close = line.indexOf('"', i + 1);
+          if (close < 0) return null;
+          value += line.slice(i + 1, close);
+          i = close + 1;
+        } else {
+          value += line[i];
+          i++;
+        }
+      }
+      if (key) params[key] = value;
+    }
+    if (line[i] !== ":") return null;
+    return { name, params, value: line.slice(i + 1) };
+  }
+  function unescapeText(value) {
+    return value.replace(/\\([\\;,nN])/g, (_, c) => c === "n" || c === "N" ? "\n" : c);
+  }
+  function toDays(year, month, day) {
+    return Math.floor(Date.UTC(year, month - 1, day) / DAY_MS2);
+  }
+  function fromDays(days) {
+    const d = new Date(days * DAY_MS2);
+    return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+  }
+  function dayText(days) {
+    const p = fromDays(days);
+    return isoDate(p.year, p.month, p.day);
+  }
+  function weekday(days) {
+    return (days % 7 + 11) % 7;
+  }
+  function daysInMonth(year, month) {
+    return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  }
+  var DATE_RE = /^(\d{4})(\d{2})(\d{2})$/;
+  var DATETIME_RE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)$/i;
+  function validYmd(y, m, d) {
+    return y >= 1900 && y <= 2200 && m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
+  }
+  function parseDateValue(text2, params) {
+    var _a;
+    const value = text2.trim();
+    const date = DATE_RE.exec(value);
+    if (date) {
+      if (!validYmd(+date[1], +date[2], +date[3])) return null;
+      return { kind: "date", days: toDays(+date[1], +date[2], +date[3]) };
+    }
+    if (((_a = params.VALUE) != null ? _a : "").toUpperCase() === "DATE") return null;
+    const m = DATETIME_RE.exec(value);
+    if (!m) return null;
+    const [y, mo, d, h, mi] = [+m[1], +m[2], +m[3], +m[4], +m[5]];
+    const s = Math.min(59, +m[6]);
+    if (!validYmd(y, mo, d) || h > 23 || mi > 59) return null;
+    const zone = m[7] ? "UTC" : params.TZID ? normalizeTzid(params.TZID) : "";
+    return { kind: "time", days: toDays(y, mo, d), h, mi, s, zone };
+  }
+  function parseDateList(text2, params) {
+    const values = [];
+    let bad = 0;
+    for (const part of text2.split(",")) {
+      if (!part.trim()) continue;
+      const v = part.includes("/") ? null : parseDateValue(part, params);
+      if (v) values.push(v);
+      else bad++;
+    }
+    return { values, bad };
+  }
+  function parseDuration(text2) {
+    var _a, _b, _c, _d, _e;
+    const m = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/i.exec(text2.trim());
+    if (!m || text2.trim().toUpperCase() === "P" || /T$/i.test(text2.trim())) return null;
+    const sign = m[1] === "-" ? -1 : 1;
+    const days = (Number((_a = m[2]) != null ? _a : 0) * 7 + Number((_b = m[3]) != null ? _b : 0)) * sign;
+    const ms = ((Number((_c = m[4]) != null ? _c : 0) * 60 + Number((_d = m[5]) != null ? _d : 0)) * 60 + Number((_e = m[6]) != null ? _e : 0)) * 1e3 * sign;
+    return { days, ms };
+  }
+  var WEEKDAYS = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+  function intList(value, min, max) {
+    const out = [];
+    for (const part of value.split(",")) {
+      if (!/^[+-]?\d{1,3}$/.test(part.trim())) return null;
+      const n = parseInt(part, 10);
+      if (n === 0 || Math.abs(n) < min || Math.abs(n) > max) return null;
+      out.push(n);
+    }
+    return out.length ? out : null;
+  }
+  function parseRule(value) {
+    var _a, _b;
+    const parts = /* @__PURE__ */ new Map();
+    for (const piece of value.split(";")) {
+      if (!piece.trim()) continue;
+      const eq = piece.indexOf("=");
+      if (eq < 0) return null;
+      const key = piece.slice(0, eq).trim().toUpperCase();
+      if (parts.has(key)) return null;
+      parts.set(key, piece.slice(eq + 1).trim().toUpperCase());
+    }
+    const freq = parts.get("FREQ");
+    if (!freq || !["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].includes(freq)) return null;
+    const known = /* @__PURE__ */ new Set(["FREQ", "INTERVAL", "COUNT", "UNTIL", "BYDAY", "BYMONTHDAY", "BYMONTH", "BYSETPOS", "WKST"]);
+    for (const key of parts.keys()) if (!known.has(key)) return null;
+    if (parts.has("COUNT") && parts.has("UNTIL")) return null;
+    const rule = { freq, interval: 1, wkst: 1 };
+    const interval = parts.get("INTERVAL");
+    if (interval !== void 0) {
+      if (!/^\d{1,4}$/.test(interval) || +interval < 1) return null;
+      rule.interval = +interval;
+    }
+    const count2 = parts.get("COUNT");
+    if (count2 !== void 0) {
+      if (!/^\d{1,6}$/.test(count2) || +count2 < 1) return null;
+      rule.count = +count2;
+    }
+    const until = parts.get("UNTIL");
+    if (until !== void 0) {
+      const parsed = parseDateValue(until, {});
+      if (!parsed) return null;
+      rule.until = parsed;
+    }
+    const wkst = parts.get("WKST");
+    if (wkst !== void 0) {
+      const wd = WEEKDAYS.indexOf(wkst);
+      if (wd < 0) return null;
+      rule.wkst = wd;
+    }
+    const byDay = parts.get("BYDAY");
+    if (byDay !== void 0) {
+      const list2 = [];
+      for (const part of byDay.split(",")) {
+        const m = /^([+-]?\d{1,2})?(SU|MO|TU|WE|TH|FR|SA)$/.exec(part.trim());
+        if (!m) return null;
+        const ord = m[1] ? parseInt(m[1], 10) : 0;
+        if (m[1] && (ord === 0 || Math.abs(ord) > 5)) return null;
+        list2.push({ ord, wd: WEEKDAYS.indexOf(m[2]) });
+      }
+      if (list2.some((d) => d.ord !== 0) && freq !== "MONTHLY" && !(freq === "YEARLY" && parts.has("BYMONTH"))) return null;
+      rule.byDay = list2;
+    }
+    const byMonthDay = parts.get("BYMONTHDAY");
+    if (byMonthDay !== void 0) {
+      if (freq === "DAILY" || freq === "WEEKLY") return null;
+      const list2 = intList(byMonthDay, 1, 31);
+      if (!list2) return null;
+      if ((_a = rule.byDay) == null ? void 0 : _a.some((d) => d.ord !== 0)) return null;
+      rule.byMonthDay = list2;
+    }
+    const byMonth = parts.get("BYMONTH");
+    if (byMonth !== void 0) {
+      if (freq !== "YEARLY") return null;
+      const list2 = intList(byMonth, 1, 12);
+      if (!list2 || list2.some((n) => n < 0)) return null;
+      rule.byMonth = list2.sort((a, b) => a - b);
+    }
+    if (freq === "YEARLY" && !rule.byMonth && (rule.byDay || rule.byMonthDay)) return null;
+    const bySetPos = parts.get("BYSETPOS");
+    if (bySetPos !== void 0) {
+      if (freq !== "MONTHLY" && !(freq === "YEARLY" && ((_b = rule.byMonth) == null ? void 0 : _b.length) === 1)) return null;
+      if (!rule.byDay && !rule.byMonthDay) return null;
+      const list2 = intList(bySetPos, 1, 31);
+      if (!list2) return null;
+      rule.bySetPos = list2;
+    }
+    return rule;
+  }
+  function daysInRuleMonth(rule, year, month, startDay) {
+    const dim = daysInMonth(year, month);
+    const first = toDays(year, month, 1);
+    let picked = [];
+    if (rule.byMonthDay) {
+      for (const n of rule.byMonthDay) {
+        const day = n > 0 ? n : dim + n + 1;
+        if (day >= 1 && day <= dim) picked.push(first + day - 1);
+      }
+      if (rule.byDay) {
+        const wds = new Set(rule.byDay.map((d) => d.wd));
+        picked = picked.filter((n) => wds.has(weekday(n)));
+      }
+    } else if (rule.byDay) {
+      for (const { ord, wd } of rule.byDay) {
+        const matches = [];
+        for (let n = first; n < first + dim; n++) if (weekday(n) === wd) matches.push(n);
+        if (ord === 0) picked.push(...matches);
+        else {
+          const hit = ord > 0 ? matches[ord - 1] : matches[matches.length + ord];
+          if (hit !== void 0) picked.push(hit);
+        }
+      }
+    } else if (startDay <= dim) {
+      picked.push(first + startDay - 1);
+    }
+    picked = Array.from(new Set(picked)).sort((a, b) => a - b);
+    if (rule.bySetPos) {
+      const all = picked;
+      picked = [];
+      for (const pos of rule.bySetPos) {
+        const hit = pos > 0 ? all[pos - 1] : all[all.length + pos];
+        if (hit !== void 0) picked.push(hit);
+      }
+      picked = Array.from(new Set(picked)).sort((a, b) => a - b);
+    }
+    return picked;
+  }
+  function expandDays(rule, startDays, range, budget, emit) {
+    var _a;
+    const start = fromDays(startDays);
+    const weekStart0 = startDays - (weekday(startDays) - rule.wkst + 7) % 7;
+    const month0 = start.year * 12 + (start.month - 1);
+    let k = 0;
+    if (rule.count === void 0 && range.from > startDays) {
+      const from = fromDays(range.from);
+      if (rule.freq === "DAILY") k = Math.floor((range.from - startDays) / rule.interval);
+      else if (rule.freq === "WEEKLY") k = Math.floor((range.from - weekStart0) / (7 * rule.interval));
+      else if (rule.freq === "MONTHLY") k = Math.floor((from.year * 12 + (from.month - 1) - month0) / rule.interval);
+      else k = Math.floor((from.year - start.year) / rule.interval);
+      k = Math.max(0, k - 1);
+    }
+    for (let n = 0; n < MAX_PERIODS; n++, k++) {
+      if (budget.left <= 0) return false;
+      let candidates;
+      if (rule.freq === "DAILY") {
+        const day = startDays + k * rule.interval;
+        if (day > range.to) return true;
+        candidates = !rule.byDay || rule.byDay.some((d) => d.wd === weekday(day)) ? [day] : [];
+      } else if (rule.freq === "WEEKLY") {
+        const weekStart = weekStart0 + 7 * rule.interval * k;
+        if (weekStart > range.to) return true;
+        const wds = rule.byDay ? rule.byDay.map((d) => d.wd) : [weekday(startDays)];
+        candidates = Array.from(new Set(wds.map((wd) => weekStart + (wd - rule.wkst + 7) % 7))).sort((a, b) => a - b);
+      } else if (rule.freq === "MONTHLY") {
+        const index = month0 + k * rule.interval;
+        const year = Math.floor(index / 12);
+        const month = index % 12 + 1;
+        if (toDays(year, month, 1) > range.to) return true;
+        candidates = daysInRuleMonth(rule, year, month, start.day);
+      } else {
+        const year = start.year + k * rule.interval;
+        if (toDays(year, 1, 1) > range.to) return true;
+        candidates = [];
+        for (const month of (_a = rule.byMonth) != null ? _a : [start.month]) candidates.push(...daysInRuleMonth(rule, year, month, start.day));
+      }
+      budget.left -= 1 + candidates.length;
+      for (const day of candidates) {
+        if (day <= startDays) continue;
+        if (!emit(day)) return true;
+      }
+    }
+    return false;
+  }
+  function newRaw() {
+    return {
+      uid: "",
+      start: null,
+      end: null,
+      duration: null,
+      title: "",
+      location: "",
+      description: "",
+      cancelled: false,
+      private: false,
+      rrule: [],
+      rdates: [],
+      exdates: [],
+      badDates: 0,
+      recurrenceId: null,
+      rangeFuture: false
+    };
+  }
+  function clipText(value) {
+    return value.length > MAX_TEXT ? value.slice(0, MAX_TEXT) : value;
+  }
+  function readProp(ev, p) {
+    var _a;
+    switch (p.name) {
+      case "UID":
+        ev.uid = unescapeText(p.value).trim().slice(0, 500);
+        break;
+      case "DTSTART":
+        ev.start = parseDateValue(p.value, p.params);
+        break;
+      case "DTEND":
+        ev.end = parseDateValue(p.value, p.params);
+        break;
+      case "DURATION":
+        ev.duration = parseDuration(p.value);
+        break;
+      case "SUMMARY":
+        ev.title = clipText(unescapeText(p.value));
+        break;
+      case "LOCATION":
+        ev.location = clipText(unescapeText(p.value));
+        break;
+      case "DESCRIPTION":
+        ev.description = clipText(unescapeText(p.value));
+        break;
+      case "STATUS":
+        ev.cancelled = p.value.trim().toUpperCase() === "CANCELLED";
+        break;
+      case "CLASS": {
+        const c = p.value.trim().toUpperCase();
+        ev.private = c === "PRIVATE" || c === "CONFIDENTIAL";
+        break;
+      }
+      case "RRULE":
+        ev.rrule.push(p.value);
+        break;
+      case "RDATE":
+      case "EXDATE": {
+        const { values, bad } = parseDateList(p.value, p.params);
+        if (p.name === "RDATE") ev.rdates.push(...values);
+        else ev.exdates.push(...values);
+        ev.badDates += bad;
+        break;
+      }
+      case "RECURRENCE-ID":
+        ev.recurrenceId = parseDateValue(p.value, p.params);
+        ev.rangeFuture = ((_a = p.params.RANGE) != null ? _a : "").toUpperCase() === "THISANDFUTURE";
+        break;
+      default:
+        break;
+    }
+  }
+  var Reader = class {
+    constructor(zones, defaultZone) {
+      this.zones = zones;
+      this.defaultZone = defaultZone;
+      __publicField(this, "unsupported", 0);
+      __publicField(this, "zoneOk", /* @__PURE__ */ new Map());
+      __publicField(this, "memo", /* @__PURE__ */ new Map());
+    }
+    /** UTC ms of a value; all-day dates count from midnight in the default zone. null = unknown zone. */
+    instant(v) {
+      const zone = v.kind === "date" ? this.defaultZone : v.zone || this.defaultZone;
+      const key = v.kind === "date" ? `${zone}|${v.days}` : `${zone}|${v.days}|${v.h}|${v.mi}|${v.s}`;
+      const hit = this.memo.get(key);
+      if (hit !== void 0) return hit;
+      const p = fromDays(v.days);
+      const wall = v.kind === "date" ? { ...p, hour: 0, minute: 0, second: 0 } : { ...p, hour: v.h, minute: v.mi, second: v.s };
+      const ms = this.zones(zone, wall);
+      const value = typeof ms === "number" && Number.isFinite(ms) ? ms : null;
+      this.memo.set(key, value);
+      return value;
+    }
+    zoneKnown(v) {
+      if (v.kind === "date") return true;
+      const zone = v.zone || this.defaultZone;
+      let ok = this.zoneOk.get(zone);
+      if (ok === void 0) {
+        ok = this.instant({ ...v, zone }) !== null;
+        this.zoneOk.set(zone, ok);
+      }
+      return ok;
+    }
+  };
+  function onDay(base, days) {
+    return { ...base, days };
+  }
+  function inZoneOf(v, series) {
+    return v.kind === "time" && !v.zone && series.kind === "time" ? { ...v, zone: series.zone } : v;
+  }
+  function occurrenceKey(reader, v, series) {
+    if (series.kind === "date") return `d:${v.days}`;
+    if (v.kind === "date") return `day:${v.days}`;
+    const t = reader.instant(inZoneOf(v, series));
+    return t === null ? null : `t:${t}`;
+  }
+  function timeOf(reader, v) {
+    if (v.kind === "date") return { date: dayText(v.days) };
+    const t = reader.instant(v);
+    return t === null ? null : { dateTime: new Date(t).toISOString() };
+  }
+  function lengthOf(reader, ev) {
+    var _a, _b;
+    const start = ev.start;
+    if (!start) return null;
+    if (start.kind === "date") {
+      let days = 1;
+      if (((_a = ev.end) == null ? void 0 : _a.kind) === "date") days = ev.end.days - start.days;
+      else if (ev.duration) days = ev.duration.days + Math.floor(ev.duration.ms / DAY_MS2);
+      return { days: Math.max(1, days) };
+    }
+    let ms = null;
+    if (((_b = ev.end) == null ? void 0 : _b.kind) === "time") {
+      const a = reader.instant(start);
+      const b = reader.instant(inZoneOf(ev.end, start));
+      if (a !== null && b !== null) ms = b - a;
+    } else if (ev.duration) {
+      ms = ev.duration.days * DAY_MS2 + ev.duration.ms;
+    }
+    return ms !== null && ms > 0 ? { ms } : null;
+  }
+  function parseIcs(text2, options) {
+    var _a, _b;
+    const lines = unfoldLines(String(text2 != null ? text2 : ""));
+    let calendars = 0;
+    let defaultZone = (_a = options.defaultZone) != null ? _a : NEW_YORK;
+    const raws = [];
+    const timezones = [];
+    const stack = [];
+    let current = null;
+    let tz = null;
+    let tzPart = null;
+    let capped = false;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const p = parseContentLine(line);
+      if (!p) continue;
+      if (p.name === "BEGIN") {
+        const what = p.value.trim().toUpperCase();
+        stack.push(what);
+        const parent = stack.length >= 2 ? stack[stack.length - 2] : "";
+        if (what === "VCALENDAR") calendars++;
+        if (what === "VEVENT" && parent === "VCALENDAR") {
+          if (raws.length >= MAX_VEVENTS) capped = true;
+          else current = newRaw();
+        }
+        if (what === "VTIMEZONE" && parent === "VCALENDAR" && timezones.length < MAX_VTIMEZONES) tz = { tzid: "", parts: [] };
+        if ((what === "STANDARD" || what === "DAYLIGHT") && parent === "VTIMEZONE" && tz) tzPart = { kind: what, start: "", offset: null, rule: "" };
+        continue;
+      }
+      if (p.name === "END") {
+        const what = p.value.trim().toUpperCase();
+        const at = stack.lastIndexOf(what);
+        if (at < 0) continue;
+        if (what === "VEVENT" && current) {
+          raws.push(current);
+          current = null;
+        }
+        if ((what === "STANDARD" || what === "DAYLIGHT") && tz && tzPart) {
+          if (tz.parts.length < 50) tz.parts.push(tzPart);
+          tzPart = null;
+        }
+        if (what === "VTIMEZONE" && tz) {
+          timezones.push(tz);
+          tz = null;
+          tzPart = null;
+        }
+        stack.length = at;
+        continue;
+      }
+      const top = stack[stack.length - 1];
+      if (top === "VEVENT" && current) readProp(current, p);
+      else if (top === "VTIMEZONE" && tz && p.name === "TZID") tz.tzid = p.value.trim();
+      else if ((top === "STANDARD" || top === "DAYLIGHT") && tzPart) {
+        if (p.name === "DTSTART") tzPart.start = p.value.trim();
+        else if (p.name === "TZOFFSETTO") tzPart.offset = parseOffset(p.value);
+        else if (p.name === "RRULE") tzPart.rule = p.value.trim().toUpperCase();
+      } else if (top === "VCALENDAR" && p.name === "X-WR-TIMEZONE" && !options.defaultZone) {
+        const zone = normalizeTzid(p.value);
+        if (options.zones(zone, PROBE) !== null) defaultZone = zone;
+      }
+    }
+    const reader = new Reader(withFileZones(options.zones, timezones), defaultZone);
+    const budget = { left: MAX_WORK };
+    const windowStart = options.range.start.getTime();
+    const windowEnd = options.range.end.getTime();
+    const firstDay = Math.floor(windowStart / DAY_MS2) - 1;
+    const lastDay2 = Math.floor(windowEnd / DAY_MS2) + 1;
+    const collected = [];
+    const usable = (ev) => {
+      if (!ev.start || !reader.zoneKnown(ev.start)) {
+        reader.unsupported++;
+        return false;
+      }
+      return true;
+    };
+    const add2 = (ev, uid, start) => {
+      const startMs = reader.instant(start);
+      const startTime = timeOf(reader, start);
+      if (startMs === null || !startTime) return;
+      const length = lengthOf(reader, ev);
+      let end;
+      let endMs = null;
+      if (length && "days" in length && start.kind === "date") {
+        endMs = reader.instant({ kind: "date", days: start.days + length.days });
+        end = { date: dayText(start.days + length.days) };
+      } else if (length && "ms" in length) {
+        endMs = startMs + length.ms;
+        end = { dateTime: new Date(endMs).toISOString() };
+      }
+      const overlaps = startMs < windowEnd && (endMs !== null ? endMs > windowStart : startMs >= windowStart);
+      if (!overlaps) return;
+      if (collected.length >= MAX_COLLECTED) {
+        capped = true;
+        return;
+      }
+      const event = { uid, start: startTime, title: ev.title, location: ev.location, description: ev.description };
+      if (end) event.end = end;
+      if (ev.private) event.private = true;
+      if (ev.cancelled) event.cancelled = true;
+      collected.push({ ms: startMs, event });
+    };
+    const overridesByUid = /* @__PURE__ */ new Map();
+    const masters = [];
+    raws.forEach((ev, i) => {
+      var _a2;
+      if (!ev.uid) ev.uid = `nouid-${i}`;
+      if (ev.recurrenceId) {
+        if (ev.rangeFuture) reader.unsupported++;
+        const list2 = (_a2 = overridesByUid.get(ev.uid)) != null ? _a2 : [];
+        list2.push(ev);
+        overridesByUid.set(ev.uid, list2);
+      } else {
+        masters.push(ev);
+      }
+    });
+    const usedOverrides = /* @__PURE__ */ new Set();
+    for (const master of masters) {
+      const overrides = (_b = overridesByUid.get(master.uid)) != null ? _b : [];
+      if (!usable(master)) {
+        overrides.forEach((o) => usedOverrides.add(o));
+        continue;
+      }
+      const start = master.start;
+      reader.unsupported += master.badDates;
+      if (master.cancelled) {
+        overrides.forEach((o) => usedOverrides.add(o));
+        add2(master, master.uid, start);
+        continue;
+      }
+      const rule = master.rrule.length === 1 ? parseRule(master.rrule[0]) : null;
+      if (master.rrule.length > 0 && !rule) {
+        reader.unsupported++;
+        overrides.forEach((o) => usedOverrides.add(o));
+        continue;
+      }
+      if (rule && budget.left <= 0) {
+        reader.unsupported++;
+        capped = true;
+        overrides.forEach((o) => usedOverrides.add(o));
+        continue;
+      }
+      const replaced = /* @__PURE__ */ new Map();
+      for (const o of overrides) {
+        const key = occurrenceKey(reader, o.recurrenceId, start);
+        if (key !== null) replaced.set(key, o);
+      }
+      const length = lengthOf(reader, master);
+      const spanDays = length ? "days" in length ? length.days : Math.ceil(length.ms / DAY_MS2) : 0;
+      const excluded = /* @__PURE__ */ new Set();
+      for (const ex of master.exdates) {
+        const key = occurrenceKey(reader, ex, start);
+        if (key) excluded.add(key);
+      }
+      const seen = /* @__PURE__ */ new Set();
+      const emit = (value) => {
+        var _a2;
+        if (value.days + spanDays < firstDay || value.days > lastDay2) return;
+        const key = occurrenceKey(reader, value, start);
+        if (key === null || seen.has(key)) return;
+        seen.add(key);
+        if (excluded.has(key) || excluded.has(`day:${value.days}`)) return;
+        const override = (_a2 = replaced.get(key)) != null ? _a2 : value.kind === "time" ? replaced.get(`day:${value.days}`) : void 0;
+        if (override) {
+          usedOverrides.add(override);
+          if (override.cancelled || !usable(override)) return;
+          if (master.private) override.private = true;
+          add2(override, master.uid, override.start);
+          return;
+        }
+        add2(master, master.uid, value);
+      };
+      emit(start);
+      if (rule) {
+        let count2 = 1;
+        const until = rule.until ? untilLimit(reader, rule.until, start) : null;
+        const finished = expandDays(rule, start.days, { from: firstDay - spanDays, to: lastDay2 }, budget, (day) => {
+          if (rule.count !== void 0 && count2 >= rule.count) return false;
+          const value = onDay(start, day);
+          if (until && !beforeUntil(reader, value, until)) return false;
+          if (day > lastDay2) return false;
+          count2++;
+          emit(value);
+          return true;
+        });
+        if (!finished) {
+          reader.unsupported++;
+          if (budget.left <= 0) capped = true;
+        }
+      }
+      for (const r of master.rdates) {
+        if (r.kind !== start.kind || !reader.zoneKnown(inZoneOf(r, start))) {
+          reader.unsupported++;
+          continue;
+        }
+        emit(inZoneOf(r, start));
+      }
+      for (const o of overrides) {
+        if (usedOverrides.has(o)) continue;
+        usedOverrides.add(o);
+        if (master.private) o.private = true;
+        if (!o.cancelled && usable(o)) add2(o, master.uid, o.start);
+      }
+    }
+    overridesByUid.forEach((list2, uid) => {
+      for (const o of list2) {
+        if (usedOverrides.has(o) || o.cancelled) continue;
+        if (usable(o)) add2(o, uid, o.start);
+      }
+    });
+    collected.sort((a, b) => a.ms - b.ms);
+    if (collected.length > options.maxEvents) capped = true;
+    return {
+      calendars,
+      events: collected.slice(0, Math.max(0, options.maxEvents)).map((c) => c.event),
+      unsupported: reader.unsupported,
+      capped
+    };
+  }
+  function untilLimit(reader, until, start) {
+    if (until.kind === "date" || start.kind === "date") return { kind: "day", days: until.days };
+    const ms = reader.instant(inZoneOf(until, start));
+    return ms === null ? null : { kind: "ms", ms };
+  }
+  function beforeUntil(reader, value, limit) {
+    if (limit.kind === "day") return value.days <= limit.days;
+    const limitDay = Math.floor(limit.ms / DAY_MS2);
+    if (value.days < limitDay - 1) return true;
+    if (value.days > limitDay + 1) return false;
+    const ms = reader.instant(value);
+    return ms !== null && ms <= limit.ms;
   }
 
   // src/gas/sheet-store.ts
@@ -7098,6 +8722,30 @@ Email from the TMA app is working.
       }
       this.rowCache.delete(table);
     }
+    /**
+     * Delete whole rows, bottom-up and one call per run of adjacent rows. Sheets refuses to delete
+     * every row below the frozen header, so a spare empty row is added first when that would happen.
+     */
+    deleteRows(table, rowNumbers) {
+      this.withLock(() => {
+        const layout = this.layout(table);
+        if (!layout) return;
+        const { sheet } = layout;
+        const lastRow = sheet.getLastRow();
+        const rows = Array.from(new Set(rowNumbers)).filter((n) => Number.isInteger(n) && n >= 2 && n <= lastRow).sort((a, b) => b - a);
+        if (rows.length === 0) return;
+        const keep = Math.max(1, sheet.getFrozenRows());
+        if (sheet.getMaxRows() - rows.length <= keep) sheet.insertRowsAfter(sheet.getMaxRows(), 1);
+        let i = 0;
+        while (i < rows.length) {
+          let j = i + 1;
+          while (j < rows.length && rows[j] === rows[j - 1] - 1) j += 1;
+          sheet.deleteRows(rows[j - 1], j - i);
+          i = j;
+        }
+        this.rowCache.delete(table);
+      });
+    }
     overwrite(table, rows) {
       this.withLock(() => {
         const layout = this.writableLayout(table, rows);
@@ -7217,6 +8865,198 @@ Email from the TMA app is working.
     }
   };
 
+  // src/gas/calendar.ts
+  var MAX_ICS_CHARS = 2e6;
+  var PAGE_SIZE = 250;
+  var MAX_PAGES = 10;
+  var EVENT_FIELDS = "nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)";
+  var IANA_ZONE = /^(?:(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc)\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?|(?:US|Canada|Mexico|Brazil|Chile)\/[A-Za-z_-]+|EST5EDT|CST6CDT|MST7MDT|PST8PDT)$/;
+  function pad3(n, width = 2) {
+    return String(n).padStart(width, "0");
+  }
+  var gasZones = (zone, w) => {
+    const basic = basicZones(zone, w);
+    if (basic !== null) return basic;
+    if (!IANA_ZONE.test(zone)) return null;
+    try {
+      const text2 = `${pad3(w.year, 4)}-${pad3(w.month)}-${pad3(w.day)}T${pad3(w.hour)}:${pad3(w.minute)}:${pad3(w.second)}.000`;
+      const d = Utilities.parseDate(text2, zone, WALL_CLOCK_FORMAT);
+      return d instanceof Date && !Number.isNaN(d.getTime()) ? d.getTime() : null;
+    } catch {
+      return null;
+    }
+  };
+  function calendarService() {
+    try {
+      return typeof Calendar !== "undefined" && Calendar && Calendar.Events ? Calendar : null;
+    } catch {
+      return null;
+    }
+  }
+  function errorText4(err) {
+    if (err instanceof Error) return err.message;
+    if (isRecord2(err) && typeof err.message === "string") return err.message;
+    return String(err);
+  }
+  function googleCalendarError(err) {
+    const message = errorText4(err);
+    if (/rate ?limit|quota|usageLimits|too many requests|\b429\b/i.test(message)) return new CalendarReadError("busy", "HTTP 429");
+    if (/insufficient (?:authentication )?scopes?|insufficient permission|required permissions|authorization is required|you do not have permission to call|invalid credentials|login required|\b401\b/i.test(
+      message
+    )) {
+      return new CalendarReadError("no_permission");
+    }
+    if (/accessNotConfigured|has not been used in project|API has not been|is disabled/i.test(message)) return new CalendarReadError("no_service");
+    if (/not ?found|\b404\b/i.test(message)) return new CalendarReadError("not_found", "HTTP 404");
+    if (/forbidden|\b403\b|access denied|not allowed|does not have permission/i.test(message)) return new CalendarReadError("not_shared", "HTTP 403");
+    if (/backend error|internal error|service unavailable|unavailable|\b50\d\b|timed? ?out|timeout/i.test(message)) return new CalendarReadError("busy");
+    if (/bad request|invalid|\b400\b/i.test(message)) return new CalendarReadError("not_found", "HTTP 400");
+    return new CalendarReadError("failed");
+  }
+  function googleTime(value) {
+    if (!isRecord2(value)) return null;
+    if (typeof value.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.date)) return { date: value.date };
+    if (typeof value.dateTime === "string") {
+      const t = Date.parse(value.dateTime);
+      if (!Number.isNaN(t)) return { dateTime: new Date(t).toISOString() };
+    }
+    return null;
+  }
+  function mapGoogleEvent(item) {
+    if (!isRecord2(item) || typeof item.id !== "string" || !item.id) return null;
+    const start = googleTime(item.start);
+    if (!start) return null;
+    const text2 = (v) => typeof v === "string" ? v : "";
+    const event = {
+      uid: item.id,
+      start,
+      title: text2(item.summary),
+      location: text2(item.location),
+      description: text2(item.description)
+    };
+    const end = googleTime(item.end);
+    if (end) event.end = end;
+    if (item.status === "cancelled") event.cancelled = true;
+    const type = typeof item.eventType === "string" ? item.eventType : "default";
+    if (item.visibility === "private" || item.visibility === "confidential" || type !== "default") event.private = true;
+    return event;
+  }
+  function readGoogleCalendar(id2, range) {
+    const service = calendarService();
+    if (!service) throw new CalendarReadError("no_service");
+    const events = [];
+    let unsupported = 0;
+    let capped = false;
+    let pageToken;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const args = {
+        timeMin: range.start.toISOString(),
+        timeMax: range.end.toISOString(),
+        singleEvents: true,
+        orderBy: "startTime",
+        showDeleted: false,
+        maxResults: PAGE_SIZE,
+        fields: EVENT_FIELDS
+      };
+      if (pageToken) args.pageToken = pageToken;
+      let response;
+      try {
+        response = service.Events.list(id2, args);
+      } catch (err) {
+        throw googleCalendarError(err);
+      }
+      const items = isRecord2(response) && Array.isArray(response.items) ? response.items : [];
+      for (const item of items) {
+        if (events.length >= range.maxEvents) {
+          capped = true;
+          break;
+        }
+        const event = mapGoogleEvent(item);
+        if (event) events.push(event);
+        else unsupported++;
+      }
+      pageToken = isRecord2(response) && typeof response.nextPageToken === "string" && response.nextPageToken ? response.nextPageToken : void 0;
+      if (capped || !pageToken) break;
+      if (events.length >= range.maxEvents || page === MAX_PAGES - 1) {
+        capped = true;
+        break;
+      }
+    }
+    return { events, unsupported, capped };
+  }
+  function readIcalLink(url, range) {
+    var _a;
+    if (!/^https:\/\/[^\s<>"'`]+$/i.test(url)) throw new CalendarReadError("bad_address");
+    let res;
+    try {
+      res = UrlFetchApp.fetch(url, {
+        method: "get",
+        muteHttpExceptions: true,
+        followRedirects: true,
+        validateHttpsCertificates: true,
+        headers: { Accept: "text/calendar, text/plain;q=0.9, */*;q=0.5" }
+      });
+    } catch (err) {
+      throw new CalendarReadError("link_failed", /time ?out|timed out/i.test(errorText4(err)) ? "no answer in time" : "no answer");
+    }
+    const code = res.getResponseCode();
+    if (code < 200 || code >= 300) throw new CalendarReadError("link_failed", `HTTP ${code}`);
+    const headers = res.getHeaders();
+    const length = Number((_a = headers["Content-Length"]) != null ? _a : headers["content-length"]);
+    if (Number.isFinite(length) && length > MAX_ICS_CHARS) throw new CalendarReadError("too_big", "over 2 MB");
+    const text2 = res.getContentText();
+    if (text2.length > MAX_ICS_CHARS) throw new CalendarReadError("too_big", "over 2 MB");
+    if (!looksLikeIcs(text2)) throw new CalendarReadError("not_ical");
+    const parsed = parseIcs(text2, { range, maxEvents: range.maxEvents, zones: gasZones });
+    if (parsed.calendars === 0) throw new CalendarReadError("not_ical");
+    return { events: parsed.events, unsupported: parsed.unsupported, capped: parsed.capped };
+  }
+  function createGasCalendarSource(deps) {
+    return {
+      read(ref, range) {
+        try {
+          return ref.kind === "google" ? readGoogleCalendar(ref.id, range) : readIcalLink(ref.url, range);
+        } catch (err) {
+          if (err instanceof CalendarReadError) {
+            deps.logger.info(`Calendar not read (${ref.kind}): ${err.problem}${err.detail ? `, ${err.detail}` : ""}`);
+            throw err;
+          }
+          deps.logger.error(`Calendar not read (${ref.kind})`, err instanceof Error ? err.name : "error");
+          throw new CalendarReadError("failed");
+        }
+      }
+    };
+  }
+
+  // src/gas/settings.ts
+  function readSetting(store, key) {
+    let value;
+    for (const row of store.read("Settings")) {
+      if (settingKey2(row.data.Key) === key) value = cellText(row.data.Value);
+    }
+    return value === void 0 || value === "" ? SETTING_DEFAULTS[key] : value;
+  }
+  function settingKey2(value) {
+    return cellText(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+  function readFlag(store, key) {
+    return parseFlag(readSetting(store, key), parseFlag(SETTING_DEFAULTS[key], false));
+  }
+  var TRUE_WORDS2 = ["true", "yes", "y", "x", "1", "on", "✓", "✔"];
+  var FALSE_WORDS2 = ["false", "no", "n", "0", "off"];
+  function parseFlag(value, fallback) {
+    const word = value.trim().toLowerCase();
+    if (TRUE_WORDS2.includes(word)) return true;
+    if (FALSE_WORDS2.includes(word)) return false;
+    return fallback;
+  }
+  function cellText(value) {
+    if (value === null || value === void 0) return "";
+    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? "" : value.toISOString();
+    return String(value).trim();
+  }
+
   // src/gas/twilio.ts
   var MAX_SMS_CHARS = 1600;
   var MESSAGING_SERVICE_SID = /^MG[0-9a-f]{32}$/i;
@@ -7315,6 +9155,7 @@ Email from the TMA app is working.
           secret: secrets.get("PAYPAL_SECRET")
         })
       }),
+      calendars: createGasCalendarSource({ logger }),
       logger,
       withLock
     };
@@ -7653,6 +9494,7 @@ ${next}`);
       ...pushStatus(services, health),
       `Text messages (Twilio): ${services.sms.enabled() ? "configured" : "not configured"}; SMS setting ${yes(services.flag("SMS_ENABLED"))}`,
       ...emailStatus(services, health),
+      ...safely2(() => calendarStatusLines(services), ["Calendars: could not be checked (see Executions)"]),
       `Version: ${VERSION}`
     ];
     if (!present.includes("TOKEN_SECRET")) lines.push("", "TOKEN_SECRET is missing: run TMA App → Set up / repair tabs.");
@@ -7708,6 +9550,8 @@ ${next}`);
       `reminders: ${report.remindersSent}`,
       `sent push ${n.push}, email ${n.email}, sms ${n.sms}`
     ];
+    const c = report.calendars;
+    if (c) parts.push(`calendar events: ${c.added} added, ${c.updated} changed, ${c.removed} removed`);
     if (report.waiting) parts.push(`${report.waiting} row(s) still being edited in the sheet go out at a later sync`);
     if (report.errors.length > 0) parts.push(`${report.errors.length} error(s), see Log`);
     return `${parts.join(" · ")}.`;

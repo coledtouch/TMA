@@ -4,6 +4,7 @@
  */
 import type { SecretName, SettingKey } from '../shared/schema';
 import type { Cache, Crypto, LockOptions, Logger, Secrets, Services } from '../server/services';
+import { createGasCalendarSource } from './calendar';
 import { createGasMailer, type GasMailer } from './mail';
 import { createPayPalGateway } from './paypal';
 import { createPushRelaySender, type PushRelaySender } from './push-relay';
@@ -74,6 +75,7 @@ export function createGasServices(): GasServices {
         secret: secrets.get('PAYPAL_SECRET'),
       }),
     }),
+    calendars: createGasCalendarSource({ logger }),
     logger,
     withLock,
   };

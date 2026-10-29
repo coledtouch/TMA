@@ -9,6 +9,8 @@
  * config; tests pass in node:crypto (`installGasFakes(nodeCrypto)`).
  */
 
+import type { CalendarEvent, CalendarTime } from '../../server/services';
+
 type Bytes = number[];
 
 interface Digest {
@@ -339,6 +341,15 @@ export class FakeSheet {
     return this;
   }
 
+  /** Like Sheets: rows below move up; deleting every row below the frozen ones is refused. */
+  deleteRows(rowPosition: number, howMany: number): void {
+    if (rowPosition < 1 || howMany < 1 || rowPosition + howMany - 1 > this.maxRows) throw new Error('Those rows are out of bounds.');
+    if (this.maxRows - howMany <= this.frozenRows) throw new Error('Sorry, it is not possible to delete all non-frozen rows.');
+    this.ops.push(`deleteRows ${rowPosition}x${howMany}`);
+    this.cells.splice(rowPosition - 1, howMany);
+    this.maxRows -= howMany;
+  }
+
   insertColumnsAfter(_after: number, howMany: number): FakeSheet {
     this.maxColumns += howMany;
     return this;
@@ -493,6 +504,7 @@ export interface FakeRequest {
 export interface FakeReply {
   code: number;
   body?: unknown;
+  headers?: Record<string, string>;
 }
 
 export class FakeUrlFetch {
@@ -515,8 +527,51 @@ export class FakeUrlFetch {
     const reply = this.handler(request);
     const text = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body ?? {});
     if (reply.code >= 400 && !request.muteHttpExceptions) throw new Error(`Request failed with code ${reply.code}`);
-    return { getResponseCode: () => reply.code, getContentText: () => text, getHeaders: () => ({}) };
+    return { getResponseCode: () => reply.code, getContentText: () => text, getHeaders: () => ({ ...(reply.headers ?? {}) }) };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Calendar advanced service (Calendar API v3)
+// ---------------------------------------------------------------------------
+
+export interface FakeCalendarCall {
+  calendarId: string;
+  args: Record<string, unknown>;
+}
+
+/** Events as Calendar.Events.list returns them (items with id, summary, start.date/dateTime…). */
+export function calendarApiItems(events: readonly CalendarEvent[]): Array<Record<string, unknown>> {
+  const time = (t: CalendarTime) => ('date' in t ? { date: t.date } : { dateTime: t.dateTime, timeZone: 'America/New_York' });
+  return events.map((e) => {
+    const item: Record<string, unknown> = {
+      id: e.uid,
+      status: e.cancelled ? 'cancelled' : 'confirmed',
+      summary: e.title,
+      location: e.location,
+      description: e.description,
+      start: time(e.start),
+    };
+    if (e.end) item.end = time(e.end);
+    if (e.private) item.visibility = 'private';
+    return item;
+  });
+}
+
+export class FakeCalendarService {
+  readonly calls: FakeCalendarCall[] = [];
+  /** Answer one Events.list call: the API's response object, or throw like the service does. */
+  handler: (call: FakeCalendarCall) => unknown = () => {
+    throw new Error('API call to calendar.events.list failed with error: Not Found');
+  };
+
+  readonly Events = {
+    list: (calendarId: string, args: Record<string, unknown> = {}): unknown => {
+      const call = { calendarId, args: { ...args } };
+      this.calls.push(call);
+      return this.handler(call);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +751,8 @@ export interface GasFakes {
   lock: FakeLock;
   mail: FakeMail;
   scriptApp: FakeScriptApp;
+  /** The Calendar advanced service (delete globalThis.Calendar to act out an old manifest). */
+  calendar: FakeCalendarService;
   session: { email: string };
   /** Session.getScriptTimeZone(): the host's zone, since `new Date(y, m, d)` in the code under test uses it. */
   scriptTimeZone: string;
@@ -719,6 +776,7 @@ const GLOBAL_NAMES = [
   'ContentService',
   'HtmlService',
   'Utilities',
+  'Calendar',
 ] as const;
 
 /** Put fresh fakes on globalThis and return handles to inspect/steer them. */
@@ -732,6 +790,7 @@ export function installGasFakes(host: HostCrypto): GasFakes {
     lock: new FakeLock(),
     mail: new FakeMail(),
     scriptApp: new FakeScriptApp(),
+    calendar: new FakeCalendarService(),
     session: { email: 'treasurer@example.com' },
     scriptTimeZone: hostTimeZone(),
     formatDateCalls: [],
@@ -754,6 +813,7 @@ export function installGasFakes(host: HostCrypto): GasFakes {
       },
     },
     UrlFetchApp: fakes.fetch,
+    Calendar: fakes.calendar,
     CacheService: { getScriptCache: () => fakes.cache },
     PropertiesService: { getScriptProperties: () => fakes.properties },
     LockService: { getScriptLock: () => fakes.lock },

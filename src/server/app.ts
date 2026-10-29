@@ -7,6 +7,7 @@ import { isAdmin } from './access';
 import { adminOverview, announce, reviewHousehold } from './admin';
 import { authenticate, requestCode, verifyCode } from './auth';
 import { buildBootstrap } from './bootstrap';
+import { fetchCalendars, type CalendarFetch } from './calendars';
 import { createCtx, inWriteLock, type Ctx } from './context';
 import { ApiError, badRequest, forbidden } from './errors';
 import { saveHousehold } from './household';
@@ -32,7 +33,9 @@ interface Route {
   write?: boolean;
   /** Returns a TickReport: add what was delivered after the lock to its counts. */
   tick?: boolean;
-  run(ctx: Ctx, email: string, params: Params): unknown;
+  /** Network reads done before taking the write lock; the result is passed to run(). */
+  prepare?(ctx: Ctx): unknown;
+  run(ctx: Ctx, email: string, params: Params, prepared?: unknown): unknown;
 }
 
 const PUBLIC_ROUTES: Record<PublicAction, (ctx: Ctx, params: Params) => unknown> = {
@@ -61,7 +64,13 @@ const ROUTES: Record<PrivateAction, Route> = {
   'admin.decideRedemption': { admin: true, write: true, run: decideRedemption },
   'admin.reviewHousehold': { admin: true, write: true, run: reviewHousehold },
   'admin.announce': { admin: true, write: true, run: announce },
-  'admin.runSync': { admin: true, write: true, tick: true, run: (ctx) => runSync(ctx) },
+  'admin.runSync': {
+    admin: true,
+    write: true,
+    tick: true,
+    prepare: fetchCalendars,
+    run: (ctx, _email, _params, prepared) => runSync(ctx, prepared as CalendarFetch | null),
+  },
   // Read-only (no lock); the roster alone takes the lock briefly for its Log row.
   'admin.report': { admin: true, run: runReport },
 };
@@ -86,12 +95,14 @@ function dispatch(services: Services, request: unknown): unknown {
   const email = authenticate(ctx, req.token);
   if (route.admin && !isAdmin(ctx, email)) forbidden('Only TMA board members can do that.');
   if (!route.write) return route.run(ctx, email, p);
+  // Slow reads (linked calendars) happen before the lock, so they never keep other writes waiting.
+  const prepared = route.prepare ? route.prepare(ctx) : undefined;
   // Sheet writes hold the script lock; notifications go out after it is released (also when the
   // action failed after queuing some, e.g. an admin alert about a payment).
   ctx.deliveries = [];
   let result: unknown;
   try {
-    result = inWriteLock(ctx, () => route.run(ctx, email, p));
+    result = inWriteLock(ctx, () => route.run(ctx, email, p, prepared));
   } finally {
     const sent = flushDeliveries(ctx);
     if (route.tick && result) addCounts((result as TickReport).notifications, sent);
@@ -117,7 +128,8 @@ export function createApp(services: Services): App {
     },
 
     syncTick(): TickReport {
-      return tick(services, runSync);
+      // Linked calendars are read before the write lock is taken (network), then applied under it.
+      return tick(services, runSync, fetchCalendars);
     },
 
     dailyTick(): TickReport {
@@ -136,15 +148,16 @@ export function createApp(services: Services): App {
  * notifications it queued with the lock released, so families' writes (a PayPal capture, saving
  * settings) never wait behind hundreds of emails and pushes.
  */
-function tick(services: Services, run: (ctx: Ctx) => TickReport): TickReport {
+function tick<P>(services: Services, run: (ctx: Ctx, prepared?: P) => TickReport, prepare?: (ctx: Ctx) => P): TickReport {
   let ctx: Ctx | null = null;
   try {
     ctx = createCtx(services);
     const c = ctx;
+    const prepared = prepare ? prepare(c) : undefined;
     c.deliveries = [];
     let report: TickReport | undefined;
     try {
-      report = inWriteLock(c, () => run(c));
+      report = inWriteLock(c, () => run(c, prepared));
     } finally {
       const sent = flushDeliveries(c);
       if (report) addCounts(report.notifications, sent);

@@ -12,6 +12,7 @@ import { installGasFakes, uninstallGasFakes, type FakeOutput, type GasFakes } fr
 
 const CODE_PATH = fileURLToPath(new URL('../../apps-script/Code.js', import.meta.url));
 const code = existsSync(CODE_PATH) ? readFileSync(CODE_PATH, 'utf8') : '';
+const MANIFEST_PATH = fileURLToPath(new URL('../../apps-script/appsscript.json', import.meta.url));
 
 const ENTRY_POINTS = [
   'doGet',
@@ -38,6 +39,7 @@ const APPS_SCRIPT_GLOBALS = [
   'ContentService',
   'HtmlService',
   'Utilities',
+  'Calendar',
 ];
 
 /** A service stub that fails the test if module code touches it while loading. */
@@ -52,7 +54,39 @@ function untouchable(name: string): unknown {
   );
 }
 
+describe('apps-script/appsscript.json', () => {
+  const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as {
+    timeZone: string;
+    dependencies: { enabledAdvancedServices?: unknown[] };
+    oauthScopes: string[];
+  };
+
+  it('enables the Calendar advanced service (v3) and asks only for read-only calendar access on top of the rest', () => {
+    expect(manifest.timeZone).toBe('America/New_York');
+    expect(manifest.dependencies.enabledAdvancedServices).toEqual([{ userSymbol: 'Calendar', serviceId: 'calendar', version: 'v3' }]);
+    expect(manifest.oauthScopes).toEqual([
+      'https://www.googleapis.com/auth/spreadsheets.currentonly',
+      'https://www.googleapis.com/auth/script.container.ui',
+      'https://www.googleapis.com/auth/script.send_mail',
+      'https://www.googleapis.com/auth/script.external_request',
+      'https://www.googleapis.com/auth/script.scriptapp',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/calendar.readonly',
+    ]);
+    // Never write access to calendars, Drive or the whole of Sheets.
+    expect(manifest.oauthScopes.join(' ')).not.toMatch(/auth\/calendar(\.events)?(\s|$)|auth\/drive|auth\/spreadsheets(\s|$)/);
+  });
+});
+
 describe.skipIf(!code)('apps-script/Code.js', () => {
+  it('contains the linked-calendar code: the sync, the iCal reader and the Calendar service adapter', () => {
+    for (const name of ['function fetchCalendars(', 'function syncCalendars(', 'function calendarStatusLines(', 'function parseIcs(', 'function readGoogleCalendar(', 'function readIcalLink(']) {
+      expect(code, name).toContain(name);
+    }
+    // The advanced service is looked up when used, never at load time.
+    expect(code).toContain('typeof Calendar !== "undefined"');
+  });
+
   it('is a single classic script with no module syntax or browser/Node APIs', () => {
     expect(code.startsWith('// GENERATED FILE')).toBe(true);
     expect(code).not.toMatch(/^\s*import[\s{*]/m);
@@ -346,6 +380,37 @@ describe.skipIf(!code)('apps-script/Code.js', () => {
       } finally {
         gas.fetch.handler = handler;
       }
+    });
+
+    it('copies a linked Google Calendar into Events, shows it in the app with its Source, and lists it in Status', () => {
+      const ymd = (days: number) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+      const calendars = gas.spreadsheet.getSheetByName('Calendars')!;
+      expect(calendars.dump()[0]).toEqual(['Name', 'Calendar', 'Schools', 'Groups', 'On']);
+      calendars.write(2, 1, 'Music Dept');
+      calendars.write(2, 2, 'abc123@group.calendar.google.com');
+      gas.calendar.handler = ({ calendarId }) => {
+        expect(calendarId).toBe('abc123@group.calendar.google.com');
+        return {
+          items: [
+            { id: 'pops', summary: 'Pops concert', description: '<p>Doors at 6:30.</p><p>Groups: Band</p>', start: { date: ymd(10) }, end: { date: ymd(11) } },
+            { id: 'staff', summary: 'Staff only', visibility: 'private', start: { date: ymd(12) } },
+          ],
+        };
+      };
+      g.syncTick();
+      const events = gas.spreadsheet.getSheetByName('Events')!.dump();
+      const header = events[0] as string[];
+      const pops = events.find((r) => r[header.indexOf('Title')] === 'Pops concert')!;
+      expect(pops[header.indexOf('Source')]).toBe('Music Dept');
+      expect(pops[header.indexOf('Details')]).toBe('Doors at 6:30.');
+      expect(pops[header.indexOf('Ensembles')]).toBe('Band');
+      expect(events.some((r) => r[header.indexOf('Title')] === 'Staff only')).toBe(false);
+
+      const home = post({ action: 'me.bootstrap', params: {}, token: parentToken });
+      expect(home.data.events.find((e: { title: string }) => e.title === 'Pops concert')).toMatchObject({ source: 'Music Dept' });
+
+      g.showTmaStatus();
+      expect(gas.ui.alerts.at(-1)?.message).toContain('Calendar "Music Dept": OK ✓, 1 event (1 private skipped)');
     });
 
     it('does not tell families their balance fell to $0 when the Ledger "Amount" header is renamed', () => {

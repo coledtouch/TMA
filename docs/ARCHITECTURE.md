@@ -49,8 +49,9 @@ will maintain it and for contributors adding features. Contracts live in code:
            │ Web Push                    │ Google Sheet (treasurer's ledger; Devices │
 ┌──────────┴────────────┐                │   tab = browsers' push subscriptions)     │
 │ Browser push services │                │ MailApp (email fallback), time triggers   │
-│ (Google, Apple,       │                │ UrlFetchApp → push Worker, PayPal REST,   │
-│ Mozilla, Microsoft)   │                │               Twilio (optional, paid)     │
+│ (Google, Apple,       │                │ Calendar API v3, iCal links (read-only)   │
+│ Mozilla, Microsoft)   │                │ UrlFetchApp → push Worker, PayPal REST,   │
+│                       │                │               Twilio (optional, paid)     │
 └──────────▲────────────┘                └─────────────────────┬─────────────────────┘
            │ encrypted, VAPID-signed                           │ POST /send (≤ 5 each), /email
 ┌──────────┴───────────────────────────────────────────────────▼─────────────────────┐
@@ -84,6 +85,9 @@ will maintain it and for contributors adding features. Contracts live in code:
   `Timberlane Music Association <noreply@mytma.org>` through Cloudflare Email Sending; replies go to
   Settings `SUPPORT_EMAIL`. MailApp (TMA's Gmail) is the fallback, and the only route with
   `EMAIL_VIA = gmail`. See §6 "Email delivery".
+* **Linked calendars** (optional): the sheet's **Calendars** tab lists Google Calendars (read through
+  the Calendar advanced service, read-only scope) and iCal links (`UrlFetchApp`); the 15-minute sync
+  copies their events into the Events tab (§7 "Linked calendars").
 * **Demo mode**: the browser runs the *same backend core* (`src/server`) against an in-memory,
   localStorage-persisted copy of the sample sheet (`src/demo`). PayPal and push are simulated. A build
   without `VITE_API_URL` is always the demo. A live build opens the demo when the address has `?demo`
@@ -142,8 +146,15 @@ e2e/          Playwright tests (demo, demo inside a live build) and README scree
   non-numeric count is 0. Timestamps are read like every other app timestamp (`parseTimestamp`;
   typed text is New York time) and written as `Date`s, so they round-trip whatever the spreadsheet's
   time zone (see "Dates").
+* **Events**: a row needs a Date and a Title. `Source` (shown in the app as `EventItem.source`) and
+  `Calendar Event` are filled only on rows the app copies from a linked calendar (§7); rows without a
+  Source are the treasurer's and the app never changes them. `Groups` is accepted for `Ensembles`.
+* **Calendars**: `Name | Calendar | Schools | Groups | On` (aliases: Calendar ID / Calendar Link / iCal
+  Link / Link / Address; Ensembles; Enabled / Active). `On` blank = on. Rows with no Name and no
+  Calendar are ignored. Read by §7 "Linked calendars".
 * **Never** store derived values in treasurer tabs except the documented columns
-  (Redemptions.Status/Decided/…, Announcements.Sent, Families/Students rows created by sign-up).
+  (Redemptions.Status/Decided/…, Announcements.Sent, Families/Students rows created by sign-up, Events
+  rows with a Source).
 
 ### Computations (src/server/ledger.ts)
 
@@ -243,7 +254,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 | `admin.decideRedemption` | Pending only (`CONFLICT` otherwise). Approved: if the treasurer already typed a Ledger row with Reference = request id, post nothing more and skip the checks below (one shared check with the sync, so a request is never debited twice). Otherwise re-validate available funds (excluding this request) and remaining; if short → `CONFLICT` with a clear message. Append a Ledger row {Date today, StudentID, Type 'Redemption', Description 'Applied to <activity name>', Amount −x, ActivityID, Reference = request id, Entered By = admin email}. Update the redemption row (Status, Decided, Decided By, Admin Note, Notified=now). Update `_Snapshot` for that student so the sync doesn't double-notify. Notify the family (topic `payments`). Denied: update the row and notify. |
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
 | `admin.announce` | Refuse (`CONFLICT` "already sent N minutes ago") the same title and body sent within the last 15 minutes, so a retry after the app gave up waiting can't send it twice. Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. The app waits up to 6 minutes for this and for `admin.runSync` (30 s for everything else). |
-| `admin.runSync` | Run `syncTick()` and return its report. |
+| `admin.runSync` | Run `syncTick()` and return its report. As in the scheduled run, linked calendars are read before the write lock is taken (the route's `prepare`) and applied under it. |
 | `admin.report` | Read-only, no write lock. Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
 
 ### 5.1 Bootstrap
@@ -453,7 +464,9 @@ Use `formatCents`; use first names only for students in notifications (privacy o
 ## 7. Scheduled work (src/server/sync.ts)
 
 `syncTick()` runs every 15 minutes (Apps Script time trigger). Each step catches its own errors
-into `report.errors` so one failure doesn't block the rest. Rules for every step:
+into `report.errors` so one failure doesn't block the rest. Before it takes the write lock it reads
+the linked calendars (network; `fetchCalendars`), and applies them as its last step under the lock
+(see "Linked calendars" below). Rules for every step:
 
 * **Settle first.** Sheets saves each cell as it is typed, so a row typed in the sheet (an
   announcement, or an Approved/Denied decision) is acted on only once its content (title, body, date,
@@ -496,7 +509,130 @@ into `report.errors` so one failure doesn't block the rest. Rules for every step
    N in REMINDER_DAYS, if dueDate − today == N days → send unless `_Sent` has
    `rem:<studentId>:<activityId>:<N>`. Record the key.
 5. **Event reminders**: events whose date is tomorrow → matching recipients (topic `announcements`),
-   key `evt:<eventId>`.
+   key `evt:<eventId>`. Rows copied from linked calendars are ordinary Events rows here: their ID
+   (`CAL-…`) stays the same while the event keeps its start, so editing it in the calendar after the
+   reminder went out never sends it again; a new start (another day or time) is a new row with a new
+   ID, which gets its own reminder.
+
+### Linked calendars (src/server/calendars.ts, calendar-rows.ts, ics.ts)
+
+The **Calendars** tab (§3) lists Google Calendars and iCal links. Every `syncTick()` and
+`admin.runSync` copies their events into **Events**, so News (§5.1) and the event reminders (step 5)
+work for them unchanged.
+
+* **Read before the lock.** `fetchCalendars(ctx)` runs before `inWriteLock` (`tick`'s `prepare`, the
+  route's `prepare`). It reads Settings and Calendars (no lock needed) and each calendar through the
+  `CalendarSource` port, `services.calendars.read(ref, {start, end, maxEvents})`. The range is New York
+  yesterday 00:00 to the end of today + `CALENDAR_DAYS` (Settings, default 180, 7–400; anything else
+  means 180). At most `MAX_CALENDARS` = 10 calendars and `MAX_EVENTS_PER_CALENDAR` = 500 events each.
+  No new calendar is started after 120 s (it is reported and tried next time). A calendar that fails
+  becomes a plain reason and never stops the others or the rest of the sync. It never throws; no
+  Calendars tab → null. Under the lock `syncCalendars` runs last, on a fresh read of Events
+  (`inWriteLock` resets the Db). With null (the tab renamed or deleted) it changes nothing, but while
+  Events still has upcoming copied rows (Date from today on) they are no longer kept up to date, so it
+  adds `Calendars: The Calendars tab is missing …` to `errors` every run and the Log once a day: rename
+  it back, or run *Set up / repair tabs*, which adds an empty tab (the next sync then removes those
+  rows). The memory Store, like the sheet, reports a tab it never had as missing (`columns` → null).
+* **Calendar column** (`parseCalendarAddress`): a Google Calendar ID (`abc123@group.calendar.google.com`,
+  an account's own address, `#` allowed), the ID inside a Google Calendar embed link (`src=`) or shared
+  link (`cid=`, base64); an `https://` link (or `webcal://`, read as https) is an iCal link; `http://`
+  and anything else get a reason. Identity: `calendarHash` = first 10 hex of SHA-256 of
+  `google:<id, lower-cased>` or `ical:<url>`. The same calendar on a later row is skipped (a note).
+  `On` FALSE: not read. Schools/Groups (`audienceNames`): blank or `Everyone`/`All` = everyone; names
+  in Settings `SCHOOLS`/`ENSEMBLES` in their Settings spelling, others left out with a note; when no
+  name in the cell is known, the names are kept as typed (as `parseList` keeps them on a typed row), so
+  they match no family's choices: a misspelling never turns a calendar into "everyone".
+* **Event → row** (`buildCalendarRow`). Cancelled and private events are skipped (iCal
+  `STATUS:CANCELLED`, `CLASS:PRIVATE`/`CONFIDENTIAL`; Google `status` cancelled, `visibility`
+  private/confidential, and any `eventType` but `default`: out of office, focus time, working
+  location, birthdays, from Gmail). `Date` = start date in New York; `Time` = `timeText` ("7:00 PM", what
+  `parseTimeText` reads back from a Sheets time), blank for all-day. Multi-day events keep their start
+  date and `Details` starts `Through <Mon D>.` (all-day ends are exclusive; a timed end at midnight
+  counts as the day before). `Details` = the description through `htmlToText` (`<br>` and the end of
+  `<p>`, `<div>`, `<li>`… → line breaks, `• ` before list items, a link keeps its http(s) address in
+  brackets, scripts and other tags dropped, entities decoded) and `cleanText`, at most 1000 characters.
+  `Title` ≤ 120 (`Untitled event` when blank), `Location` ≤ 200. Audience: the calendar's
+  Schools/Groups, each replaced by a description line `Schools:` or `Groups:` / `Ensembles:` (removed
+  from Details), read with `audienceNames` too: unknown names are left out (a note), a line with no
+  known name keeps its names as typed (matching no family, never the calendar's list or everyone), a
+  blank line keeps the calendar's list, `Everyone`/`All` empties it (everyone). `Source` = the calendar's Name (≤ 40). `Calendar Event`
+  = `<hash>:<event id>:<start>` (the id as is when it matches `[A-Za-z0-9._@+-]{1,80}`, else `h` + 16
+  hex of its SHA-256; start `YYYYMMDD` or UTC `YYYYMMDDTHHMMSSZ`). `ID` = `CAL-` + first 10 hex of
+  SHA-256 of the key. Events whose start date is outside the range are dropped; a key repeated in one
+  calendar is copied once. The same event on two calendars (`calendarEventIdentity`: the key without
+  its calendar hash, so the same event id and start, as when one calendar is invited to an event of
+  the other, or two iCal feeds share a UID) is copied once, as the row of the calendar listed first, for both calendars' families
+  (`mergeAudience`: each list the union of both, or blank when either is blank, never narrower than
+  either). So News shows it once and its reminder goes out once.
+* **Apply** (`planCalendarRows`, on the fresh read). The app's rows are those with a `Source` **and** a
+  `Calendar Event` starting with 10 hex and `:`. Rows of a calendar read this run: a wanted key → its
+  first row gets only the changed columns (compared as read back: `parseDate`, `parseTimeText`,
+  `parseList`), further rows with that key are deleted; an unwanted key → deleted when its Date is in
+  the range (yesterday through the end), so rows of past events stay as history. Wanted keys with no
+  row → appended in one write. Rows of a calendar no longer read (row removed, `On` FALSE, over the
+  limit) → deleted when in the range. Rows of a calendar that couldn't be read → untouched. Rows typed
+  by hand (no Source) → never touched. Order: updates, then deletes (bottom-up), then the append. The
+  treasurer can sort, insert or delete rows while these writes run (the script lock doesn't stop
+  that), so no write uses a row number read earlier: each update reads Events again (`Db.refresh`) and
+  goes to the row that now holds its key (`rowHolding`; none → skipped, retried next sync), and the
+  deletes are planned again (`planCalendarRows`) on a read made just before `deleteRows`. At
+  most `MAX_ROW_CHANGES` = 300 updates and deletes per run; the rest at the next sync (a note).
+  Formula-looking text needs nothing special: the SheetStore writes text starting with `=` `+` `-` `@`
+  `'` with Sheets' text marker (§9).
+* **Write only when something changed.** A fingerprint (SHA-256 of the range, the hashes read and
+  failed, and every wanted row) equal to the cache's `calendar-sync:fingerprint` (6 h) means the
+  Events tab isn't even read. It is stored only after a complete apply. With it forgotten, an unchanged
+  sheet still plans nothing, so a second run never writes. A calendar row edited by hand is put back
+  within 6 hours, or at the first sync of the day (the range moves).
+* **Columns.** With a calendar listed, Events needs Date, Title, Source and Calendar Event (else the
+  error asks to run *Set up / repair tabs*, which adds them); Calendars needs Calendar.
+* **Report and Log.** `TickReport.calendars` = {read, failed, added, updated, removed} whenever a
+  calendar is listed. Each calendar that can't be read adds `Calendar "<Name>": <reason>.` to
+  `errors` every run; notes (more than 500 events, unreadable events or rules, unknown names, a
+  repeated calendar, more than 10) go to `TickReport.notes`. The Log gets one `calendar` row when rows
+  changed (`Calendar events copied into Events: 2 added, 1 changed, 0 removed (Music Dept)`), and per
+  calendar at most one row per New York day for a failure (`"<Name>" could not be read: …`) and one
+  for notes (`"<Name>" note: …`): remembered in the cache for 6 hours, then found in the Log tab itself.
+  The same once-a-day rule applies to the missing Calendars tab (`The Calendars tab is missing …`).
+* **Reasons** (`calendarProblemText`, plain words for Status, reports and the Log): `not_found` (404:
+  "not found, or not shared with this Google account"; Google answers the same for both),
+  `not_shared` (403), `no_service` ("the Google Calendar service is missing … Paste the new
+  appsscript.json"), `no_permission` (the read-only scope not approved yet), `busy` (429, 5xx),
+  `link_failed` (HTTP code, or "no answer"), `not_ical`, `too_big`, and the Calendar column's own
+  problems (blank, `http://`, not an ID or link).
+* **Status** (`calendarStatusLines(services)`, *TMA App → Status*): reads every calendar now, outside
+  any lock, and writes nothing. One line per Calendars row: `Calendar "<Name>": OK ✓, N events (P
+  private skipped; …; schools/groups not in Settings: …)`, `off (On is FALSE)`, or `✗ <reason>`. It reads Settings with
+  `calendarSettings` (lists and `CALENDAR_DAYS` only), so it never asks the push Worker or PayPal.
+
+**iCal reader** (`parseIcs(text, {range, maxEvents, zones, defaultZone?})`, pure): RFC 5545 line
+unfolding, parameters (quoted values), TEXT escapes; only VEVENTs directly in a VCALENDAR (VALARM and
+other nested components ignored; a missing END is tolerated). DTSTART/DTEND/DURATION as all-day dates
+(`VALUE=DATE`), UTC (`Z`), `TZID` (quoted, Windows names such as *Eastern Standard Time*, Outlook display
+names such as *(UTC-05:00) Eastern Time (US & Canada)*, and prefixed ids like
+`/mozilla.org/…/America/New_York` are mapped to IANA names; a TZID still unknown is read from the file's
+own `VTIMEZONE` when it describes a US or Canadian zone on today's rules (standard offset −4 to −9 hours,
+daylight saving one hour ahead from `BYMONTH=3;BYDAY=2SU` to `BYMONTH=11;BYDAY=1SU`, `zoneFromVtimezone`)
+or UTC, Arizona or Hawaii (no daylight saving)) or floating (the calendar's `X-WR-TIMEZONE` when known,
+else New York). Zones come from a `ZoneResolver`: `basicZones` (UTC and New
+York, no Intl), `intlZones` (memory/demo), `gasZones` (Apps Script, §9); an unknown zone skips the
+event. Repeats: `RRULE` FREQ DAILY/WEEKLY/MONTHLY/YEARLY with INTERVAL, COUNT, UNTIL (inclusive; a
+floating UNTIL is read in the series' zone), BYDAY (plain weekdays; with an ordinal like `2TU`/`-1FR`
+only for MONTHLY, or YEARLY with BYMONTH), WKST, and for MONTHLY/YEARLY BYMONTHDAY, BYMONTH (YEARLY) and
+BYSETPOS; DTSTART is always the first occurrence; days a month doesn't have (the 31st, Feb 29) are
+skipped; expansion keeps the local wall-clock time across daylight-saving changes. `RDATE` and `EXDATE`
+(dates, or times in any zone; PERIOD values are unreadable). `RECURRENCE-ID` overrides replace their
+occurrence (moved, renamed; `STATUS:CANCELLED` removes it; `RANGE=THISANDFUTURE` is counted and applied
+to that occurrence only); an override that matches no occurrence, or whose series isn't in the file,
+stands alone. A changed occurrence of a private series is private too, with or without its own `CLASS`. Anything else (another FREQ or BY… part, two RRULEs, an unknown zone, a missing or bad
+DTSTART) skips the whole event or series and is counted in `unsupported`, never guessed. Only
+occurrences overlapping the range are returned, soonest first, at most `maxEvents` (`capped`).
+Occurrences more than a day outside the range need no time-zone work. A rule without COUNT starts one
+period before the range (nothing earlier needs counting), and every expansion stops once a period starts
+after the range, also for a rule that never matches (February 30), so a daily series from 1900 is cheap.
+Limits: 200,000 lines, 20,000 VEVENTs, 100 VTIMEZONEs, 50,000 repeat periods per series, 500,000 periods
+and candidate days for the whole file (`MAX_WORK`: past it the remaining series are counted in
+`unsupported` and `capped` is set, so a hostile 2 MB file parses in about a second), 20,000 occurrences.
 
 ## 8. Setup (src/server/setup.ts)
 
@@ -506,7 +642,8 @@ with their defaults and the `Notes`. A Settings value that still equals an earli
 default (`updatedSettings` in the report). Today that is the old `PRIVACY_NOTE`, from before the app noted
 sign-ins. Any other text the treasurer typed is left alone. Create TOKEN_SECRET if missing. If `seedSampleData` and the Families,
 Students and Ledger tables are all empty → write the sample data from `src/server/sample-data.ts`.
-Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / repair tabs*) also creates
+Return the `SetupReport`. On an existing sheet Set up also adds the Calendars tab, the Events
+`Source` and `Calendar Event` columns (`addedColumns`) and `CALENDAR_DAYS`. The Apps Script wrapper (`setupTma`, menu *Set up / repair tabs*) also creates
 `PUSH_RELAY_SECRET` and links the push Worker (§9).
 
 ### Sample data (also the demo's data), fictional people only
@@ -536,6 +673,14 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   TMA monthly meeting (+~12 days, 7:00 PM, TRHS Library, everyone); Jazz Night.
 * Settings: defaults + `ADMIN_EMAILS = treasurer@example.com`, `ONLINE_PAYMENTS = TRUE`,
   `PAYPAL_CLIENT_ID = demo` (demo only; production keeps defaults).
+* Demo only (like the demo device): a linked calendar, Calendars row `Music Dept` →
+  `music-dept@example.com` (an example.com address, so it can't belong to anybody), and the two Events
+  rows a sync of it writes (`sampleCalendarEvents(today)` through `buildCalendarRow`): "Spring musical
+  auditions" (+9 days, 3–5 PM, HTML description whose `Schools: High School` / `Groups: Chorus` lines
+  pick its audience) and "Winter break: no rehearsals" (all-day, +55 to +63, "Through …"); a third,
+  private event is never copied. The memory services' default `CalendarSource`
+  (`createSampleCalendarSource`) and the demo serve those events from the day the data was made, so a
+  demo sync changes nothing. Production seeding has no Calendars rows.
 * Demo only (like the demo device): Sign-ins rows for `parent@example.com` (2 sign-ins, opened the app
   yesterday), `ortiz@example.com` (signed up 2 days ago) and `treasurer@example.com` (no household,
   3 sign-ins), so *Who's using the app* has something to show. The Nguyens never signed in.
@@ -624,7 +769,28 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
   *Email key for Cloudflare (Worker secret EMAIL_KEY): <hex>* (the SHA-256, never the secret) unless
   `EMAIL_VIA = gmail`. One `/health` request serves both. **Send me a test
   notification** sends its test email through the same Mailer and says which route delivered it
-  (and, for Gmail, the Worker's reason).
+  (and, for Gmail, the Worker's reason). Status ends with the **Calendars** lines
+  (`calendarStatusLines`, §7 "Linked calendars"): one per Calendars row, *OK ✓* with the number of
+  events it copies, or the reason; with no Calendars rows, "none linked" and no request.
+* **Calendars** (`src/gas/calendar.ts`, the `CalendarSource`): Google Calendar IDs through the Calendar
+  advanced service: `Calendar.Events.list(id, {timeMin, timeMax, singleEvents: true, orderBy:
+  'startTime', showDeleted: false, maxResults: 250, fields: 'nextPageToken,items(id,status,summary,
+  description,location,start,end,visibility,eventType)', pageToken})`, up to 10 pages (never attendees
+  or organizers). The service is looked up when used (`typeof Calendar`), so an old manifest without it
+  reports `no_service` instead of failing to load. Errors are mapped from the message: rate limits →
+  `busy`, scopes/authorization → `no_permission`, "has not been used in project"/accessNotConfigured →
+  `no_service`, Not Found → `not_found`, Forbidden → `not_shared`, Backend Error/5xx/timeouts → `busy`,
+  Bad Request → `not_found`. iCal links: `https://` only, `UrlFetchApp.fetch(url, {muteHttpExceptions,
+  followRedirects, validateHttpsCertificates})`; not 2xx → `link_failed` "HTTP n"; a throw (DNS,
+  timeout) → `link_failed` "no answer" (its text, which holds the link, is dropped); Content-Length or
+  text over 2,000,000 characters → `too_big`; no `BEGIN:VCALENDAR` → `not_ical`; then `parseIcs` with
+  `gasZones` (UTC and New York in code; other IANA names through `Utilities.parseDate` with
+  `WALL_CLOCK_FORMAT`, as `SheetTimeZone` does; anything else is unknown rather than silently GMT).
+  Logs carry the kind, reason and HTTP code only, never a Calendar ID or link (a secret iCal link is a
+  password).
+* **SheetStore.deleteRows** (used by linked calendars): whole rows, bottom-up, one `deleteRows` call per
+  run of adjacent rows, under the script lock. Sheets refuses to delete every row below the frozen
+  header, so a spare empty row is added first when that would happen.
 * Twilio SMS (optional; costs about 1¢ per text): `TWILIO_*` secrets set → enabled. POST form to
   `https://api.twilio.com/2010-04-01/Accounts/<sid>/Messages.json` with basic auth.
 * `onOpen()` adds a sheet menu **TMA App**: Run sync now · Reports ▸ (one item per report, §5.4) · Send me a
@@ -641,8 +807,12 @@ Return the `SetupReport`. The Apps Script wrapper (`setupTma`, menu *Set up / re
 * `appsscript.json`: timeZone `America/New_York`, runtime V8, webapp {executeAs USER_DEPLOYING,
   access ANYONE_ANONYMOUS}, oauthScopes (least privilege): `spreadsheets.currentonly`,
   `script.container.ui`, `script.send_mail`, `script.external_request` (PayPal, the push Worker,
-  Twilio), `script.scriptapp`, and `userinfo.email` (the menu's "Send me a test notification" needs
-  `Session.getActiveUser().getEmail()`).
+  Twilio, iCal links), `script.scriptapp`, `userinfo.email` (the menu's "Send me a test notification"
+  needs `Session.getActiveUser().getEmail()`), and `calendar.readonly` (linked calendars; read only).
+  `dependencies.enabledAdvancedServices`: the Calendar service (`userSymbol` Calendar, `serviceId`
+  calendar, `version` v3). A new scope must be approved once by the owner: after pasting a changed
+  manifest, run *TMA App → Set up / repair tabs* from the sheet (Google asks), then deploy a new
+  version; until then Google won't run the triggers (docs/SETUP.md, "Link Google Calendars").
 
 ### 9.1 Push Worker (workers/push, Cloudflare)
 
@@ -824,7 +994,9 @@ export function PayPalCheckout(props: {
   min(available, remaining − pending); validation; note; submit → toast + refresh) and **Pay online**
   (amount input, "Add $X.XX so TMA receives the full amount" checkbox using grossUpCents with live total,
   PayPalCheckout, "Other ways to pay" text). Cancel a pending request.
-* **News**: announcements + upcoming events (date badges), audience chips.
+* **News**: announcements + upcoming events (date badges), audience chips. An event copied from a
+  linked calendar (`EventItem.source`) has a small tag above its title: a calendar icon and the
+  calendar's Name (*Music Dept*), info colors in both themes, "From the calendar:" for screen readers.
 * **More**: Household (edit/sign-up form: guardians, students with school select + ensemble checkboxes),
   Notifications (push enable button with state machine and iOS "Add to Home Screen first" steps, test button;
   channel toggles; topic toggles; school/ensemble interest checkboxes; SMS phone if enabled), Install app,
@@ -833,7 +1005,8 @@ export function PayPalCheckout(props: {
 * **Admin** (visible when isAdmin; reachable from More and Home): stats tiles, pending fund requests
   (approve/deny with optional note), new households (approve, link to the existing student record via a
   candidate radio list, reject), compose announcement (title, body, link, audience checkboxes, channel
-  toggles, preview, send), run sync now, recent activity log, and a **Reports** card.
+  toggles, preview, send), run sync now (its report adds *Calendar events: N added · N changed · N
+  removed* when calendars are linked, and the sync's notes), recent activity log, and a **Reports** card.
 * **Reports** (`#/reports`, admins only; §5.4): a list of the 9 reports, then one report per address
   (`#/reports?kind=trip-balances`), so Back works. Only the filters the report uses are shown (activity,
   school, group, from/to dates starting at this school year, "Include paid in full"); the report runs again
@@ -967,9 +1140,25 @@ export function PayPalCheckout(props: {
   whatever the machine's own time zone is, PayPal request bodies, push Worker requests: 5-message batches, payload limits, 401 re-registration and
   `no_keys` recovery). `src/gas/bundle.test.ts` checks the generated `apps-script/Code.js` itself (plain
   script, no service calls at load time, every entry point) and drives it end to end against those fakes,
-  including setup linking the Worker, `push.register` and a sync push; it is skipped until
-  `npm run build:gas` has run. `src/gas/reports-sheet.test.ts` checks the report tabs: layout, number
+  including setup linking the Worker, `push.register`, a sync push and a linked Google Calendar copied
+  into Events and listed in Status; it is skipped until `npm run build:gas` has run. It also checks
+  `apps-script/appsscript.json`: the Calendar advanced service and exactly the expected scopes. `src/gas/reports-sheet.test.ts` checks the report tabs: layout, number
   formats, formula-looking text kept as text, no other tab touched, and Set up and the sync leaving them alone.
+* Linked calendars: `src/server/ics.test.ts` (unfolding, parameters, escapes, UTC/TZID/floating/all-day
+  times, unknown zones, cancelled and private flags, the range and the cap, garbage input; RRULE DAILY
+  /WEEKLY/MONTHLY/YEARLY with COUNT, UNTIL, INTERVAL, BYDAY, WKST, BYSETPOS, EXDATE, RDATE, RECURRENCE-ID,
+  across a daylight-saving change, unsupported rules skipped, a long series kept cheap);
+  `src/server/calendar-rows.test.ts` (the Calendar column, HTML to text, audience lines, the row:
+  late-evening and DST dates, all-day and "Through", limits, formula-looking text, stable keys and
+  IDs); `src/server/calendars.test.ts` (insert/update/delete within the range, past rows kept, rows
+  typed by hand never touched, duplicate keys, two calendars, a second run writing nothing, a failing
+  calendar's rows kept and its Log row once a day, Off calendars, the 500 cap, CALENDAR_DAYS, the
+  reminder sent once even after an edit, calendars read outside the lock and written inside it,
+  missing columns, Status lines, demo parity); `src/gas/calendar.test.ts` (Calendar service mapping,
+  paging, the cap, missing advanced service, 404/403/scope/rate errors; iCal fetch: https only, HTTP
+  errors, no answer without leaking the link, size cap, not a calendar, zones through Utilities; the
+  sync through the SheetStore: text kept as text, nothing written the second time, whole rows deleted,
+  an old manifest reported once a day).
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
   status and filter, validation messages, admin-only, the row cap and the roster's Log row.
 * `src/server/sign-ins.test.ts`: the Sign-ins upsert (new row, update, household filled in later, no

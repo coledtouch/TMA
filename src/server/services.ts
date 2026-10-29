@@ -15,6 +15,7 @@ import type {
   ApiRequest,
   ApiResponse,
   Cents,
+  IsoDate,
   IsoDateTime,
   PushMessage,
   SetupReport,
@@ -51,6 +52,11 @@ export interface Store {
   columns?(table: TableName): readonly string[] | null;
   /** Forget memoized reads of a tab so the next read() sees edits made meanwhile (e.g. in the Sheets UI). */
   invalidate?(table: TableName): void;
+  /**
+   * Delete whole rows (rows below move up, as in Sheets). Optional: without it the core blanks the
+   * rows instead. Callers pass row numbers from a fresh read made under the write lock.
+   */
+  deleteRows?(table: TableName, rowNumbers: readonly number[]): void;
 }
 
 export interface Cache {
@@ -186,6 +192,88 @@ export interface PaymentGateway {
   captureOrder(orderId: string, requestId: string): CaptureResult;
 }
 
+// ---------------------------------------------------------------------------
+// Linked calendars (ARCHITECTURE.md §7 "Linked calendars")
+// ---------------------------------------------------------------------------
+
+/** A linked calendar: a Google Calendar ID, or an https iCal (.ics) link. */
+export type CalendarRef = { kind: 'google'; id: string } | { kind: 'ical'; url: string };
+
+/** All-day: the calendar date. Timed: the instant. */
+export type CalendarTime = { date: IsoDate } | { dateTime: IsoDateTime };
+
+/** One event (one occurrence of a repeating event) as a calendar has it. */
+export interface CalendarEvent {
+  /** The event's id in its calendar (Google: the occurrence's id; iCal: UID). */
+  uid: string;
+  start: CalendarTime;
+  /** End (exclusive), when the calendar gives one. */
+  end?: CalendarTime;
+  title: string;
+  location: string;
+  /** As the calendar has it: plain text, or HTML (Google Calendar descriptions often are). */
+  description: string;
+  /** Marked private or confidential: never copied. */
+  private?: boolean;
+  /** Cancelled: never copied. */
+  cancelled?: boolean;
+}
+
+export interface CalendarFeed {
+  events: CalendarEvent[];
+  /** Events or repeat rules left out because the app can't read them reliably (never guessed). */
+  unsupported: number;
+  /** The calendar had more events than CalendarWindow.maxEvents: the rest were left out. */
+  capped: boolean;
+}
+
+export interface CalendarWindow {
+  start: Date;
+  /** Exclusive. */
+  end: Date;
+  /** Return at most this many events. */
+  maxEvents: number;
+}
+
+/**
+ * Why a calendar couldn't be read. `not_found`: no such calendar, or not shared with this Google
+ * account (Google answers 404 for both). `not_shared`: Google refused (403). `no_service`: the
+ * Calendar advanced service isn't in appsscript.json. `no_permission`: the read-only calendar
+ * permission hasn't been approved yet. `busy`: try again later (429, 5xx, rate limits).
+ */
+export type CalendarProblem =
+  | 'bad_address'
+  | 'no_service'
+  | 'no_permission'
+  | 'not_found'
+  | 'not_shared'
+  | 'busy'
+  | 'link_failed'
+  | 'not_ical'
+  | 'too_big'
+  | 'failed';
+
+/** What CalendarSource.read throws. `detail` is short (e.g. "HTTP 404"), never an address or link. */
+export class CalendarReadError extends Error {
+  readonly problem: CalendarProblem;
+  readonly detail: string;
+
+  constructor(problem: CalendarProblem, detail = '') {
+    super(detail ? `${problem} (${detail})` : problem);
+    this.name = 'CalendarReadError';
+    this.problem = problem;
+    this.detail = detail;
+  }
+}
+
+export interface CalendarSource {
+  /**
+   * Events of one calendar that overlap the window (repeating events expanded into occurrences).
+   * Network work: never called while holding the write lock. Throws CalendarReadError.
+   */
+  read(ref: CalendarRef, window: CalendarWindow): CalendarFeed;
+}
+
 export interface Logger {
   info(message: string, data?: unknown): void;
   error(message: string, data?: unknown): void;
@@ -202,6 +290,8 @@ export interface Services {
   sms: SmsSender;
   push: PushSender;
   payments: PaymentGateway;
+  /** Reads linked Google Calendars and iCal links (Calendars tab). */
+  calendars: CalendarSource;
   logger: Logger;
   /**
    * Run fn while holding the script-wide write lock (LockService in Apps Script). Throws, without
@@ -237,7 +327,10 @@ export interface SetupOptions {
 export interface App {
   /** Handle one API call. Never throws: errors become { ok:false, error }. */
   handle(request: ApiRequest): ApiResponse;
-  /** Every ~15 min: post approved redemptions, detect balance changes, send queued announcements. */
+  /**
+   * Every ~15 min: post approved redemptions, detect balance changes, send queued announcements,
+   * copy linked calendars into Events (read before taking the write lock).
+   */
   syncTick(): TickReport;
   /** Once a day (morning): payment-due reminders and next-day event reminders. */
   dailyTick(): TickReport;

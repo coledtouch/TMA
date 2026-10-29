@@ -109,12 +109,36 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
 * **Every request is checked** against the sheet: who the person is, which household they belong
   to, and whether they're a board member. Nothing is taken on trust from the phone.
 * **Least privilege:** the script may only open this spreadsheet, send email as TMA, contact
-  PayPal, TMA's push Worker and Twilio, and run its own schedule.
+  PayPal, TMA's push Worker and Twilio, run its own schedule, and **read** (never change) calendars
+  TMA's Google account can see.
 * **PayPal handles all card data.** TMA never sees or stores card numbers.
 * **Secrets** (the PayPal key and the push Worker password) are kept out of the spreadsheet, in the
   script's private settings. Together with the email key in Cloudflare, the push Worker password
   lets its holder send email as `noreply@mytma.org`, so if it ever leaks, rotate it and update the
   email key right away (SETUP.md, step 5E).
+
+### Can the app see our calendars? Can it change them?
+
+It can only **read** them, and only the ones the board lists in the spreadsheet's **Calendars** tab
+(for example a TMA calendar and the music department's concert calendar). Every 15 minutes it copies
+their upcoming events (title, date and time, place, description) into the **Events** tab, so families
+see them under News and get a reminder the day before. It never adds, changes or deletes anything in
+a calendar.
+
+* **The permission.** Linked calendars need one new Google permission, which a board member approves
+  once: *See and download any calendar you can access using your Google Calendar*. It is Google's
+  **read-only** calendar permission. Technically it covers every calendar TMA's Google account can
+  see, which is why the script only reads the calendars listed in the Calendars tab, and why TMA's
+  account should not be subscribed to volunteers' personal calendars.
+* **Private events are never copied.** Neither are cancelled events, or Google's out-of-office and
+  focus-time entries. The app never reads who is invited to an event.
+* **Whose calendars?** Ones made in TMA's account, ones their owners share with TMA's account, and
+  public ones. A calendar can also be linked by its iCal address. A *secret* iCal address works like
+  a password, so it belongs only in the spreadsheet, which few people can open; the app never writes
+  it to the Log.
+* **What families see:** the event as it appears in the calendar, tagged with the calendar's name
+  (e.g. *Music Dept*), and only if they follow the schools and groups it is for. So anything put in
+  a linked calendar's events becomes visible to TMA families: keep personal details out of them.
 
 ### What about children's privacy (COPPA)?
 

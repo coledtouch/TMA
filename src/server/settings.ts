@@ -23,6 +23,8 @@ export interface AppSettings {
   sessionDays: number;
   /** Sign-in codes per hour, script-wide, to emails TMA hasn't verified (auth.requestCode). */
   newSignupsPerHour: number;
+  /** Linked calendars: copy events from yesterday through this many days ahead (7–400). */
+  calendarDays: number;
 }
 
 /** Shown in the Notes column when setup() writes a missing key. */
@@ -53,6 +55,7 @@ export const SETTING_NOTES: Readonly<Record<SettingKey, string>> = {
   SESSION_DAYS: 'How many days a sign-in lasts.',
   NEW_SIGNUPS_PER_HOUR:
     'Sign-in codes per hour, across everyone, to emails TMA has not verified yet (new families). Raise it for a launch day.',
+  CALENDAR_DAYS: 'Linked calendars (Calendars tab): copy their events into Events from yesterday through this many days ahead (7 to 400).',
 };
 
 /** "Admin Emails" / "admin_emails" -> "ADMIN_EMAILS". */
@@ -85,17 +88,40 @@ export function readSettingValues(rows: readonly StoredRow[]): Map<string, strin
   return values;
 }
 
-export function buildSettings(rows: readonly StoredRow[], services: Services): AppSettings {
-  const values = readSettingValues(rows);
-  const get = (key: SettingKey): string => {
+/** A Settings value as typed, or its default when missing or blank. */
+function settingGetter(values: Map<string, string>): (key: SettingKey) => string {
+  return (key) => {
     const v = values.get(key);
     return v === undefined || v === '' ? SETTING_DEFAULTS[key] : v;
   };
+}
+
+/** A list setting (SCHOOLS, ENSEMBLES): split, duplicates dropped, the default when empty. */
+function listSetting(get: (key: SettingKey) => string, key: SettingKey): string[] {
+  const items = uniqueBy(splitList(get(key), /[,;\n\r]+/), (s) => s.toLowerCase());
+  return items.length > 0 ? items : splitList(SETTING_DEFAULTS[key], /,/);
+}
+
+function calendarDaysSetting(get: (key: SettingKey) => string): number {
+  const days = Math.round(Number(get('CALENDAR_DAYS')));
+  return Number.isFinite(days) && days >= 7 && days <= 400 ? days : Number(SETTING_DEFAULTS.CALENDAR_DAYS);
+}
+
+/**
+ * What linked calendars need from Settings (the school and group lists, CALENDAR_DAYS), without
+ * asking any port: the Status dialog checks calendars without looking up the push key or PayPal.
+ * The same parsing as buildSettings.
+ */
+export function calendarSettings(rows: readonly StoredRow[]): { schools: string[]; ensembles: string[]; calendarDays: number } {
+  const get = settingGetter(readSettingValues(rows));
+  return { schools: listSetting(get, 'SCHOOLS'), ensembles: listSetting(get, 'ENSEMBLES'), calendarDays: calendarDaysSetting(get) };
+}
+
+export function buildSettings(rows: readonly StoredRow[], services: Services): AppSettings {
+  const values = readSettingValues(rows);
+  const get = settingGetter(values);
   const bool = (key: SettingKey): boolean => parseBool(get(key), parseBool(SETTING_DEFAULTS[key], false));
-  const list = (key: SettingKey): string[] => {
-    const items = uniqueBy(splitList(get(key), /[,;\n\r]+/), (s) => s.toLowerCase());
-    return items.length > 0 ? items : splitList(SETTING_DEFAULTS[key], /,/);
-  };
+  const list = (key: SettingKey): string[] => listSetting(get, key);
   const safely = (fn: () => boolean): boolean => {
     try {
       return fn();
@@ -167,5 +193,6 @@ export function buildSettings(rows: readonly StoredRow[], services: Services): A
       Number.isFinite(newSignups) && newSignups >= 1 && newSignups <= 500
         ? newSignups
         : Number(SETTING_DEFAULTS.NEW_SIGNUPS_PER_HOUR),
+    calendarDays: calendarDaysSetting(get),
   };
 }

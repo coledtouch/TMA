@@ -490,6 +490,11 @@ export function parseTimeText(value: unknown): string {
     hours = d.getHours();
     minutes = d.getMinutes();
   }
+  return timeText(hours, minutes);
+}
+
+/** "7:00 PM": how the app writes and shows a time of day (what parseTimeText returns for a Sheets time). */
+export function timeText(hours: number, minutes: number): string {
   const suffix = hours >= 12 ? 'PM' : 'AM';
   const h12 = hours % 12 === 0 ? 12 : hours % 12;
   return `${h12}:${pad2(minutes)} ${suffix}`;

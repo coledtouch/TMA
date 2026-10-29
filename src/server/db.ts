@@ -64,6 +64,22 @@ export class Db {
     this.update(table, rowNumber, patch);
   }
 
+  /**
+   * Delete rows (rows below move up). Without the store's deleteRows, blank them instead (the
+   * columns given). Row numbers must come from a fresh read under the write lock.
+   */
+  deleteRows(table: TableName, rowNumbers: readonly number[], columns: readonly string[]): void {
+    const rows = Array.from(new Set(rowNumbers)).sort((a, b) => b - a);
+    if (rows.length === 0) return;
+    if (!this.store.deleteRows) {
+      for (const row of rows) this.clear(table, row, columns);
+      return;
+    }
+    this.store.deleteRows(table, rows);
+    this.cache.delete(table); // row numbers below moved up
+    this.bump(table);
+  }
+
   overwrite(table: TableName, rows: RowData[]): void {
     this.store.overwrite(table, rows);
     this.cache.delete(table);
