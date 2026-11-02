@@ -1,0 +1,15 @@
+{
+  "name": "tma-push",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stateless Web Push (VAPID + aes128gcm) sender for the TMA Family App, on Cloudflare Workers.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.3"
+  }
+}
