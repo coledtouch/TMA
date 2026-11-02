@@ -45,8 +45,9 @@ export function News() {
           </div>
         ) : (
           <ul className="stack" aria-label="Upcoming events">
-            {events.map((e) => (
-              <EventCard key={e.id} event={e} />
+            {events.map((e, i) => (
+              // Volunteers often copy a row, ID included, for the next meeting: the ID alone isn't unique.
+              <EventCard key={`${e.id}:${e.date}:${i}`} event={e} />
             ))}
           </ul>
         )}

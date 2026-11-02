@@ -307,7 +307,7 @@ before (in the morning run, about 8 AM).
 
 | Column | Meaning | Example |
 | --- | --- | --- |
-| **ID** | Optional. | |
+| **ID** | Optional. Copying a row for the next meeting with the same ID is fine: each date gets its own reminder. | `EV-MEETING` |
 | **Date** | Required. | `2026-12-10` |
 | **Time** | Free text. | `7:00 PM` |
 | **Title** | Required. | `HS Winter Concert` |

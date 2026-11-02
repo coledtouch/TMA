@@ -6412,18 +6412,30 @@ var TMA = (() => {
       ctx.db.append("_Sent", newKeys);
     }
   }
+  function recentLegacyEventKeys(ctx) {
+    const since = addDays(ctx.today, -2);
+    const keys = /* @__PURE__ */ new Set();
+    for (const row of ctx.db.rows("_Sent")) {
+      const key = str(row.data.Key);
+      if (!/^evt:/.test(key) || /:\d{4}-\d{2}-\d{2}$/.test(key)) continue;
+      const at = parseTimestamp(row.data.At);
+      if (at && nyDate(new Date(at)) >= since) keys.add(key);
+    }
+    return keys;
+  }
   function sendEventReminders(ctx, report) {
     requireColumns(ctx, "Events", ["Date", "Title", "Schools", "Ensembles"]);
     const tomorrow = addDays(ctx.today, 1);
     const events = ctx.m.events().filter((e) => e.date === tomorrow);
     if (events.length === 0) return;
     const sent = new Set(ctx.m.sentKeys());
+    const legacy = recentLegacyEventKeys(ctx);
     const newKeys = [];
     const recipients = allRecipients(ctx);
     try {
       for (const event of events) {
-        const key = `evt:${event.id}`;
-        if (sent.has(key)) continue;
+        const key = `evt:${event.id}:${event.date}`;
+        if (sent.has(key) || legacy.has(`evt:${event.id}`)) continue;
         sent.add(key);
         newKeys.push({ Key: key, At: ctx.now });
         addCounts(report.notifications, deliver(ctx, recipients, eventTomorrowNotice(event)));

@@ -412,7 +412,7 @@ describe('syncTick: linked calendars', () => {
     expect(daily.errors).toEqual([]);
     expect(sent).toContain('Tomorrow: Jazz Night'); // the typed row, as before
     const id = s.calendarRows()[0].ID;
-    expect(s.h.rows('_Sent').map((r) => r.Key)).toContain(`evt:${id}`);
+    expect(s.h.rows('_Sent').map((r) => r.Key)).toContain(`evt:${id}:2026-10-22`);
     s.state.board = feed([timed('t', '2026-10-22', 19, 'Pops rehearsal (bring music)')]);
     s.h.services.setNow(LATER);
     s.h.app.syncTick();

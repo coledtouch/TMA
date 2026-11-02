@@ -21,7 +21,7 @@ import { announcementNotice, creditNotice, debitNotice, eventTomorrowNotice, pay
 import { addCounts, allRecipients, deliver, notifyFamily, zeroCounts } from './notify';
 import { ledgerHasReference, notifyDecision, postRedemptionLedger } from './redemptions';
 import type { RowData } from './services';
-import { addDays, daysBetween, errorMessage, idKey, nyParts } from './util';
+import { addDays, daysBetween, errorMessage, idKey, nyDate, nyParts, parseTimestamp, str } from './util';
 
 /** A row typed in the sheet is acted on once it has looked exactly the same for this long. */
 export const SETTLE_MS = 5 * 60 * 1000;
@@ -315,19 +315,36 @@ function sendPaymentReminders(ctx: Ctx, report: TickReport): void {
   }
 }
 
-/** 5. Events happening tomorrow -> matching recipients, once per event. */
+/** `_Sent` keys in the old event format ("evt:<id>", no date) written in the last two days. */
+function recentLegacyEventKeys(ctx: Ctx): Set<string> {
+  const since = addDays(ctx.today, -2);
+  const keys = new Set<string>();
+  for (const row of ctx.db.rows('_Sent')) {
+    const key = str(row.data.Key);
+    if (!/^evt:/.test(key) || /:\d{4}-\d{2}-\d{2}$/.test(key)) continue;
+    const at = parseTimestamp(row.data.At);
+    if (at && nyDate(new Date(at)) >= since) keys.add(key);
+  }
+  return keys;
+}
+
+/** 5. Events happening tomorrow -> matching recipients, once per event and date. */
 function sendEventReminders(ctx: Ctx, report: TickReport): void {
   requireColumns(ctx, 'Events', ['Date', 'Title', 'Schools', 'Ensembles']);
   const tomorrow = addDays(ctx.today, 1);
   const events = ctx.m.events().filter((e) => e.date === tomorrow);
   if (events.length === 0) return;
   const sent = new Set(ctx.m.sentKeys());
+  const legacy = recentLegacyEventKeys(ctx);
   const newKeys: RowData[] = [];
   const recipients = allRecipients(ctx);
   try {
     for (const event of events) {
-      const key = `evt:${event.id}`;
-      if (sent.has(key)) continue;
+      // Keyed by ID and date: volunteers copy a row (ID included) for the next monthly meeting, and
+      // each date still gets its reminder. A key from before dates were added ("evt:<id>") counts
+      // only if it was written in the last two days, so the update can't send a reminder twice.
+      const key = `evt:${event.id}:${event.date}`;
+      if (sent.has(key) || legacy.has(`evt:${event.id}`)) continue;
       sent.add(key);
       newKeys.push({ Key: key, At: ctx.now });
       addCounts(report.notifications, deliver(ctx, recipients, eventTomorrowNotice(event)));

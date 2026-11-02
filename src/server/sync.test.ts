@@ -495,10 +495,33 @@ describe('dailyTick', () => {
     const jazzMail = h.services.outbox.mail.filter((m) => m.subject === 'Tomorrow: Jazz Night').map((m) => m.to);
     // Only the Thompsons follow Jazz Band; the other households have no matching ensemble.
     expect(jazzMail.sort()).toEqual([PARENT2, PARENT].sort());
-    expect(h.rows('_Sent').map((r) => r.Key)).toContain('evt:EV-JAZZ');
+    expect(h.rows('_Sent').map((r) => r.Key)).toContain('evt:EV-JAZZ:2026-10-22');
     h.clearOutbox();
     h.app.dailyTick();
     expect(h.services.outbox.push.find((p) => p.message.title === 'Tomorrow: Jazz Night')).toBeUndefined();
+  });
+
+  it('reminds about each date of a copied event row that kept its ID (monthly meetings)', () => {
+    const meeting = { ID: 'EV-MEETING', Time: '6:30 PM', Title: 'TMA monthly meeting', Location: 'PAC', Details: '', Schools: '', Ensembles: '' };
+    const h = harness({ tables: { Events: [{ ...meeting, Date: '2026-10-22' }, { ...meeting, Date: '2026-10-29' }] } });
+    const titles = () => h.services.outbox.push.map((p) => p.message.title);
+    h.app.dailyTick();
+    expect(titles()).toContain('Tomorrow: TMA monthly meeting');
+    h.clearOutbox();
+    h.services.setNow(new Date(TEST_NOW.getTime() + 7 * 86400 * 1000));
+    h.app.dailyTick();
+    expect(titles()).toContain('Tomorrow: TMA monthly meeting');
+    expect(h.rows('_Sent').map((r) => r.Key)).toEqual(expect.arrayContaining(['evt:EV-MEETING:2026-10-22', 'evt:EV-MEETING:2026-10-29']));
+  });
+
+  it('does not send a reminder twice across the update that added dates to reminder keys', () => {
+    const recent = harness({ tables: { _Sent: [{ Key: 'evt:EV-JAZZ', At: new Date(TEST_NOW.getTime() - 3 * 3600 * 1000).toISOString() }] } });
+    recent.app.dailyTick();
+    expect(recent.services.outbox.push.map((p) => p.message.title)).not.toContain('Tomorrow: Jazz Night');
+    // An old-format key from weeks ago is about an earlier date and doesn't block this one.
+    const old = harness({ tables: { _Sent: [{ Key: 'evt:EV-JAZZ', At: new Date(TEST_NOW.getTime() - 30 * 86400 * 1000).toISOString() }] } });
+    old.app.dailyTick();
+    expect(old.services.outbox.push.map((p) => p.message.title)).toContain('Tomorrow: Jazz Night');
   });
 
   it('skips paid-up, closed or unverified accounts', () => {
