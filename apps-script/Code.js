@@ -3909,6 +3909,12 @@ var TMA = (() => {
     if (column === "Ensembles") return joinList(parseList(stored, known.ensembles)) === wanted;
     return str(stored) === str(wanted);
   }
+  var HELD_ROW_COLUMNS = ["Time", "Title", "Location", "Details", "Schools", "Ensembles"];
+  function widenedAudience(row, audience, known) {
+    const stored = { schools: parseList(row.data.Schools, known.schools), ensembles: parseList(row.data.Ensembles, known.ensembles) };
+    const merged = mergeAudience(stored, audience);
+    return { Schools: joinList(merged.schools), Ensembles: joinList(merged.ensembles) };
+  }
   function planCalendarRows(rows, wanted, read, failed, range, known) {
     var _a;
     const plan = { updates: [], inserts: [], deletes: [] };
@@ -3917,8 +3923,16 @@ var TMA = (() => {
       return date !== null && date >= range.from && date <= range.to;
     };
     const remove = (row, key) => plan.deletes.push({ row: row.rowNumber, source: str(row.data.Source), key });
+    const update = (row, key, columns, target) => {
+      const patch = {};
+      for (const column of columns) {
+        if (!sameValue(column, row.data[column], target[column], known)) patch[column] = target[column];
+      }
+      if (Object.keys(patch).length > 0) plan.updates.push({ row: row.rowNumber, key, patch });
+    };
     const byKey = /* @__PURE__ */ new Map();
     const held = /* @__PURE__ */ new Set();
+    const heldByFailed = /* @__PURE__ */ new Map();
     for (const row of rows) {
       const key = str(row.data["Calendar Event"]);
       const hash = key ? calendarKeyHash(key) : null;
@@ -3928,7 +3942,8 @@ var TMA = (() => {
       }
       if (!hash) continue;
       if (failed.has(hash)) {
-        held.add(calendarEventIdentity(key));
+        const identity = calendarEventIdentity(key);
+        if (!heldByFailed.has(identity)) heldByFailed.set(identity, { row, key });
         continue;
       }
       const list2 = (_a = byKey.get(key)) != null ? _a : [];
@@ -3942,16 +3957,20 @@ var TMA = (() => {
         return;
       }
       const [first, ...repeats] = list2;
-      const patch = {};
-      for (const column of CALENDAR_ROW_COLUMNS) {
-        if (!sameValue(column, first.data[column], want.row[column], known)) patch[column] = want.row[column];
-      }
-      if (Object.keys(patch).length > 0) plan.updates.push({ row: first.rowNumber, key, patch });
+      update(first, key, CALENDAR_ROW_COLUMNS, failed.size > 0 ? { ...want.row, ...widenedAudience(first, want.audience, known) } : want.row);
       for (const row of repeats) remove(row, key);
     });
     wanted.forEach((want, key) => {
       var _a2;
-      if (!byKey.has(key) && !held.has(calendarEventIdentity(key)) && read.has((_a2 = calendarKeyHash(key)) != null ? _a2 : "")) plan.inserts.push({ ...want.row });
+      if (byKey.has(key) || !read.has((_a2 = calendarKeyHash(key)) != null ? _a2 : "")) return;
+      const identity = calendarEventIdentity(key);
+      if (held.has(identity)) return;
+      const holder = heldByFailed.get(identity);
+      if (!holder) {
+        plan.inserts.push({ ...want.row });
+        return;
+      }
+      update(holder.row, holder.key, HELD_ROW_COLUMNS, { ...want.row, ...widenedAudience(holder.row, want.audience, known) });
     });
     plan.deletes.sort((a, b) => b.row - a.row);
     return plan;
@@ -4088,7 +4107,7 @@ var TMA = (() => {
         summary.failed++;
         failed.push(def.hash);
         report.errors.push(`Calendar ${label}: ${result.text}.`);
-        logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${result.text}. Its rows in Events were left as they were.`);
+        logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${result.text}. Its rows in Events were kept.`);
         continue;
       }
       summary.read++;
@@ -4119,6 +4138,7 @@ var TMA = (() => {
       if (listed2) report.calendars = summary;
       return;
     }
+    ctx.s.cache.remove(FINGERPRINT_KEY);
     const columns = ctx.db.columns("Events");
     const missing = columns ? ["Date", "Title", "Source", "Calendar Event"].filter((c) => !columns.includes(c)) : [];
     if (missing.length > 0) {
@@ -4135,17 +4155,14 @@ var TMA = (() => {
     const plan = planNow();
     const total = plan.updates.length + plan.inserts.length + plan.deletes.length;
     const inserts = plan.inserts;
-    summary.updated = applyUpdates(ctx, plan.updates.slice(0, MAX_ROW_CHANGES), outOfTime);
     let deletesLeft = 0;
     if (plan.deletes.length > 0) {
-      let deletes = plan.deletes;
-      if (!outOfTime()) {
-        ctx.db.refresh("Events");
-        deletes = planNow().deletes;
-        summary.removed = applyDeletes(ctx, deletes.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.updated)), outOfTime);
-      }
+      ctx.db.refresh("Events");
+      const deletes = planNow().deletes;
+      summary.removed = applyDeletes(ctx, deletes.slice(0, MAX_ROW_CHANGES), outOfTime);
       deletesLeft = deletes.length - summary.removed;
     }
+    summary.updated = applyUpdates(ctx, plan.updates.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.removed)), outOfTime);
     if (inserts.length > 0) ctx.db.append("Events", inserts);
     summary.added = inserts.length;
     const complete = summary.updated === plan.updates.length && deletesLeft === 0;
@@ -4919,6 +4936,9 @@ var TMA = (() => {
   };
   var MAX_REPORT_ROWS = 5e3;
   var REPORT_LOG_LOCK_WAIT_MS = 3e3;
+  var PENDING_REPORT_LOG_KEY = "report-log-pending";
+  var PENDING_REPORT_LOG_SECONDS = 6 * 3600;
+  var MAX_PENDING_REPORT_LOGS = 20;
   var FILTERS_FOR = {
     "trip-balances": ["activityId", "school", "ensemble", "includePaid"],
     "student-funds": ["school", "ensemble"],
@@ -4958,11 +4978,55 @@ var TMA = (() => {
   function logContactReport(ctx, adminEmail, report) {
     const scope = [report.filters.school, report.filters.ensemble].filter(Boolean).join(", ") || "all students";
     const detail = `Roster with contact details (${scope}, ${plural(report.rows.length, "student")}) viewed by ${adminEmail}`;
+    let written = false;
     try {
-      inWriteLock(ctx, () => ctx.log("report", detail), { waitMs: REPORT_LOG_LOCK_WAIT_MS });
+      inWriteLock(
+        ctx,
+        () => {
+          flushPendingReportLogs(ctx);
+          ctx.log("report", detail);
+          written = true;
+        },
+        { waitMs: REPORT_LOG_LOCK_WAIT_MS }
+      );
     } catch (err) {
       ctx.s.logger.error("Could not write the Log row", errorMessage(err));
+      if (!written) keepReportLog(ctx, detail);
     }
+  }
+  function flushPendingReportLogs(ctx) {
+    const kept = readPendingReportLogs(ctx);
+    if (kept.length === 0) return;
+    for (const entry of kept) ctx.log("report", entry);
+    try {
+      ctx.s.cache.remove(PENDING_REPORT_LOG_KEY);
+    } catch (err) {
+      ctx.s.logger.error("Could not clear the kept Log rows from the cache", errorMessage(err));
+    }
+  }
+  function keepReportLog(ctx, detail) {
+    const entry = `${detail} at ${nyDateTime(ctx.now)} (noted late: the app was busy)`;
+    const kept = [...readPendingReportLogs(ctx), entry].slice(-MAX_PENDING_REPORT_LOGS);
+    try {
+      ctx.s.cache.put(PENDING_REPORT_LOG_KEY, JSON.stringify(kept), PENDING_REPORT_LOG_SECONDS);
+    } catch (err) {
+      ctx.s.logger.error("Could not keep the skipped Log row in the cache", errorMessage(err));
+    }
+  }
+  function readPendingReportLogs(ctx) {
+    try {
+      const raw = ctx.s.cache.get(PENDING_REPORT_LOG_KEY);
+      if (!raw) return [];
+      const kept = JSON.parse(raw);
+      if (Array.isArray(kept)) return kept.filter((entry) => typeof entry === "string" && entry !== "");
+    } catch (err) {
+      ctx.s.logger.error("Could not read the kept Log rows from the cache", errorMessage(err));
+    }
+    return [];
+  }
+  function nyDateTime(at) {
+    const p = nyParts(at);
+    return `${shortDate(nyDate(at))}, ${p.year} ${timeText(p.hour, p.minute)}`;
   }
   function schoolYear(date) {
     const year = parseInt(date.slice(0, 4), 10);
@@ -6295,6 +6359,7 @@ var TMA = (() => {
     step(ctx, report, "balances", () => detectBalanceChanges(ctx, report));
     step(ctx, report, "announcements", () => sendQueuedAnnouncements(ctx, report));
     if (calendars !== void 0) step(ctx, report, "calendars", () => syncCalendars(ctx, report, calendars));
+    step(ctx, report, "report log", () => flushPendingReportLogs(ctx));
     return report;
   }
   function runDaily(ctx) {
@@ -8793,12 +8858,16 @@ Email from the TMA app is working.
     }
     /**
      * A few rows read now with one getValues() (to check them just before a write), mapped as read()
-     * maps rows, under the header layout the writes use. The memoized rows are neither used nor changed.
+     * maps rows. The header row is mapped again first (one more getValues()) and kept as the tab's
+     * layout: a volunteer may have dragged a column since the tab was read, and both this check and
+     * the write that follows it must use the columns as they are now. The memoized rows are neither
+     * used nor changed.
      */
     readRows(table, firstRow, count2) {
+      var _a, _b;
       const rows = [];
       for (let i = 0; i < count2; i += 1) rows.push(null);
-      const layout = this.layout(table);
+      const layout = this.readLayout(table, (_b = (_a = this.layouts.get(table)) == null ? void 0 : _a.sheet) != null ? _b : this.findSheet(table));
       if (!layout || layout.columns.size === 0 || !Number.isInteger(firstRow) || firstRow < 2) return rows;
       const n = Math.min(rows.length, layout.sheet.getLastRow() - firstRow + 1);
       if (n < 1) return rows;
@@ -8892,7 +8961,10 @@ Email from the TMA app is working.
     layout(table) {
       const memo = this.layouts.get(table);
       if (memo !== void 0) return memo;
-      const sheet = this.findSheet(table);
+      return this.readLayout(table, this.findSheet(table));
+    }
+    /** Map the tab's header row as it is now (one getValues() of row 1) and memoize that layout. */
+    readLayout(table, sheet) {
       let layout = null;
       if (sheet) {
         const lastColumn = sheet.getLastColumn();
@@ -9127,6 +9199,9 @@ Email from the TMA app is working.
     }
     return { events, unsupported, capped };
   }
+  function isBusyOnly(event) {
+    return event.title.trim().toLowerCase() === "busy" && event.location.trim() === "" && event.description.trim() === "";
+  }
   function readIcalLink(url, range) {
     var _a;
     if (!/^https:\/\/[^\s<>"'`]+$/i.test(url)) throw new CalendarReadError("bad_address");
@@ -9152,6 +9227,9 @@ Email from the TMA app is working.
     if (!looksLikeIcs(text2)) throw new CalendarReadError("not_ical");
     const parsed = parseIcs(text2, { range, maxEvents: range.maxEvents, zones: gasZones });
     if (parsed.calendars === 0) throw new CalendarReadError("not_ical");
+    for (const event of parsed.events) {
+      if (!event.cancelled && !event.private && isBusyOnly(event)) event.private = true;
+    }
     return { events: parsed.events, unsupported: parsed.unsupported, capped: parsed.capped };
   }
   function createGasCalendarSource(deps) {
