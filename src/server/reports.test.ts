@@ -1,8 +1,18 @@
 import type { ActivityAccount, Report, ReportKind } from '../shared/types';
 import { createCtx } from './context';
-import { buildReport, MAX_REPORT_ROWS, REPORT_KINDS, REPORT_LOG_LOCK_WAIT_MS, schoolYear, tripStatus } from './reports';
+import {
+  buildReport,
+  MAX_PENDING_REPORT_LOGS,
+  MAX_REPORT_ROWS,
+  PENDING_REPORT_LOG_KEY,
+  PENDING_REPORT_LOG_SECONDS,
+  REPORT_KINDS,
+  REPORT_LOG_LOCK_WAIT_MS,
+  schoolYear,
+  tripStatus,
+} from './reports';
 import type { LockOptions, RowData } from './services';
-import { harness, NGUYEN, PARENT, PARENT2, TREASURER, type Harness } from './test-helpers';
+import { harness, NGUYEN, PARENT, PARENT2, TEST_NOW, TREASURER, type Harness } from './test-helpers';
 
 // The sample data is relative to TEST_NOW (Wed 2026-10-21, New York), so these dates are fixed:
 // FL27 deposit due 2026-11-15 and final 2027-01-29, CAMP27 due 2027-05-09, LESSONS due 2026-11-04,
@@ -599,6 +609,141 @@ describe('roster', () => {
     expect(REPORT_LOG_LOCK_WAIT_MS).toBeLessThanOrEqual(5000);
     expect(h.rows('Log')).toHaveLength(before);
     expect(h.services.logs.filter((l) => l.level === 'error').map((l) => l.message)).toEqual(['Could not write the Log row']);
+  });
+
+  describe('a Log row skipped on a busy lock is kept, not lost', () => {
+    const VIEWED = 'Roster with contact details (all students, 5 students) viewed by treasurer@example.com';
+    const LATE = ' at Oct 21, 2026 10:00 AM (noted late: the app was busy)';
+
+    /** Another execution holds the lock: the short best-effort wait gives up. Returns a way to free it. */
+    function busyLock(h: Harness): () => void {
+      const free = h.services.withLock;
+      h.services.withLock = <T>(fn: () => T, options?: LockOptions): T => {
+        if (options?.waitMs !== undefined) throw new Error('Lock timeout: another process was holding the lock for too long.');
+        return fn();
+      };
+      return () => {
+        h.services.withLock = free;
+      };
+    }
+    const kept = (h: Harness): unknown => JSON.parse(h.services.cache.get(PENDING_REPORT_LOG_KEY) ?? '[]');
+    const logged = (h: Harness) => h.rows('Log').filter((r) => r.Kind === 'report');
+
+    it('keeps who viewed the roster and when, and still answers', () => {
+      const h = harness();
+      const admin = h.signIn(TREASURER);
+      busyLock(h);
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      expect(logged(h)).toEqual([]);
+      expect(kept(h)).toEqual([VIEWED + LATE]);
+      expect(PENDING_REPORT_LOG_SECONDS).toBe(6 * 3600);
+      // One more view, still busy: kept after the first.
+      h.services.setNow(new Date('2026-10-21T14:07:00.000Z'));
+      expect(report(h, 'roster', { school: 'High School', ensemble: 'chorus' }, admin).rows).toHaveLength(1);
+      expect(kept(h)).toEqual([
+        VIEWED + LATE,
+        'Roster with contact details (High School, Chorus, 1 student) viewed by treasurer@example.com at Oct 21, 2026 10:07 AM (noted late: the app was busy)',
+      ]);
+      expect(logged(h)).toEqual([]);
+    });
+
+    it('says when in New York time', () => {
+      const h = harness({ now: new Date('2026-12-05T01:05:00.000Z') });
+      const admin = h.signIn(TREASURER);
+      busyLock(h);
+      report(h, 'roster', {}, admin);
+      expect(kept(h)).toEqual([expect.stringMatching(/ viewed by treasurer@example\.com at Dec 4, 2026 8:05 PM \(noted late: the app was busy\)$/)]);
+    });
+
+    it('is written by the next roster view that gets the lock, before that view’s own row, and once only', () => {
+      const h = harness();
+      const admin = h.signIn(TREASURER);
+      const free = busyLock(h);
+      report(h, 'roster', {}, admin);
+      free();
+      h.services.setNow(new Date('2026-10-21T18:30:00.000Z'));
+      report(h, 'roster', { school: 'High School', ensemble: 'chorus' }, admin);
+      expect(logged(h)).toEqual([
+        { At: '2026-10-21T18:30:00.000Z', Kind: 'report', Detail: VIEWED + LATE },
+        { At: '2026-10-21T18:30:00.000Z', Kind: 'report', Detail: 'Roster with contact details (High School, Chorus, 1 student) viewed by treasurer@example.com' },
+      ]);
+      expect(h.services.cache.get(PENDING_REPORT_LOG_KEY)).toBeNull();
+      report(h, 'roster', {}, admin);
+      expect(logged(h).map((r) => r.Detail)).toEqual([VIEWED + LATE, expect.stringContaining('High School, Chorus'), VIEWED]);
+    });
+
+    it('does not write a row twice when an error comes after it was written', () => {
+      const h = harness();
+      const admin = h.signIn(TREASURER);
+      const free = h.services.withLock;
+      // The row is written, then releasing the lock fails.
+      h.services.withLock = <T>(fn: () => T): T => {
+        fn();
+        throw new Error('Service Spreadsheets failed');
+      };
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      expect(logged(h).map((r) => r.Detail)).toEqual([VIEWED]);
+      expect(h.services.cache.get(PENDING_REPORT_LOG_KEY)).toBeNull();
+      h.services.withLock = free;
+      // Nothing was kept: the next view adds only its own row, and the sync none.
+      report(h, 'roster', {}, admin);
+      h.app.syncTick();
+      expect(logged(h).map((r) => r.Detail)).toEqual([VIEWED, VIEWED]);
+    });
+
+    it('keeps the latest 20 at most', () => {
+      const h = harness();
+      const admin = h.signIn(TREASURER);
+      const free = busyLock(h);
+      for (let minute = 0; minute < MAX_PENDING_REPORT_LOGS + 2; minute++) {
+        h.services.setNow(new Date(TEST_NOW.getTime() + minute * 60000));
+        report(h, 'roster', {}, admin);
+      }
+      expect(MAX_PENDING_REPORT_LOGS).toBe(20);
+      const list = kept(h) as string[];
+      expect(list).toHaveLength(20);
+      expect(list[0]).toContain(' at Oct 21, 2026 10:02 AM ');
+      expect(list[19]).toContain(' at Oct 21, 2026 10:21 AM ');
+      free();
+      report(h, 'roster', {}, admin);
+      expect(logged(h)).toHaveLength(21);
+    });
+
+    it('never fails the report when the cache fails or holds something unreadable', () => {
+      const h = harness();
+      const admin = h.signIn(TREASURER);
+      const cache = h.services.cache;
+      // Not a list of rows: ignored. In a list, anything that isn't text is left out.
+      for (const value of ['{"oops":', JSON.stringify({ rows: [VIEWED] }), JSON.stringify([7, '', null, VIEWED + LATE])]) {
+        cache.put(PENDING_REPORT_LOG_KEY, value, 600);
+        expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      }
+      expect(logged(h).map((r) => r.Detail)).toEqual([VIEWED, VIEWED, VIEWED + LATE, VIEWED]);
+      // The next row kept replaces an unreadable value.
+      cache.put(PENDING_REPORT_LOG_KEY, '{"oops":', 600);
+      const free = busyLock(h);
+      report(h, 'roster', {}, admin);
+      expect(kept(h)).toEqual([VIEWED + LATE]);
+
+      const { get, put, remove } = cache;
+      const down = () => {
+        throw new Error('CacheService unavailable');
+      };
+      cache.put = down;
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      cache.get = down;
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      free();
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      expect(logged(h).map((r) => r.Detail).slice(4)).toEqual([VIEWED]);
+      // A kept row that can't be cleared from the cache is still written.
+      cache.get = get;
+      cache.put = put;
+      cache.remove = down;
+      expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+      expect(logged(h).map((r) => r.Detail).slice(5)).toEqual([VIEWED + LATE, VIEWED]);
+      cache.remove = remove;
+    });
   });
 
   it('does not log the other reports', () => {

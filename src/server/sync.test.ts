@@ -3,7 +3,8 @@ import { createFakePaymentGateway } from './memory';
 import { SIGN_IN_EMAIL_RESERVE } from './notify';
 import { TABLES, type TableName } from '../shared/schema';
 import type { TickReport } from '../shared/types';
-import type { PushSender } from './services';
+import { PENDING_REPORT_LOG_KEY } from './reports';
+import type { LockOptions, PushSender } from './services';
 import { harness, NGUYEN, ORTIZ, PARENT, PARENT2, storedToken, TEST_NOW, testSubscription, TREASURER } from './test-helpers';
 
 const credit = (studentId: string, amount: number, description = 'Fall Fruit sale') => ({
@@ -599,6 +600,81 @@ describe('the script lock is not held while notifications go out', () => {
     expect(h2.err('payment.captureOrder', { orderId }, token).code).toBe('INTERNAL');
     expect(locked2).toEqual([]);
     expect(h2.services.outbox.mail.map((m) => m.subject)).toEqual(['Payment needs review']);
+  });
+});
+
+describe('syncTick: a roster Log row skipped on a busy lock', () => {
+  const VIEWED = 'Roster with contact details (all students, 5 students) viewed by treasurer@example.com';
+  const LATE = `${VIEWED} at Oct 21, 2026 10:00 AM (noted late: the app was busy)`;
+  const logged = (h: ReturnType<typeof harness>) => h.rows('Log').filter((r) => r.Kind === 'report');
+
+  /** A board member opens the roster while another execution (a long sync) holds the lock. */
+  function viewRosterWhileBusy(h: ReturnType<typeof harness>): void {
+    const admin = h.signIn(TREASURER);
+    const free = h.services.withLock;
+    h.services.withLock = <T>(fn: () => T, options?: LockOptions): T => {
+      if (options?.waitMs !== undefined) throw new Error('Lock timeout: another process was holding the lock for too long.');
+      return fn();
+    };
+    try {
+      expect(h.ok('admin.report', { kind: 'roster' }, admin).report.rows).toHaveLength(5);
+    } finally {
+      h.services.withLock = free;
+    }
+    expect(logged(h)).toEqual([]);
+  }
+
+  it('is written by the next sync, saying who viewed the roster and when, and once only', () => {
+    const h = harness();
+    viewRosterWhileBusy(h);
+    h.services.setNow(LATER);
+    expect(h.app.syncTick().errors).toEqual([]);
+    expect(logged(h)).toEqual([{ At: '2026-10-21T14:15:00.000Z', Kind: 'report', Detail: LATE }]);
+    expect(h.services.cache.get(PENDING_REPORT_LOG_KEY)).toBeNull();
+    h.services.setNow(new Date(LATER.getTime() + 15 * 60 * 1000));
+    h.app.syncTick();
+    expect(logged(h)).toHaveLength(1);
+  });
+
+  it('is written by Run sync now too', () => {
+    const h = harness();
+    viewRosterWhileBusy(h);
+    h.ok('admin.runSync', {}, h.signIn(TREASURER));
+    expect(logged(h).map((r) => r.Detail)).toEqual([LATE]);
+  });
+
+  it('is written even when another step of that sync fails', () => {
+    const h = harness();
+    viewRosterWhileBusy(h);
+    h.services.store.overwrite = () => {
+      throw new Error('quota exceeded');
+    };
+    h.services.db.tables.Ledger?.push(credit('S0001', 50));
+    expect(h.app.syncTick().errors).toEqual(['balances: quota exceeded']);
+    expect(logged(h).map((r) => r.Detail)).toEqual([LATE]);
+  });
+
+  it('leaves the sync report as it is, with or without a row to write, and when the cache fails', () => {
+    const plain = harness();
+    const expected = plain.app.syncTick();
+    expect(expected.errors).toEqual([]);
+    const logRows = plain.rows('Log').length;
+
+    const h = harness();
+    viewRosterWhileBusy(h);
+    expect(h.app.syncTick()).toEqual(expected);
+    expect(h.rows('Log')).toHaveLength(logRows + 1);
+
+    const broken = harness();
+    viewRosterWhileBusy(broken);
+    const cache = broken.services.cache;
+    const get = cache.get.bind(cache);
+    cache.get = (key) => {
+      if (key === PENDING_REPORT_LOG_KEY) throw new Error('CacheService unavailable');
+      return get(key);
+    };
+    expect(broken.app.syncTick()).toEqual(expected);
+    expect(broken.rows('Log')).toHaveLength(logRows);
   });
 });
 

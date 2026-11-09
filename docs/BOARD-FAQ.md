@@ -97,6 +97,8 @@ Cloudflare signs them so mail providers can tell they really come from `mytma.or
 * **Board members** listed in the sheet's Settings (`ADMIN_EMAILS`) get *Board tools* in the app:
   fund requests, new sign-ups, announcements, an activity log and reports. One report, the roster,
   lists parents' emails and phone numbers; each time someone opens it in the app, the Log tab says who.
+  (If the app is busy at that moment, the note is added a few minutes later and says when the
+  roster was opened.)
   Another, *Who's using the app*, shows when each household last opened the app and signed in.
 * **People who can open the spreadsheet** see everything, just as today. Keep that list short.
 

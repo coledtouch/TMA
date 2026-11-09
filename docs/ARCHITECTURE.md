@@ -260,7 +260,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
 | `admin.announce` | Refuse (`CONFLICT` "already sent N minutes ago") the same title and body sent within the last 15 minutes, so a retry after the app gave up waiting can't send it twice. Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. The app waits up to 6 minutes for this and for `admin.runSync` (30 s for everything else). |
 | `admin.runSync` | Run `syncTick()` and return its report. As in the scheduled run, linked calendars are read before the write lock is taken (the route's `prepare`) and applied under it. |
-| `admin.report` | Read-only, no write lock (the roster's Log row takes it briefly, §5.4). Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
+| `admin.report` | Read-only, no write lock (the roster's Log row takes it briefly, or is kept for the next sync when it is busy, §5.4). Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
 
 ### 5.1 Bootstrap
 
@@ -339,8 +339,21 @@ families and the dashboard see.
   (contact details) adds one Log row, `report` "Roster with contact details (<school, group or all
   students>, N students) viewed by <admin email>", taking the write lock just for that row as auth's
   rate-limit row does. It waits at most `REPORT_LOG_LOCK_WAIT_MS` (3 s) for the lock, so a long sync
-  doesn't hold up the report; if the lock is busy, only the row is skipped (a console error says so).
-  Other reports log nothing.
+  doesn't hold up the report. Other reports log nothing.
+* **A skipped roster Log row is kept**, not lost (it is the only record of who looked at parents'
+  emails and phones). If the lock is busy the report is still returned, a console error says so, and
+  the row goes into the cache key `report-log-pending`: a JSON list of the Log details not written
+  yet, oldest first. Each ends " at <when the roster was viewed, New York time> (noted late: the app
+  was busy)", e.g. "… viewed by <admin email> at Oct 21, 2026 10:00 AM (noted late: the app was
+  busy)", because its Log row carries the later time it is written. The list is kept for 6 hours
+  (`PENDING_REPORT_LOG_SECONDS`) and holds at most 20 rows (`MAX_PENDING_REPORT_LOGS`; past that the
+  oldest is dropped). `flushPendingReportLogs`, called only under the write lock, queues them as
+  `report` Log rows and removes the key. The next roster view that gets the lock calls it before
+  adding its own row, and every sync calls it as its last step (§7), so a kept row reaches the Log
+  within about 15 minutes. A row written before an error (releasing the lock, say) counts as written
+  and is not kept to write again. A cache error is logged to the console only and never fails the
+  report or the sync. Only a row the cache drops early, or one that no sync or roster view writes
+  within those 6 hours, stays missing.
 * Ledger and Payments rows with no date can't be placed in a date range: they are left out and counted
   in a note.
 * A StudentID on two Students rows counts once, as its first row, as everywhere in the app. The
@@ -478,7 +491,7 @@ Use `formatCents`; use first names only for students in notifications (privacy o
 
 `syncTick()` runs every 15 minutes (Apps Script time trigger). Each step catches its own errors
 into `report.errors` so one failure doesn't block the rest. Before it takes the write lock it reads
-the linked calendars (network; `fetchCalendars`), and applies them as its last step under the lock
+the linked calendars (network; `fetchCalendars`), and applies them under the lock after steps 1–3
 (see "Linked calendars" below). Rules for every step:
 
 * **Settle first.** Sheets saves each cell as it is typed, so a row typed in the sheet (an
@@ -515,6 +528,11 @@ the linked calendars (network; `fetchCalendars`), and applies them as its last s
    shouldn't buzz phones just after midnight): deliver to all matching recipients (all channels
    allowed), set Sent = now. "All recipients" = all guardian emails
    of non-Inactive families **plus** any email in Preferences/Devices (people who signed in but have no family yet).
+
+Then come the linked calendars, and last the **kept roster Log rows** (`flushPendingReportLogs`,
+§5.4): rows a busy lock made `admin.report` skip are queued for the Log, which is written as the lock
+is released. The step is last so the rows leave the cache just before that. It adds nothing to the
+tick report, and with nothing kept it does nothing.
 
 `dailyTick()` runs once a day around 8 AM:
 
@@ -772,7 +790,7 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
   two zones are looked up once per execution.
 * Cache: `CacheService.getScriptCache()`. Lock: `LockService.getScriptLock().waitLock(20000)`, or the
   shorter `waitMs` a caller asks for (the Sign-ins notes: 5000 ms for a sign-in, 1500 ms for an opening;
-  never more than 20000). Re-entrant:
+  the roster's Log row: 3000 ms; never more than 20000). Re-entrant:
   a nested call in the same execution reuses the held lock.
 * Crypto: `Utilities.computeHmacSha256Signature`, uuid via `Utilities.getUuid()`, digits via uuid
   hex → numbers (rejection sampling).
@@ -1254,7 +1272,10 @@ export function PayPalCheckout(props: {
   and `Busy` rows copied before removed).
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
   status and filter, validation messages, admin-only, the row cap (and the sheet's cap and note), and the
-  roster's Log row with its short lock wait.
+  roster's Log row: its short lock wait, a row skipped on a busy lock kept with who and when (New York
+  time, 20 at most), written once by the next roster view that gets the lock, not kept when it was
+  written before an error, and a failing cache never failing the report. `src/server/sync.test.ts`
+  has the sync writing a kept row once, with the tick report unchanged.
 * `src/server/sign-ins.test.ts`: the Sign-ins upsert (new row, update, household filled in later, no
   code or device stored), the 6-hour throttle on openings, a busy lock or failing write or cache
   that skips the row without breaking sign-in or bootstrap, a skipped sign-in kept and added by the

@@ -20,6 +20,7 @@ import type { AnnouncementRec, RedemptionRec } from './data';
 import { announcementNotice, creditNotice, debitNotice, eventTomorrowNotice, paymentReminderNotice } from './messages';
 import { addCounts, allRecipients, deliver, notifyFamily, zeroCounts } from './notify';
 import { ledgerHasReference, notifyDecision, postRedemptionLedger } from './redemptions';
+import { flushPendingReportLogs } from './reports';
 import type { RowData } from './services';
 import { addDays, daysBetween, errorMessage, idKey, nyDate, nyParts, parseTimestamp, str } from './util';
 
@@ -68,6 +69,9 @@ export function runSync(ctx: Ctx, calendars?: CalendarFetch | null): TickReport 
   step(ctx, report, 'balances', () => detectBalanceChanges(ctx, report));
   step(ctx, report, 'announcements', () => sendQueuedAnnouncements(ctx, report));
   if (calendars !== undefined) step(ctx, report, 'calendars', () => syncCalendars(ctx, report, calendars));
+  // Roster Log rows a busy lock made the report skip (reports.ts). Last, so they leave the cache
+  // just before the lock is released and the Log written, not minutes ahead of it.
+  step(ctx, report, 'report log', () => flushPendingReportLogs(ctx));
   return report;
 }
 

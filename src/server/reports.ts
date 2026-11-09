@@ -45,7 +45,10 @@ import {
   isKnown,
   joinList,
   nyDate,
+  nyParts,
   plural,
+  shortDate,
+  timeText,
   truncate,
   unique,
 } from './util';
@@ -79,8 +82,14 @@ export const REPORT_TITLES: Readonly<Record<ReportKind, string>> = {
 /** Most rows one report returns. Past it, a note says how many were left out (totals still count them). */
 export const MAX_REPORT_ROWS = 5000;
 
-/** Longest wait for the script lock before the roster's Log row is skipped (the report is still returned). */
+/** Longest wait for the script lock before the roster's Log row is kept to write later (the report is still returned). */
 export const REPORT_LOG_LOCK_WAIT_MS = 3000;
+/** Cache key that keeps the roster Log rows not written yet (a busy lock): a JSON array of Log details, oldest first. */
+export const PENDING_REPORT_LOG_KEY = 'report-log-pending';
+/** A kept Log row waits this long for the next sync or roster view to write it: 6 hours (CacheService's longest). */
+export const PENDING_REPORT_LOG_SECONDS = 6 * 3600;
+/** Most Log rows kept at once; past it the oldest is dropped. */
+export const MAX_PENDING_REPORT_LOGS = 20;
 
 export interface BuildReportOptions {
   /** Most rows to return (default MAX_REPORT_ROWS). */
@@ -157,19 +166,83 @@ export function reportOptions(ctx: Ctx): ReportOptions {
 }
 
 /**
- * Who looked at families' contact details goes in the Log tab. A report only reads, so this takes
- * the write lock just for that one row (as auth.ts does for its rate-limit row), waiting at most
- * REPORT_LOG_LOCK_WAIT_MS so a long sync doesn't hold up the report; if the lock is busy the row
- * is skipped, never the report.
+ * Who looked at families' contact details goes in the Log tab, the only record of it. A report only
+ * reads, so this takes the write lock just for that one row (as auth.ts does for its rate-limit row),
+ * waiting at most REPORT_LOG_LOCK_WAIT_MS so a long sync doesn't hold up the report. If the lock is
+ * busy the report is still returned and the row is kept in the cache (as sign-ins.ts keeps a skipped
+ * sign-in): the next sync, or the next roster view that gets the lock, writes it. Never throws.
  */
 function logContactReport(ctx: Ctx, adminEmail: string, report: Report): void {
   const scope = [report.filters.school, report.filters.ensemble].filter(Boolean).join(', ') || 'all students';
   const detail = `Roster with contact details (${scope}, ${plural(report.rows.length, 'student')}) viewed by ${adminEmail}`;
+  let written = false;
   try {
-    inWriteLock(ctx, () => ctx.log('report', detail), { waitMs: REPORT_LOG_LOCK_WAIT_MS });
+    inWriteLock(
+      ctx,
+      () => {
+        // Rows kept from earlier views go first, so the Log stays in the order things happened.
+        flushPendingReportLogs(ctx);
+        ctx.log('report', detail);
+        // Queued, and written as the lock is released: an error after this (releasing the lock)
+        // must not keep the row to write again.
+        written = true;
+      },
+      { waitMs: REPORT_LOG_LOCK_WAIT_MS },
+    );
   } catch (err) {
     ctx.s.logger.error('Could not write the Log row', errorMessage(err));
+    if (!written) keepReportLog(ctx, detail);
   }
+}
+
+/**
+ * Write the roster Log rows kept from a busy lock, oldest first. Call only while holding the write
+ * lock: the rows are queued with ctx.log and written as it is released. The next roster view that
+ * gets the lock calls this, and so does every sync (sync.ts), so a kept row reaches the Log within
+ * about 15 minutes. Never throws.
+ */
+export function flushPendingReportLogs(ctx: Ctx): void {
+  const kept = readPendingReportLogs(ctx);
+  if (kept.length === 0) return;
+  for (const entry of kept) ctx.log('report', entry);
+  try {
+    ctx.s.cache.remove(PENDING_REPORT_LOG_KEY);
+  } catch (err) {
+    ctx.s.logger.error('Could not clear the kept Log rows from the cache', errorMessage(err));
+  }
+}
+
+/**
+ * The Log row just skipped: keep it after any kept before, saying when the roster was viewed (its
+ * Log row will carry the later time it is written). Never throws.
+ */
+function keepReportLog(ctx: Ctx, detail: string): void {
+  const entry = `${detail} at ${nyDateTime(ctx.now)} (noted late: the app was busy)`;
+  const kept = [...readPendingReportLogs(ctx), entry].slice(-MAX_PENDING_REPORT_LOGS);
+  try {
+    ctx.s.cache.put(PENDING_REPORT_LOG_KEY, JSON.stringify(kept), PENDING_REPORT_LOG_SECONDS);
+  } catch (err) {
+    ctx.s.logger.error('Could not keep the skipped Log row in the cache', errorMessage(err));
+  }
+}
+
+/** The Log rows kept so far, oldest first: [] when none, unreadable, or the cache failed. Never throws. */
+function readPendingReportLogs(ctx: Ctx): string[] {
+  try {
+    const raw = ctx.s.cache.get(PENDING_REPORT_LOG_KEY);
+    if (!raw) return [];
+    const kept: unknown = JSON.parse(raw);
+    if (Array.isArray(kept)) return kept.filter((entry): entry is string => typeof entry === 'string' && entry !== '');
+  } catch (err) {
+    ctx.s.logger.error('Could not read the kept Log rows from the cache', errorMessage(err));
+  }
+  return [];
+}
+
+/** "Oct 21, 2026 10:00 AM" in New York time (the app's time zone), as the sheet's report tabs write it. */
+function nyDateTime(at: Date): string {
+  const p = nyParts(at);
+  return `${shortDate(nyDate(at))}, ${p.year} ${timeText(p.hour, p.minute)}`;
 }
 
 // ---------------------------------------------------------------------------
