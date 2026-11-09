@@ -136,17 +136,53 @@ describe('SheetStore.readRows', () => {
     expect(s.readRows('Events', 2, 4)).toEqual([concert.data, null, typed.data, null]);
     expect(parseDate(s.readRows('Events', 2, 1)[0]?.Date)).toBe('2026-12-10');
 
-    // Fresh, with one getRange over the mapped columns: an edit in the sheet shows at once, while
-    // read() keeps its memo and the tab is not read again.
+    // Fresh, with one getRange for the header row and one over the mapped columns: an edit in the
+    // sheet shows at once, while read() keeps its memo and the tab is not read again.
     sheet.write(4, 2, 'Typed (moved)');
     const getRange = vi.spyOn(sheet, 'getRange');
     expect(s.readRows('Events', 4, 3)).toEqual([{ ...typed.data, Title: 'Typed (moved)' }, null, null]);
-    expect(getRange.mock.calls).toEqual([[4, 1, 1, 6]]);
+    expect(getRange.mock.calls).toEqual([
+      [1, 1, 1, 6],
+      [4, 1, 1, 6],
+    ]);
     expect(s.read('Events')[1].data.Title).toBe('Typed');
     expect(sheet.ops.filter((op) => op === 'getDataRange')).toHaveLength(1);
 
     expect(s.readRows('Events', 1, 1)).toEqual([null]); // the header row
     expect(s.readRows('Calendars', 2, 2)).toEqual([null, null]); // a missing tab
+  });
+
+  it('maps the header row again, so a write after a column was dragged goes where the columns are now', () => {
+    const sheet = gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [
+        [...TABLES.Events.headers],
+        ['CAL-1', '2026-11-10', '7:00 PM', 'Concert', 'TRHS', '', '', '', 'Music Dept', 'k1'],
+        ['CAL-2', '2026-11-11', '6:00 PM', 'Rehearsal', 'Band room', '', '', '', 'Music Dept', 'k2'],
+      ]),
+    );
+    const s = store();
+    s.read('Events');
+    // The check the calendar sync makes just before it writes a row.
+    const holdsKey = (row: number, key: string) => {
+      const [data] = s.readRows('Events', row, 1);
+      return data?.Source === 'Music Dept' && data['Calendar Event'] === key;
+    };
+
+    expect(holdsKey(2, 'k1')).toBe(true);
+    s.update('Events', 2, { Title: '0042', Location: 'Auditorium' });
+    expect(sheet.dump()[1]).toEqual(['CAL-1', '2026-11-10', '7:00 PM', '0042', 'Auditorium', '', '', '', 'Music Dept', 'k1']);
+
+    // A volunteer drags Date to between Location and Details. Source and Calendar Event stay where
+    // they were, so the check on them passes either way; Title and Location are one column further left.
+    sheet.moveColumn(2, 5);
+    expect(sheet.dump()[0]).toEqual(['ID', 'Time', 'Title', 'Location', 'Date', 'Details', 'Schools', 'Ensembles', 'Source', 'Calendar Event']);
+    expect(holdsKey(3, 'k2')).toBe(true);
+    s.update('Events', 3, { Title: '12/5', Location: 'Gym' });
+    expect(sheet.dump()[2]).toEqual(['CAL-2', '6:00 PM', '12/5', 'Gym', '2026-11-11', '', '', '', 'Music Dept', 'k2']);
+    // Plain text on the Title and Location cells only: the Date cell keeps its format.
+    expect([...sheet.numberFormats.keys()].filter((key) => key.startsWith('3,')).sort()).toEqual(['3,3', '3,4']);
+    // The rows memoized by read() were not read again for any of this.
+    expect(sheet.ops.filter((op) => op === 'getDataRange')).toHaveLength(1);
   });
 });
 

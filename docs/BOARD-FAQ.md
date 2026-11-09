@@ -130,8 +130,9 @@ a calendar.
   **read-only** calendar permission. Technically it covers every calendar TMA's Google account can
   see, which is why the script only reads the calendars listed in the Calendars tab, and why TMA's
   account should not be subscribed to volunteers' personal calendars.
-* **Private events are never copied.** Neither are cancelled events, or Google's out-of-office and
-  focus-time entries. The app never reads who is invited to an event.
+* **Private events are never copied.** Neither are cancelled events, Google's out-of-office and
+  focus-time entries, or events a calendar shows only as *Busy* with their details hidden. The app
+  never reads who is invited to an event.
 * **Whose calendars?** Ones made in TMA's account, ones their owners share with TMA's account, and
   public ones. A calendar can also be linked by its iCal address. A *secret* iCal address works like
   a password, so it belongs only in the spreadsheet, which few people can open; the app never writes

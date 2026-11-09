@@ -4,8 +4,10 @@
  * - Each tab is read with one getDataRange().getValues() and memoized for the
  *   rest of the execution. Any write to a tab drops its memoized rows, so the
  *   next read sees what Sheets actually stored (Sheets converts typed text such
- *   as "TRUE" or "50" into booleans/numbers on write). Header layouts are kept.
- *   readRows reads just a few rows, fresh, for a check right before a write.
+ *   as "TRUE" or "50" into booleans/numbers on write). Header layouts are kept
+ *   across writes. readRows reads just a few rows, fresh, for a check right
+ *   before a write, and maps the header row again first: a volunteer can drag
+ *   a column at any time, and the write that follows uses that layout.
  * - Headers are matched with normalizeHeader + TABLES[...].aliases, so column
  *   order, spelling and extra treasurer columns never matter.
  * - Text that Sheets would evaluate as a formula is written as plain text.
@@ -56,7 +58,7 @@ export interface SheetStoreOptions {
   withLock?: <T>(fn: () => T) => T;
 }
 
-/** Where a tab's canonical columns are. Survives row writes; we update it when we add headers. */
+/** Where a tab's canonical columns are. Survives row writes; we update it when we add headers, and readRows maps it again. */
 interface Layout {
   table: TableName;
   sheet: Sheet;
@@ -270,12 +272,15 @@ class SpreadsheetStore implements SheetStore {
 
   /**
    * A few rows read now with one getValues() (to check them just before a write), mapped as read()
-   * maps rows, under the header layout the writes use. The memoized rows are neither used nor changed.
+   * maps rows. The header row is mapped again first (one more getValues()) and kept as the tab's
+   * layout: a volunteer may have dragged a column since the tab was read, and both this check and
+   * the write that follows it must use the columns as they are now. The memoized rows are neither
+   * used nor changed.
    */
   readRows(table: TableName, firstRow: number, count: number): Array<RowData | null> {
     const rows: Array<RowData | null> = [];
     for (let i = 0; i < count; i += 1) rows.push(null);
-    const layout = this.layout(table);
+    const layout = this.readLayout(table, this.layouts.get(table)?.sheet ?? this.findSheet(table));
     if (!layout || layout.columns.size === 0 || !Number.isInteger(firstRow) || firstRow < 2) return rows;
     const n = Math.min(rows.length, layout.sheet.getLastRow() - firstRow + 1);
     if (n < 1) return rows;
@@ -380,7 +385,11 @@ class SpreadsheetStore implements SheetStore {
   private layout(table: TableName): Layout | null {
     const memo = this.layouts.get(table);
     if (memo !== undefined) return memo;
-    const sheet = this.findSheet(table);
+    return this.readLayout(table, this.findSheet(table));
+  }
+
+  /** Map the tab's header row as it is now (one getValues() of row 1) and memoize that layout. */
+  private readLayout(table: TableName, sheet: Sheet | null): Layout | null {
     let layout: Layout | null = null;
     if (sheet) {
       const lastColumn = sheet.getLastColumn();

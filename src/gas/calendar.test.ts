@@ -1,6 +1,7 @@
 import * as nodeCrypto from 'node:crypto';
 import { createApp } from '../server/app';
 import { calendarStatusLines } from '../server/calendars';
+import { parseIcs } from '../server/ics';
 import { CalendarReadError, type CalendarWindow } from '../server/services';
 import { TEST_NOW } from '../server/test-helpers';
 import { createGasCalendarSource, gasZones, googleCalendarError, mapGoogleEvent, MAX_ICS_CHARS, readGoogleCalendar, readIcalLink } from './calendar';
@@ -17,6 +18,15 @@ afterEach(() => uninstallGasFakes());
 const RANGE: CalendarWindow = { start: new Date('2026-10-20T04:00:00Z'), end: new Date('2027-04-20T04:00:00Z'), maxEvents: 500 };
 const BOARD = 'abc123@group.calendar.google.com';
 const ICS_URL = 'https://calendar.example.com/private-0123456789abcdef/basic.ics';
+
+/** A VEVENT as Google's iCal addresses write one (times in UTC), with any further lines. */
+function icsEvent(uid: string, start: string, summary: string, ...more: string[]): string[] {
+  return ['BEGIN:VEVENT', `DTSTART:${start}`, `UID:${uid}`, `SUMMARY:${summary}`, 'TRANSP:OPAQUE', ...more, 'END:VEVENT'];
+}
+
+function icsFile(...events: string[][]): string {
+  return ['BEGIN:VCALENDAR', 'PRODID:-//Google Inc//Google Calendar 70.9054//EN', 'VERSION:2.0', ...events.flat(), 'END:VCALENDAR'].join('\r\n');
+}
 
 function problem(fn: () => unknown): { problem: string; detail: string } {
   try {
@@ -153,6 +163,36 @@ describe('iCal links (UrlFetchApp)', () => {
     expect(gas.fetch.requests[0]).toMatchObject({ url: ICS_URL, method: 'get', muteHttpExceptions: true });
   });
 
+  it('marks events shown only as "Busy" (no location, no description) as private; named events and a Busy with details are not', () => {
+    // What Google's public iCal address gives for a calendar that is public as free/busy only, and
+    // for a private event on a public calendar: SUMMARY:Busy and no CLASS, LOCATION or DESCRIPTION.
+    gas.fetch.handler = () => ({
+      code: 200,
+      body: icsFile(
+        icsEvent('hidden-1', '20261112T230000Z', 'Busy'),
+        icsEvent('hidden-2', '20261113T230000Z', ' busy ', 'LOCATION:', 'DESCRIPTION: '),
+        icsEvent('named', '20261114T230000Z', 'Pops concert'),
+        icsEvent('busy-bees', '20261115T230000Z', 'Busy Bees rehearsal'),
+        icsEvent('busy-where', '20261116T230000Z', 'Busy', 'LOCATION:TRHS'),
+        icsEvent('busy-what', '20261117T230000Z', 'Busy', 'DESCRIPTION:Bring music'),
+        icsEvent('busy-off', '20261118T230000Z', 'Busy', 'STATUS:CANCELLED'),
+        icsEvent('marked', '20261119T230000Z', 'Board dinner', 'CLASS:PRIVATE'),
+      ),
+    });
+    const feed = readIcalLink(ICS_URL, RANGE);
+    expect(feed.events.map((e) => [e.uid, e.private ?? false, e.cancelled ?? false])).toEqual([
+      ['hidden-1', true, false],
+      ['hidden-2', true, false],
+      ['named', false, false],
+      ['busy-bees', false, false],
+      ['busy-where', false, false],
+      ['busy-what', false, false],
+      ['busy-off', false, true],
+      ['marked', true, false],
+    ]);
+    expect(feed).toMatchObject({ unsupported: 0, capped: false });
+  });
+
   it('refuses http:// before fetching anything', () => {
     expect(problem(() => readIcalLink('http://calendar.example.com/a.ics', RANGE))).toEqual({ problem: 'bad_address', detail: '' });
     expect(gas.fetch.requests).toHaveLength(0);
@@ -199,14 +239,20 @@ describe('iCal links (UrlFetchApp)', () => {
 });
 
 describe('the sync through the real sheet adapter', () => {
-  function sheetWithCalendar() {
+  function sheetWithCalendar(calendar = BOARD) {
     const services = createGasServices();
     services.clock = { now: () => new Date(TEST_NOW.getTime()) };
     const app = createApp(services);
     app.setup({});
     services.store.append('Events', [{ ID: 'EV-1', Date: '2026-11-10', Time: '7:00 PM', Title: 'Typed by hand', Location: 'TRHS' }]);
-    services.store.append('Calendars', [{ Name: 'Music Dept', Calendar: BOARD, Groups: 'Band', On: true }]);
-    return { services, app, events: () => gas.spreadsheet.getSheetByName('Events')! };
+    services.store.append('Calendars', [{ Name: 'Music Dept', Calendar: calendar, Groups: 'Band', On: true }]);
+    const events = () => gas.spreadsheet.getSheetByName('Events')!;
+    /** Title and Location of every Events row, wherever those columns are now. */
+    const titles = () => {
+      const [header, ...rows] = events().dump();
+      return rows.map((r) => [r[header.indexOf('Title')], r[header.indexOf('Location')]]);
+    };
+    return { services, app, events, titles };
   }
 
   const items = [
@@ -280,6 +326,92 @@ describe('the sync through the real sheet adapter', () => {
     gas.calendar.handler = () => ({ accessRole: 'reader', items: [{ ...busy, summary: 'Pops concert' }] });
     expect(app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 1, updated: 0, removed: 0 });
     expect(events().dump().slice(1).map((r) => r[3])).toEqual(['Typed by hand', 'Pops concert']);
+  });
+
+  it('a column dragged while the sync writes: the rows written after it still go to the right columns', () => {
+    const { app, services, events, titles } = sheetWithCalendar();
+    gas.calendar.handler = () => ({ items: [items[1], items[2]] });
+    expect(app.syncTick().calendars).toMatchObject({ added: 2 });
+    const sheet = events();
+    const column = (name: string) => sheet.dump()[0].indexOf(name) + 1;
+
+    // Both events are renamed. Right after the sync writes the first, a volunteer drags Location in
+    // front of Title; Source and Calendar Event stay where they are, so the row checks still pass.
+    gas.calendar.handler = () => ({
+      items: [
+        { ...items[1], summary: 'Pops concert (new time)' },
+        { ...items[2], summary: 'Winter break (no school)' },
+      ],
+    });
+    const store = services.store;
+    const update = store.update.bind(store);
+    let dragged = false;
+    store.update = (table, row, patch) => {
+      update(table, row, patch);
+      if (table === 'Events' && !dragged) {
+        dragged = true;
+        sheet.moveColumn(column('Location'), column('Title'));
+      }
+    };
+    expect(app.syncTick().calendars).toMatchObject({ updated: 2 });
+    expect(dragged).toBe(true);
+    expect(column('Location')).toBe(column('Title') - 1);
+    expect(titles()).toEqual([
+      ['Typed by hand', 'TRHS'],
+      ['Pops concert (new time)', ''],
+      ['Winter break (no school)', ''],
+    ]);
+  });
+
+  it('an iCal link that is public as free/busy only copies no "Busy" rows, and still counts as read', () => {
+    const { app, services, titles } = sheetWithCalendar(ICS_URL);
+    gas.fetch.handler = () => ({ code: 200, body: icsFile(icsEvent('b1', '20261112T230000Z', 'Busy'), icsEvent('b2', '20261113T150000Z', 'Busy')) });
+    const report = app.syncTick();
+    expect(report.calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 0, removed: 0 });
+    expect(report.errors).toEqual([]);
+    expect(titles()).toEqual([['Typed by hand', 'TRHS']]);
+    expect(calendarStatusLines(services)).toContain('Calendar "Music Dept": OK ✓, 0 events (2 private skipped)');
+  });
+
+  it('from an iCal link with named events and "Busy" ones, copies the named ones, and a Busy that has a location or details', () => {
+    const { app, services, titles } = sheetWithCalendar(ICS_URL);
+    gas.fetch.handler = () => ({
+      code: 200,
+      body: icsFile(
+        icsEvent('b1', '20261112T230000Z', 'Busy'),
+        icsEvent('named', '20261113T230000Z', 'Pops concert', 'LOCATION:PAC'),
+        icsEvent('busy-where', '20261114T230000Z', 'Busy', 'LOCATION:TRHS'),
+        icsEvent('busy-what', '20261115T230000Z', 'Busy', 'DESCRIPTION:Bring music'),
+      ),
+    });
+    expect(app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 3, updated: 0, removed: 0 });
+    expect(titles()).toEqual([
+      ['Typed by hand', 'TRHS'],
+      ['Pops concert', 'PAC'],
+      ['Busy', 'TRHS'],
+      ['Busy', ''],
+    ]);
+    expect(calendarStatusLines(services)).toContain('Calendar "Music Dept": OK ✓, 3 events (1 private skipped)');
+  });
+
+  it('removes "Busy" rows copied from an iCal link before, at the next sync', () => {
+    const { app, services, titles } = sheetWithCalendar(ICS_URL);
+    const body = icsFile(icsEvent('b1', '20261112T230000Z', 'Busy'), icsEvent('b2', '20261113T150000Z', 'Busy'), icsEvent('named', '20261114T230000Z', 'Pops concert'));
+    // As the app read the link before: the same file through the same reader, its busy times as ordinary events.
+    const source = services.calendars;
+    services.calendars = {
+      read: (_ref, range) => {
+        const { events, unsupported, capped } = parseIcs(body, { range, maxEvents: range.maxEvents, zones: gasZones });
+        return { events, unsupported, capped };
+      },
+    };
+    expect(app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 3, updated: 0, removed: 0 });
+    expect(titles().map((r) => r[0])).toEqual(['Typed by hand', 'Busy', 'Busy', 'Pops concert']);
+
+    services.calendars = source;
+    gas.fetch.handler = () => ({ code: 200, body });
+    expect(app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 0, removed: 2 });
+    expect(titles().map((r) => r[0])).toEqual(['Typed by hand', 'Pops concert']);
   });
 
   it('with the Calendars tab deleted, keeps the copied rows and says what to do (not silently frozen)', () => {

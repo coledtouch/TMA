@@ -10,7 +10,8 @@
  *   Google would list its busy times without names, every one an "Untitled event".
  *   With an old manifest the service is missing: that is reported, never a crash.
  * - iCal links: UrlFetchApp (https only, at most 2 MB), parsed by the core's
- *   reader (src/server/ics.ts) with time zones resolved by Utilities.
+ *   reader (src/server/ics.ts) with time zones resolved by Utilities. Events
+ *   the link shows only as "Busy" (free/busy, no details) count as private.
  *
  * Errors carry a reason and an HTTP code only: never the calendar's address
  * (a private iCal link is a password).
@@ -164,6 +165,16 @@ export function readGoogleCalendar(id: string, range: CalendarWindow): CalendarF
   return { events, unsupported, capped };
 }
 
+/**
+ * Whether an iCal event is only a busy time with its details hidden. Google's public iCal address
+ * gives every event of a calendar that is public as "See only free/busy", and each private event of
+ * any public calendar, as SUMMARY:Busy with no CLASS, LOCATION or DESCRIPTION. So: a title that is
+ * exactly "Busy", and no location and no description. A real event named Busy that has either is kept.
+ */
+function isBusyOnly(event: CalendarEvent): boolean {
+  return event.title.trim().toLowerCase() === 'busy' && event.location.trim() === '' && event.description.trim() === '';
+}
+
 /** An https iCal link: fetched, checked, and read by the core's parser. */
 export function readIcalLink(url: string, range: CalendarWindow): CalendarFeed {
   if (!/^https:\/\/[^\s<>"'`]+$/i.test(url)) throw new CalendarReadError('bad_address');
@@ -190,6 +201,13 @@ export function readIcalLink(url: string, range: CalendarWindow): CalendarFeed {
   if (!looksLikeIcs(text)) throw new CalendarReadError('not_ical');
   const parsed = parseIcs(text, { range, maxEvents: range.maxEvents, zones: gasZones });
   if (parsed.calendars === 0) throw new CalendarReadError('not_ical');
+  // Busy times without details are marked private, so the core skips them (Status counts them as
+  // private) instead of copying a row titled "Busy", with a reminder to every family, for each. The
+  // link itself still counts as read: were it refused, "Busy" rows copied before would stay in
+  // Events (a failed calendar's rows are left alone) instead of being removed at the next sync.
+  for (const event of parsed.events) {
+    if (!event.cancelled && !event.private && isBusyOnly(event)) event.private = true;
+  }
   return { events: parsed.events, unsupported: parsed.unsupported, capped: parsed.capped };
 }
 

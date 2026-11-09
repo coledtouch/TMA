@@ -556,8 +556,9 @@ work for them unchanged.
   name in the cell is known, the names are kept as typed (as `parseList` keeps them on a typed row), so
   they match no family's choices: a misspelling never turns a calendar into "everyone".
 * **Event → row** (`buildCalendarRow`). Cancelled and private events are skipped (iCal
-  `STATUS:CANCELLED`, `CLASS:PRIVATE`/`CONFIDENTIAL`; Google `status` cancelled, `visibility`
-  private/confidential, and any `eventType` but `default`: out of office, focus time, working
+  `STATUS:CANCELLED`, `CLASS:PRIVATE`/`CONFIDENTIAL`, and in Apps Script an iCal link's events shown
+  only as `Busy`, §9; Google `status` cancelled, `visibility` private/confidential, and any
+  `eventType` but `default`: out of office, focus time, working
   location, birthdays, from Gmail). `Date` = start date in New York; `Time` = `timeText` ("7:00 PM", what
   `parseTimeText` reads back from a Sheets time), blank for all-day. Multi-day events keep their start
   date and `Details` starts `Through <Mon D>.` (all-day ends are exclusive; a timed end at midnight
@@ -613,7 +614,9 @@ work for them unchanged.
   next one plans again). Updates: Events is read once more (`Db.refresh`, so rows the deletes moved up
   are found where they are) to find each key's first row with a Source (`keyPositions`); just before
   each write that one row is read again (`Db.readRows`) and must still hold a Source and the key; if
-  not, Events is read once more to find the key, and a key no row holds is retried next sync. At most
+  not, Events is read once more to find the key, and a key no row holds is retried next sync. The
+  SheetStore's `readRows` maps the header row again as well (§9), so after a volunteer drags a column
+  mid-sync the next row is still written in the right columns. At most
   `MAX_ROW_CHANGES` = 300 deletes and updates per run (the updates get what the deletes left), and
   none is started once the apply has taken `APPLY_BUDGET_MS` = 10 s (the clock port; other writers
   wait at most 20 s for the lock). The rest waits for the next sync (a note; the fingerprint isn't
@@ -751,7 +754,11 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
   Extensions → Apps Script), so it only ever touches that one spreadsheet. Read with one `getDataRange().getValues()` per table per request (memoize per execution).
   `readRows(table, first, count)` (a check just before a write, used by linked calendars) reads only
   those rows, fresh, with one `getRange(first, 1, count, last mapped column).getValues()`, mapped as a
-  read maps rows (headers, aliases, dates); blank rows and rows past the end → null.
+  read maps rows (headers, aliases, dates); blank rows and rows past the end → null. It first maps the
+  header row again (one `getRange(1, 1, 1, last column).getValues()`) and keeps that as the tab's
+  header layout, which is otherwise memoized between full reads: a volunteer can drag a column at any
+  time, and the check and the write that follows it must use the columns as they are now. The
+  memoized rows are not touched.
   Header row → canonical map via normalizeHeader+aliases. append uses one `setValues` call. Hide `system` tabs.
   Sheets reads text from `setValues` as if it were typed (`0042` → 42, `6:30 PM` → a time, `12/5` → a
   date, `50%` → 0.5), so before writing, the cells of a table's `text` columns (`TableDef.text`: Events
@@ -848,6 +855,14 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
   text over 2,000,000 characters → `too_big`; no `BEGIN:VCALENDAR` → `not_ical`; then `parseIcs` with
   `gasZones` (UTC and New York in code; other IANA names through `Utilities.parseDate` with
   `WALL_CLOCK_FORMAT`, as `SheetTimeZone` does; anything else is unknown rather than silently GMT).
+  Then every event that isn't cancelled, is titled exactly `Busy` (trimmed, any case) and has no
+  location and no description is marked private. That is how Google's public iCal address
+  (`…/ical/<id>/public/basic.ics`) gives each event of a calendar that is public as *See only
+  free/busy*, and each private event of any public calendar: `SUMMARY:Busy`, no `CLASS`. The core
+  skips them like other private events (Status: `N private skipped`) instead of copying a `Busy` row,
+  with a reminder to every family, for each. The link still counts as read, unlike a `free_busy`
+  Google calendar, so `Busy` rows copied before are removed at the next sync (a failed calendar's rows
+  would be left alone).
   Logs carry the kind, reason and HTTP code only, never a Calendar ID or link (a secret iCal link is a
   password).
 * **SheetStore.deleteRows** (used by linked calendars): whole rows, bottom-up, one `deleteRows` call per
@@ -1200,7 +1215,8 @@ export function PayPalCheckout(props: {
 * `src/gas`: Vitest with hand-written mocks of SpreadsheetApp/Utilities/UrlFetchApp/Session/etc. (headers,
   aliasing, date conversion between a far-away spreadsheet zone and the script zone, which must pass
   whatever the machine's own time zone is, plain-text format on exactly the text columns' cells before
-  their values, PayPal request bodies, push Worker requests: 5-message batches, payload limits, 401 re-registration and
+  their values, a column dragged between two `readRows`-checked writes, PayPal request bodies,
+  push Worker requests: 5-message batches, payload limits, 401 re-registration and
   `no_keys` recovery). `src/gas/bundle.test.ts` checks the generated `apps-script/Code.js` itself (plain
   script, no service calls at load time, every entry point) and drives it end to end against those fakes,
   including setup linking the Worker, `push.register`, a sync push and a linked Google Calendar copied
@@ -1229,10 +1245,13 @@ export function PayPalCheckout(props: {
   missing columns, Status lines, demo parity); `src/gas/calendar.test.ts` (Calendar service mapping,
   paging, the cap, missing advanced service, 404/403/scope/rate errors, a free/busy-only calendar
   refused; iCal fetch: https only, HTTP
-  errors, no answer without leaking the link, size cap, not a calendar, zones through Utilities; the
-  sync through the SheetStore: text kept as text, Title/Location/Details cells formatted plain text
+  errors, no answer without leaking the link, size cap, not a calendar, zones through Utilities,
+  `Busy`-only events marked private; the sync through the SheetStore: text kept as text,
+  Title/Location/Details cells formatted plain text
   before the values, nothing written the second time, whole rows deleted, an old manifest reported
-  once a day, a free/busy-only calendar failing with no rows copied).
+  once a day, a free/busy-only calendar failing with no rows copied, a column dragged mid-sync, an
+  iCal link's `Busy` events not copied while named ones and a `Busy` with a location or details are,
+  and `Busy` rows copied before removed).
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
   status and filter, validation messages, admin-only, the row cap (and the sheet's cap and note), and the
   roster's Log row with its short lock wait.

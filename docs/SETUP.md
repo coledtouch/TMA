@@ -647,7 +647,8 @@ type, and the Log tab says so once a day. Check the spelling.
 * The app copies events from **yesterday through 180 days ahead** (Settings `CALENDAR_DAYS`, 7 to
   400). Rows for past events stay in the sheet as history.
 * **Private events are never copied.** Neither are cancelled events, or Google's out-of-office,
-  focus-time and working-location entries.
+  focus-time and working-location entries. An event that an iCal address lists only as *Busy*, with
+  no name or details, counts as private.
 * **Reminders** work as for typed events: one reminder the day before, around 8 AM. If an event is
   edited after its reminder went out, families don't get it again. If it moves to another day or
   time, it counts as a new event, so families get a reminder before the new day.
@@ -831,6 +832,10 @@ needs step 3 (deploy a new version). What each report shows: [SHEET.md → Repor
   busy but not what the events are, so nothing is copied. The owner changes TMA's account to *See all
   event details* in the calendar's **Settings and sharing** (step C), or, for a public calendar, sets
   *Make available to public* to *See all event details*.
+* **An iCal link shows "OK ✓, 0 events (N private skipped)".** The calendar is public as free/busy
+  only, so its iCal address lists every event as just *Busy*, and the app copies none of them (it
+  removes any *Busy* rows copied earlier). The owner sets *Make available to public* to *See all
+  event details*, or you link the calendar's *Secret address in iCal format* instead (step D).
 * **"the iCal link failed (HTTP 404)" or "didn't return a calendar".** The address is wrong, or the
   calendar isn't published any more. Copy its iCal address again.
 * **"The Calendars tab is missing".** Someone renamed or deleted it. Rename it back to `Calendars`.

@@ -309,6 +309,32 @@ export class FakeSheet {
     line[column - 1] = value;
   }
 
+  /**
+   * Test helper: drag column `from` to position `to` (1-based), as a volunteer can in Sheets at any
+   * time. The columns in between shift by one; values, formats and notes move with their column.
+   */
+  moveColumn(from: number, to: number): void {
+    const width = Math.max(from, to, this.getLastColumn());
+    for (const line of this.cells) {
+      while (line.length < width) line.push('');
+      line.splice(to - 1, 0, ...line.splice(from - 1, 1));
+    }
+    const movedTo = (column: number): number => {
+      if (column === from) return to;
+      if (column > from && column <= to) return column - 1;
+      if (column < from && column >= to) return column + 1;
+      return column;
+    };
+    for (const byCell of [this.notes, this.fontWeights, this.numberFormats]) {
+      const entries = [...byCell];
+      byCell.clear();
+      for (const [key, value] of entries) {
+        const [row, column] = key.split(',').map(Number);
+        byCell.set(`${row},${movedTo(column)}`, value);
+      }
+    }
+  }
+
   getLastRow(): number {
     for (let r = this.cells.length; r >= 1; r -= 1) {
       if (this.cells[r - 1].some((v) => v !== '')) return r;
