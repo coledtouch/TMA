@@ -11,7 +11,7 @@
  *    read the Events tab fresh and add, change or remove only the rows this
  *    feature wrote (a Source and a Calendar Event key). Rows typed by hand
  *    (no Source) are never touched; past rows stay as history; a calendar that
- *    couldn't be read keeps its rows as they were.
+ *    couldn't be read keeps its rows (planCalendarRows).
  */
 import type { CalendarTickReport, IsoDate, TickReport } from '../shared/types';
 import {
@@ -280,6 +280,19 @@ function sameValue(column: string, stored: unknown, wanted: unknown, known: Audi
   return str(stored) === str(wanted);
 }
 
+/** The cells of a held row (see planCalendarRows) that follow the readable copy of its event. */
+const HELD_ROW_COLUMNS: readonly string[] = ['Time', 'Title', 'Location', 'Details', 'Schools', 'Ensembles'];
+
+/**
+ * The Schools and Ensembles cells for `audience` widened by what the row holds now (mergeAudience):
+ * names are only added, and a blank cell (everyone) stays blank.
+ */
+function widenedAudience(row: StoredRow, audience: AudienceLists, known: AudienceLists): RowData {
+  const stored: AudienceLists = { schools: parseList(row.data.Schools, known.schools), ensembles: parseList(row.data.Ensembles, known.ensembles) };
+  const merged = mergeAudience(stored, audience);
+  return { Schools: joinList(merged.schools), Ensembles: joinList(merged.ensembles) };
+}
+
 /**
  * What to change in the Events tab. `rows` is a fresh read. Only rows with a Source and a Calendar
  * Event key written by this app are considered:
@@ -287,10 +300,12 @@ function sameValue(column: string, stored: unknown, wanted: unknown, known: Audi
  *   whose event is gone (cancelled, deleted, made private, moved out of the window) removed when
  *   their date is inside the window;
  * - of a calendar no longer listed (removed, turned off): removed when inside the window;
- * - of a calendar that couldn't be read (`failed`): left alone.
+ * - of a calendar that couldn't be read (`failed`): kept. An event another calendar read this run
+ *   has too is not added again beside such a row (calendarEventIdentity): one event, one row, one
+ *   reminder. The row gains that calendar's families and follows its copy of the event instead.
  * Past rows (before the window) are always kept. A key on several rows keeps the first one. An event
- * whose row is held, by a calendar that couldn't be read or by a volunteer who cleared its Source, is
- * not added again from another calendar (calendarEventIdentity): one event, one row, one reminder.
+ * whose row a volunteer made theirs by clearing its Source is not added again from any calendar.
+ * While any listed calendar couldn't be read, Schools and Ensembles only gain names (see below).
  */
 export function planCalendarRows(
   rows: readonly StoredRow[],
@@ -306,11 +321,20 @@ export function planCalendarRows(
     return date !== null && date >= range.from && date <= range.to;
   };
   const remove = (row: StoredRow, key: string) => plan.deletes.push({ row: row.rowNumber, source: str(row.data.Source), key });
+  const update = (row: StoredRow, key: string, columns: readonly string[], target: RowData) => {
+    const patch: RowData = {};
+    for (const column of columns) {
+      if (!sameValue(column, row.data[column], target[column], known)) patch[column] = target[column];
+    }
+    if (Object.keys(patch).length > 0) plan.updates.push({ row: row.rowNumber, key, patch });
+  };
   const byKey = new Map<string, StoredRow[]>();
-  // Events (calendarEventIdentity, so across calendars) whose row stays as it is and must not be
-  // copied again beside it (two rows, two IDs, two reminders): rows a volunteer made theirs by clearing
-  // the Source, and rows of a calendar that couldn't be read this run.
+  // Events (calendarEventIdentity, so across calendars) that must not be copied again beside the row
+  // they have (two rows, two IDs, two reminders). `held`: rows a volunteer made theirs by clearing the
+  // Source, which stay as they are. `heldByFailed`: the first row of each event of a calendar that
+  // couldn't be read this run.
   const held = new Set<string>();
+  const heldByFailed = new Map<string, { row: StoredRow; key: string }>();
   for (const row of rows) {
     const key = str(row.data['Calendar Event']);
     const hash = key ? calendarKeyHash(key) : null;
@@ -320,7 +344,8 @@ export function planCalendarRows(
     }
     if (!hash) continue;
     if (failed.has(hash)) {
-      held.add(calendarEventIdentity(key));
+      const identity = calendarEventIdentity(key);
+      if (!heldByFailed.has(identity)) heldByFailed.set(identity, { row, key });
       continue;
     }
     const list = byKey.get(key) ?? [];
@@ -334,15 +359,33 @@ export function planCalendarRows(
       return;
     }
     const [first, ...repeats] = list;
-    const patch: RowData = {};
-    for (const column of CALENDAR_ROW_COLUMNS) {
-      if (!sameValue(column, first.data[column], want.row[column], known)) patch[column] = want.row[column];
-    }
-    if (Object.keys(patch).length > 0) plan.updates.push({ row: first.rowNumber, key, patch });
+    // An event on two calendars has one row, for the families of both (mergeAudience). While one of
+    // those calendars can't be read, `want` holds the other's audience alone: writing that would take
+    // the event, and its reminder, away from the first one's families, for good when its link is dead.
+    // The app can't tell which events a calendar it can't read has. So while any listed calendar
+    // can't be read, Schools and Ensembles only gain names, and a blank (everyone) stays blank. The
+    // exact audience is written by the first run that reads every listed calendar (the fingerprint
+    // holds the failed list, so that run is not skipped). The price: an audience made narrower on
+    // purpose waits until then, or until the calendar that can't be read is turned off (On = FALSE).
+    update(first, key, CALENDAR_ROW_COLUMNS, failed.size > 0 ? { ...want.row, ...widenedAudience(first, want.audience, known) } : want.row);
     for (const row of repeats) remove(row, key);
   });
   wanted.forEach((want, key) => {
-    if (!byKey.has(key) && !held.has(calendarEventIdentity(key)) && read.has(calendarKeyHash(key) ?? '')) plan.inserts.push({ ...want.row });
+    if (byKey.has(key) || !read.has(calendarKeyHash(key) ?? '')) return;
+    const identity = calendarEventIdentity(key);
+    if (held.has(identity)) return;
+    const holder = heldByFailed.get(identity);
+    if (!holder) {
+      plan.inserts.push({ ...want.row });
+      return;
+    }
+    // The event's row belongs to a calendar that couldn't be read, written perhaps before this
+    // calendar had the event (linked since, the event added to it since, its Schools or Groups made
+    // wider since). So this calendar's families are added to that row, and its time, title, place
+    // and details follow the copy that can be read. Never its ID or Date (the reminder is sent once
+    // per ID and date), nor its Source or Calendar Event: it stays that calendar's row, found by its
+    // own key.
+    update(holder.row, holder.key, HELD_ROW_COLUMNS, { ...want.row, ...widenedAudience(holder.row, want.audience, known) });
   });
   plan.deletes.sort((a, b) => b.row - a.row);
   return plan;
@@ -530,7 +573,7 @@ export function syncCalendars(ctx: Ctx, report: TickReport, fetched: CalendarFet
       summary.failed++;
       failed.push(def.hash);
       report.errors.push(`Calendar ${label}: ${result.text}.`);
-      logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${result.text}. Its rows in Events were left as they were.`);
+      logOncePerDay(ctx, `${label} could not be read`, `${label} could not be read: ${result.text}. Its rows in Events were kept.`);
       continue;
     }
     summary.read++;
@@ -564,6 +607,11 @@ export function syncCalendars(ctx: Ctx, report: TickReport, fetched: CalendarFet
     if (listed) report.calendars = summary;
     return; // the same events as when the Events tab was last brought up to date
   }
+  // From here on the Events tab may be changed, and the run may be cut short (the time budget, the
+  // row cap, a delete check that fails, a write that throws). Forget the old fingerprint first: if it
+  // stayed and the events went back to what it stands for (a calendar "busy" for one sync, a rename
+  // undone), the next sync would match it and leave Events half-changed for hours without a word.
+  ctx.s.cache.remove(FINGERPRINT_KEY);
 
   // A renamed header must not make every calendar row look new (or typed by hand).
   const columns = ctx.db.columns('Events');
@@ -585,18 +633,22 @@ export function syncCalendars(ctx: Ctx, report: TickReport, fetched: CalendarFet
   const total = plan.updates.length + plan.inserts.length + plan.deletes.length;
   const inserts = plan.inserts; // one write for all of them, always made
 
-  summary.updated = applyUpdates(ctx, plan.updates.slice(0, MAX_ROW_CHANGES), outOfTime);
+  // Removals first, so they never wait behind a backlog of updates: a cancelled event must not keep
+  // its row (and get its reminder), and a moved event is a new row plus a removed one (its key holds
+  // the start), so until the old row goes there are two rows and two reminders. The updates get what
+  // is left of the row cap and of the time.
   let deletesLeft = 0;
   if (plan.deletes.length > 0) {
-    let deletes = plan.deletes;
-    if (!outOfTime()) {
-      // Planned again on a read made just now: the updates took time, and rows may have moved.
-      ctx.db.refresh('Events');
-      deletes = planNow().deletes;
-      summary.removed = applyDeletes(ctx, deletes.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.updated)), outOfTime);
-    }
+    // Rows are deleted by number, so the deletes are planned again on a read made just now: the read
+    // above may be one from earlier in this run, and rows may have moved since.
+    ctx.db.refresh('Events');
+    const deletes = planNow().deletes;
+    summary.removed = applyDeletes(ctx, deletes.slice(0, MAX_ROW_CHANGES), outOfTime);
     deletesLeft = deletes.length - summary.removed;
   }
+  // applyUpdates finds each row by its key on a read of its own, so the rows the deletes moved up
+  // are found where they are now.
+  summary.updated = applyUpdates(ctx, plan.updates.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.removed)), outOfTime);
   if (inserts.length > 0) ctx.db.append('Events', inserts);
   summary.added = inserts.length;
   const complete = summary.updated === plan.updates.length && deletesLeft === 0;

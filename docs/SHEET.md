@@ -349,11 +349,17 @@ see those lines.
 
 An event that is on two linked calendars gets one row in Events, under the Name of the calendar
 higher in this tab. It goes to the families of both calendars, with one reminder. While that
-calendar can't be read, its row stays the event's only row.
+calendar can't be read, its row stays the event's only row, and still goes to the families of both.
 
 The app only **reads** these calendars, never changes them, and never copies private events.
 *TMA App → Status* shows one line per calendar: *OK* with how many events it copies, or why it can't
-be read. If a calendar can't be read, its rows in Events are left as they were.
+be read. If a calendar can't be read, its rows stay in Events.
+
+**While any calendar in this tab can't be read, the app only adds schools and groups to copied
+events. It takes none away.** The app can't tell which events that calendar shares with the others,
+and its families must not lose them. So if you make the Schools or Groups of a calendar (or of one
+event) narrower, that shows once every calendar here can be read again. If a calendar is gone for
+good, set its **On** to `FALSE`.
 
 Don't rename or delete this tab. Without it, the rows copied from calendars stay in Events but are
 no longer updated, and *Run sync now* and the Log say so. To stop copying a calendar, set its **On**

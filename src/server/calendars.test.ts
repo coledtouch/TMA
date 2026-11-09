@@ -5,7 +5,7 @@ import { APPLY_BUDGET_MS, calendarStatusLines, MAX_EVENTS_PER_CALENDAR, MAX_ROW_
 import { createMemoryCalendarSource, type MemoryCalendarFeed } from './memory';
 import { sampleData } from './sample-data';
 import type { CalendarEvent, CalendarFeed, RowData, Store } from './services';
-import { harness, PARENT, TEST_NOW, TREASURER } from './test-helpers';
+import { harness, NGUYEN, PARENT, TEST_NOW, TREASURER } from './test-helpers';
 
 const BOARD = 'tma-board@example.com';
 const MUSIC = 'https://calendar.example.com/music.ics';
@@ -66,6 +66,27 @@ function setup(s: Setup = {}) {
   const events = () => h.rows('Events');
   const calendarRows = () => events().filter((r) => r.Source);
   return { h, state, source, events, calendarRows };
+}
+
+/**
+ * One sync in which every look at the clock finds it a second later, so the time for changing rows
+ * (APPLY_BUDGET_MS) runs out after a few of them.
+ */
+function slowSync(s: ReturnType<typeof setup>, from: Date) {
+  const clock = s.h.services.clock;
+  let t = from.getTime();
+  s.h.services.setNow(from);
+  s.h.services.clock = { now: () => new Date((t += 1000)) };
+  try {
+    return s.h.app.syncTick();
+  } finally {
+    s.h.services.clock = clock;
+  }
+}
+
+/** Who got the "tomorrow" email about the event with this title. */
+function emailedAbout(s: ReturnType<typeof setup>, title: string): string[] {
+  return s.h.services.outbox.mail.filter((m) => m.subject.includes(title)).map((m) => m.to);
 }
 
 /** Count Store writes per tab. */
@@ -205,7 +226,7 @@ describe('syncTick: linked calendars', () => {
     expect(s.calendarRows().map((r) => r.Title)).toEqual(['Concert', 'Pops concert']);
     const logged = s.h.rows('Log').filter((r) => String(r.Detail).startsWith('"TMA Board" could not be read'));
     expect(logged).toHaveLength(1);
-    expect(logged[0].Detail).toMatch(/Its rows in Events were left as they were\.$/);
+    expect(logged[0].Detail).toMatch(/Its rows in Events were kept\.$/);
   });
 
   it('removes the upcoming rows of a calendar turned off (or deleted from the tab), keeping its past ones', () => {
@@ -300,6 +321,118 @@ describe('syncTick: linked calendars', () => {
     s.h.services.setNow(LATER);
     expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 0, removed: 0 });
     expect(s.events()).toEqual(before);
+  });
+
+  it('keeps a shared event for the families of both calendars while one of them can’t be read, and narrows it only once both are read', () => {
+    const shared = timed('concert123', '2026-10-22', 19, 'Winter Concert');
+    const s = setup({
+      board: feed([shared]),
+      music: feed([shared]),
+      calendars: [
+        { Name: 'TMA Board', Calendar: BOARD, Groups: 'Band' },
+        { Name: 'Music Dept', Calendar: MUSIC, Groups: 'Orchestra' },
+      ],
+      events: [],
+    });
+    s.h.app.syncTick();
+    const row = () => s.calendarRows().map((r) => [r.Source, r.Ensembles]);
+    expect(row()).toEqual([['TMA Board', 'Band, Orchestra']]);
+    // Music Dept's link stops working: only TMA Board (Band) still has the event as far as the app
+    // can tell, but the Orchestra families must not lose it, or its reminder.
+    s.state.music = { problem: 'link_failed', detail: 'HTTP 404' };
+    const writes = countWrites(s.h.services.store);
+    s.h.services.setNow(LATER);
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 1, added: 0, updated: 0, removed: 0 });
+    expect(row()).toEqual([['TMA Board', 'Band, Orchestra']]);
+    s.h.app.dailyTick();
+    expect(emailedAbout(s, 'Winter Concert').filter((to) => to === NGUYEN)).toHaveLength(1); // an Orchestra family
+    expect(emailedAbout(s, 'Winter Concert').filter((to) => to === PARENT)).toHaveLength(1); // a Band family
+    // Readable again: nothing to change.
+    s.state.music = feed([shared]);
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 2, failed: 0, added: 0, updated: 0, removed: 0 });
+    expect(writes.Events).toBeUndefined();
+    // Music Dept's events are now for Band only: with every calendar read, the row narrows.
+    s.h.services.db.tables.Calendars![1].Groups = 'Band';
+    s.h.services.setNow(new Date(LATER.getTime() + 30 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 2, failed: 0, added: 0, updated: 1, removed: 0 });
+    expect(row()).toEqual([['TMA Board', 'Band']]);
+  });
+
+  it('only adds schools and groups while a listed calendar can’t be read: a narrowing waits until it reads or is turned off', () => {
+    const s = setup({
+      board: feed([
+        timed('a', '2026-11-10', 19, 'Band night'),
+        timed('b', '2026-11-11', 19, 'Open house', { description: 'Groups: Everyone' }),
+      ]),
+      music: { problem: 'link_failed', detail: 'HTTP 404' },
+      calendars: [
+        { Name: 'TMA Board', Calendar: BOARD, Groups: 'Band, Chorus' },
+        { Name: 'Music Dept', Calendar: MUSIC },
+      ],
+      events: [],
+    });
+    s.h.app.syncTick();
+    const groups = () => s.calendarRows().map((r) => r.Ensembles);
+    expect(groups()).toEqual(['Band, Chorus', '']);
+    // TMA Board's events are now for Orchestra only, and the open house lost its "Groups: Everyone".
+    // Music Dept may have these events too, for other families: names are added, none taken away.
+    s.h.services.db.tables.Calendars![0].Groups = 'Orchestra';
+    s.state.board = feed([timed('a', '2026-11-10', 19, 'Band night'), timed('b', '2026-11-11', 19, 'Open house')]);
+    const writes = countWrites(s.h.services.store);
+    s.h.services.setNow(LATER);
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 1, added: 0, updated: 1, removed: 0 });
+    expect(groups()).toEqual(['Band, Chorus, Orchestra', '']);
+    // Nothing more to write while it stays like this, also once the fingerprint is forgotten.
+    s.h.services.cache.remove('calendar-sync:fingerprint');
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 1, added: 0, updated: 0, removed: 0 });
+    expect(writes.Events).toBe(1);
+    // The dead calendar is turned off: every listed calendar is read, so the rows get exactly their audience.
+    s.h.services.db.tables.Calendars![1].On = 'FALSE';
+    s.h.services.setNow(new Date(LATER.getTime() + 30 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 2, removed: 0 });
+    expect(groups()).toEqual(['Orchestra', 'Orchestra']);
+  });
+
+  it.each([
+    ['the other calendar is linked', true],
+    ['the event is added to the other calendar', false],
+  ])('adds the other calendar’s families to the row of a calendar that can’t be read when %s meanwhile (one row, one reminder)', (_, linkedLater) => {
+    const shared = timed('concert123', '2026-10-22', 19, 'Winter Concert');
+    const musicDept: RowData = { Name: 'Music Dept', Calendar: MUSIC, Groups: 'Orchestra' };
+    const s = setup({
+      board: feed([shared]),
+      music: feed(linkedLater ? [shared] : []),
+      calendars: [{ Name: 'TMA Board', Calendar: BOARD, Groups: 'Band' }, ...(linkedLater ? [] : [musicDept])],
+      events: [],
+    });
+    s.h.app.syncTick();
+    const [copied] = s.calendarRows();
+    expect([copied.Source, copied.Ensembles]).toEqual(['TMA Board', 'Band']);
+    // TMA Board can't be read any more. Then Music Dept, for the Orchestra families, has the event too.
+    s.state.board = { problem: 'not_shared', detail: 'HTTP 403' };
+    if (linkedLater) s.h.services.db.tables.Calendars!.push(musicDept);
+    else s.state.music = feed([shared]);
+    const writes = countWrites(s.h.services.store);
+    s.h.services.setNow(LATER);
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 1, added: 0, updated: 1, removed: 0 });
+    // Still TMA Board's row, with its ID (so one reminder), now for both.
+    expect(s.calendarRows()).toEqual([{ ...copied, Ensembles: 'Band, Orchestra' }]);
+    s.h.app.dailyTick();
+    expect(emailedAbout(s, 'Winter Concert').filter((to) => to === NGUYEN)).toHaveLength(1); // an Orchestra family
+    expect(emailedAbout(s, 'Winter Concert').filter((to) => to === PARENT)).toHaveLength(1); // a Band family
+    expect(s.h.services.outbox.push.filter((p) => p.message.title === 'Tomorrow: Winter Concert')).toHaveLength(1);
+    // Nothing more to write while it stays like this, also once the fingerprint is forgotten.
+    s.h.services.cache.remove('calendar-sync:fingerprint');
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 1, added: 0, updated: 0, removed: 0 });
+    // Readable again: the same single row, for both.
+    s.state.board = feed([shared]);
+    s.h.services.setNow(new Date(LATER.getTime() + 30 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 2, failed: 0, added: 0, updated: 0, removed: 0 });
+    expect(s.calendarRows()).toEqual([{ ...copied, Ensembles: 'Band, Orchestra' }]);
+    expect(writes.Events).toBe(1);
   });
 
   it('never sends a calendar to everyone because of a misspelled school or group (it reaches whom a typed row with the typo reaches)', () => {
@@ -424,24 +557,120 @@ describe('syncTick: linked calendars', () => {
     // at the clock finds it a second later.
     s.h.services.db.tables.Calendars![0].Name = 'Music Dept';
     s.state.board = feed(manyEvents(28));
-    s.h.services.setNow(LATER);
-    const clock = s.h.services.clock;
-    let t = LATER.getTime();
-    s.h.services.clock = { now: () => new Date((t += 1000)) };
-    const first = s.h.app.syncTick();
+    const first = slowSync(s, LATER);
     const updated = first.calendars?.updated ?? 0;
     expect(updated).toBeGreaterThan(0);
     expect(updated).toBeLessThan(28);
-    expect(first.calendars).toMatchObject({ added: 0, removed: 0 });
-    expect(first.notes).toContain(`Calendars: ${28 - updated + 2} more Events rows change at the next sync.`);
+    // The two removals went first; the renaming got the rest of the time.
+    expect(first.calendars).toMatchObject({ added: 0, removed: 2 });
+    expect(first.notes).toContain(`Calendars: ${28 - updated} more Events rows change at the next sync.`);
+    expect(s.calendarRows()).toHaveLength(28);
     expect(s.calendarRows().filter((r) => r.Source === 'Music Dept')).toHaveLength(updated);
 
-    s.h.services.clock = clock;
     s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
     const next = s.h.app.syncTick();
-    expect(next.calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 28 - updated, removed: 2 });
+    expect(next.calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 28 - updated, removed: 0 });
     expect(next.notes ?? []).toEqual([]);
     expect(s.calendarRows().map((r) => [r.Title, r.Source])).toEqual(manyEvents(28).map((e) => [e.title, 'Music Dept']));
+  });
+
+  it('removes rows before it works through a backlog of changes: a moved event never has two rows', () => {
+    const events = manyEvents(30);
+    const s = setup({ board: feed(events), calendars: [{ Name: 'TMA Board', Calendar: BOARD }], events: [] });
+    s.h.app.syncTick();
+    const datesOf = (title: string) => s.calendarRows().filter((r) => r.Title === title).map((r) => r.Date);
+    expect(datesOf('Event 0')).toEqual(['2026-10-31']);
+    // The calendar is renamed (a change to every row, more than one sync has time for) and "Event 0"
+    // moves three days later: a new row (its key holds the start) and the old row to remove.
+    s.h.services.db.tables.Calendars![0].Name = 'Music Dept';
+    const moved: CalendarEvent = { ...events[0], start: { dateTime: new Date(Date.UTC(2026, 10, 4)).toISOString() } };
+    s.state.board = feed([moved, ...events.slice(1)]);
+    const first = slowSync(s, LATER);
+    // One row for the event, on its new day: not the old one too (which would get its own reminder).
+    expect(datesOf('Event 0')).toEqual(['2026-11-03']);
+    const updated = first.calendars?.updated ?? 0;
+    expect(updated).toBeGreaterThan(0);
+    expect(updated).toBeLessThan(29);
+    expect(first.calendars).toMatchObject({ added: 1, removed: 1 });
+    expect(first.notes).toContain(`Calendars: ${29 - updated} more Events rows change at the next sync.`);
+
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 29 - updated, removed: 0 });
+    expect(s.calendarRows().filter((r) => r.Source === 'Music Dept')).toHaveLength(30);
+  });
+
+  it('counts the removals and the changes left when the time runs out during the removals', () => {
+    const s = setup({ board: feed(manyEvents(30)), calendars: [{ Name: 'TMA Board', Calendar: BOARD }], events: [] });
+    s.h.app.syncTick();
+    // Renamed, and every second event deleted: 15 rows to remove, none next to another (15 separate
+    // deletes), and 15 rows to change.
+    s.h.services.db.tables.Calendars![0].Name = 'Music Dept';
+    const kept = manyEvents(30).filter((_, i) => i % 2 === 0);
+    s.state.board = feed(kept);
+    const first = slowSync(s, LATER);
+    const removed = first.calendars?.removed ?? 0;
+    expect(removed).toBeGreaterThan(0);
+    expect(removed).toBeLessThan(15);
+    expect(first.calendars).toMatchObject({ added: 0, updated: 0 });
+    expect(first.notes).toContain(`Calendars: ${15 - removed + 15} more Events rows change at the next sync.`);
+    expect(s.calendarRows()).toHaveLength(30 - removed);
+
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    const next = s.h.app.syncTick();
+    expect(next.calendars).toEqual({ read: 1, failed: 0, added: 0, updated: 15, removed: 15 - removed });
+    expect(next.notes ?? []).toEqual([]);
+    expect(s.calendarRows().map((r) => [r.Title, r.Source])).toEqual(kept.map((e) => [e.title, 'Music Dept']));
+  });
+
+  it('finishes a renaming cut short even when the calendar is renamed back meanwhile (the old fingerprint is forgotten)', () => {
+    const s = setup({ board: feed(manyEvents(30)), calendars: [{ Name: 'TMA Board', Calendar: BOARD }], events: [] });
+    s.h.app.syncTick();
+    s.h.services.db.tables.Calendars![0].Name = 'Music Dept';
+    const cut = slowSync(s, LATER);
+    const renamed = cut.calendars?.updated ?? 0;
+    expect(renamed).toBeGreaterThan(0);
+    expect(renamed).toBeLessThan(30);
+    expect(cut.notes).toContain(`Calendars: ${30 - renamed} more Events rows change at the next sync.`);
+    // Renamed back: the events are again exactly what the first sync copied (and remembered).
+    s.h.services.db.tables.Calendars![0].Name = 'TMA Board';
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 0, updated: renamed, removed: 0 });
+    expect(s.calendarRows().map((r) => r.Source)).toEqual(Array(30).fill('TMA Board'));
+  });
+
+  it('finishes what a sync cut short started while a calendar was busy, once that calendar reads again', () => {
+    // 30 events on both calendars; Music Dept's feed words them differently.
+    const board = manyEvents(30);
+    const music = board.map((e) => ({ ...e, title: `${e.title} (Music Dept)` }));
+    const s = setup({
+      board: feed(board),
+      music: feed(music),
+      calendars: [
+        { Name: 'TMA Board', Calendar: BOARD, Groups: 'Band' },
+        { Name: 'Music Dept', Calendar: MUSIC, Groups: 'Orchestra' },
+      ],
+      events: [],
+    });
+    s.h.app.syncTick();
+    const rows = () => s.calendarRows().map((r) => [r.Title, r.Source, r.Ensembles]);
+    const asCopied = board.map((e) => [e.title, 'TMA Board', 'Band, Orchestra']);
+    expect(rows()).toEqual(asCopied);
+    // Google is busy for TMA Board for one sync. Its rows follow the copy that can be read (Music
+    // Dept's wording), but the time runs out part-way. No row loses a group meanwhile.
+    s.state.board = { problem: 'busy', detail: 'HTTP 503' };
+    const cut = slowSync(s, LATER);
+    const reworded = cut.calendars?.updated ?? 0;
+    expect(reworded).toBeGreaterThan(0);
+    expect(reworded).toBeLessThan(30);
+    expect(cut.calendars).toMatchObject({ read: 1, failed: 1, added: 0, removed: 0 });
+    expect(rows().filter((r) => String(r[0]).endsWith('(Music Dept)'))).toHaveLength(reworded);
+    expect(rows().map((r) => r.slice(1))).toEqual(Array(30).fill(['TMA Board', 'Band, Orchestra']));
+    // Readable again: the events are exactly what the first sync copied (and remembered), and the
+    // rows are brought back to that.
+    s.state.board = feed(board);
+    s.h.services.setNow(new Date(LATER.getTime() + 15 * 60000));
+    expect(s.h.app.syncTick().calendars).toEqual({ read: 2, failed: 0, added: 0, updated: reworded, removed: 0 });
+    expect(rows()).toEqual(asCopied);
   });
 
   it('checks each run of rows again just before deleting it: a row typed meanwhile is never deleted', () => {

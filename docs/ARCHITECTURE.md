@@ -582,35 +582,56 @@ work for them unchanged.
   first row gets only the changed columns (compared as read back: `parseDate`, `parseTimeText`,
   `parseList`), further rows with that key are deleted; an unwanted key → deleted when its Date is in
   the range (yesterday through the end), so rows of past events stay as history. Wanted keys with no
-  row → appended in one write, unless the event's row is held (by `calendarEventIdentity`, so across
-  calendars): a row of a calendar that couldn't be read, or a row whose Source a volunteer cleared
-  (no Source, the app's key). So while the calendar listed first can't be read, its row stays the
-  event's only row (one reminder) even though another linked calendar has the event too. Rows of a
-  calendar no longer read (row removed, `On` FALSE, over the limit) → deleted when in the range. Rows
-  of a calendar that couldn't be read → untouched. Rows typed by hand (no Source) → never touched.
-  Order: updates, then deletes (bottom-up), then the append. The treasurer can sort, insert or delete
-  rows while these writes run (the script lock doesn't stop that), so no write trusts a row number
-  read earlier; nor is the whole tab read again before every write (a renamed calendar would mean
-  hundreds of full reads under the lock). Updates: Events is read once (`Db.refresh`) to find each
-  key's first row with a Source (`keyPositions`); just before each write that one row is read again
-  (`Db.readRows`, the Store's optional `readRows`; without it the whole tab) and must still hold a
-  Source and the key; if not, Events is read once more to find the key, and a key no row holds is
-  retried next sync. Deletes: planned again (`planCalendarRows`) on a read made after the updates, as
-  `{row, source, key}`; one `deleteRows` per run of adjacent rows, bottom-up, each run read again just
-  before (`Db.readRows`) and deleted only when every row still holds its planned Source and Calendar
-  Event; on a mismatch nothing more is deleted this sync (the next one plans again). At most
-  `MAX_ROW_CHANGES` = 300 updates and deletes per run, and none is started once the apply has taken
-  `APPLY_BUDGET_MS` = 10 s (the clock port; other writers wait at most 20 s for the lock). The rest
-  waits for the next sync (a note; the fingerprint isn't stored). The append always runs.
+  row → appended in one write, unless the event already has a row that is held (by
+  `calendarEventIdentity`, so across calendars). A row whose Source a volunteer cleared (no Source,
+  the app's key) stays as it is. A row of a calendar that couldn't be read stays the event's only row
+  (same ID and Date, so one reminder) and is updated under its own key from the copy that was read:
+  Schools and Ensembles gain that calendar's audience (`mergeAudience` with what the row holds), and
+  Time, Title, Location and Details follow it; never ID, Date, Source or Calendar Event. So the
+  families of a calendar that was linked, or got the event, while the calendar holding the row can't be
+  read still get the event and its reminder. Rows of a calendar no longer read (row removed, `On`
+  FALSE, over the limit) → deleted when in the range. The other rows of a calendar that couldn't be
+  read → untouched. Rows typed by hand (no Source) → never touched.
+  **While any listed calendar couldn't be read, audiences only grow.** A shared event's wanted row then
+  holds the other calendar's audience alone, and the app can't tell which events the unreadable
+  calendar shares. So every row is compared with its wanted audience merged with the one it holds
+  (`mergeAudience`: names are added, a blank = everyone stays blank); otherwise that calendar's
+  families would lose the event and its reminder, for good when its link is dead. The exact audience
+  is written by the first run that reads every listed calendar (the fingerprint holds the failed list,
+  so that run isn't skipped). The price: an audience made narrower on purpose waits until then, or
+  until the calendar that can't be read is turned off (`On` FALSE).
+  Order: deletes (bottom-up), then updates, then the append. Removals go first so they never wait
+  behind a backlog of updates: a cancelled event must not keep its row and its reminder, and a moved
+  event (a new key: an append and a delete) must not have two rows and two reminders. The treasurer
+  can sort, insert or delete rows while these writes run (the script lock doesn't stop that), so no
+  write trusts a row number read earlier; nor is the whole tab read again before every write (a
+  renamed calendar would mean hundreds of full reads under the lock). Deletes: planned again
+  (`planCalendarRows`) on a read made just before (`Db.refresh`), as `{row, source, key}`; one
+  `deleteRows` per run of adjacent rows, bottom-up, each run read again just before (`Db.readRows`,
+  the Store's optional `readRows`; without it the whole tab) and deleted only when every row still
+  holds its planned Source and Calendar Event; on a mismatch nothing more is deleted this sync (the
+  next one plans again). Updates: Events is read once more (`Db.refresh`, so rows the deletes moved up
+  are found where they are) to find each key's first row with a Source (`keyPositions`); just before
+  each write that one row is read again (`Db.readRows`) and must still hold a Source and the key; if
+  not, Events is read once more to find the key, and a key no row holds is retried next sync. At most
+  `MAX_ROW_CHANGES` = 300 deletes and updates per run (the updates get what the deletes left), and
+  none is started once the apply has taken `APPLY_BUDGET_MS` = 10 s (the clock port; other writers
+  wait at most 20 s for the lock). The rest waits for the next sync (a note; the fingerprint isn't
+  stored). The append always runs.
   Formula-looking text needs nothing special: the SheetStore writes text starting with `=` `+` `-` `@`
   `'` with Sheets' text marker (§9). Nor does text Sheets would re-type (`0042` → 42, `12/5` → a date,
   `50%` → 0.5): Title, Location and Details are written into plain-text cells (§3, §9), so they read
   back as written and compare equal.
 * **Write only when something changed.** A fingerprint (SHA-256 of the range, the hashes read and
   failed, and every wanted row) equal to the cache's `calendar-sync:fingerprint` (6 h) means the
-  Events tab isn't even read. It is stored only after a complete apply. With it forgotten, an unchanged
-  sheet still plans nothing, so a second run never writes. A calendar row edited by hand is put back
-  within 6 hours, or at the first sync of the day (the range moves).
+  Events tab isn't even read. It is stored only after a complete apply, and the one stored before is
+  removed as soon as a run's fingerprint differs from it, before anything is planned or written.
+  Otherwise, after a run cut short (the budget, the row cap, a delete check that fails, a write that
+  throws), the events going back to what the old fingerprint stood for (a calendar "busy" for one sync
+  reads again, a rename is undone) would make the next sync match it and leave Events half-changed for
+  up to 6 hours, without a note. With no fingerprint stored, an unchanged sheet still plans nothing,
+  so a second run never writes. A calendar row edited by hand is put back within 6 hours, or at the
+  first sync of the day (the range moves).
 * **Columns.** With a calendar listed, Events needs Date, Title, Source and Calendar Event (else the
   error asks to run *Set up / repair tabs*, which adds them); Calendars needs Calendar.
 * **Report and Log.** `TickReport.calendars` = {read, failed, added, updated, removed} whenever a
@@ -1196,9 +1217,14 @@ export function PayPalCheckout(props: {
   IDs); `src/server/calendars.test.ts` (insert/update/delete within the range, past rows kept, rows
   typed by hand never touched, duplicate keys, two calendars, a second run writing nothing, a failing
   calendar's rows kept and its Log row once a day, an event shared with a failing calendar or held by
-  a volunteer's row not copied twice (one reminder), each row and each run of rows read again just
-  before it is written or deleted (a row typed meanwhile untouched), a few full reads for 300 changes,
-  the 10-second apply budget, Off calendars, the 500 cap, CALENDAR_DAYS, the
+  a volunteer's row not copied twice (one reminder), a shared event kept for both calendars' families
+  while one can't be read (audiences only grow until every listed calendar reads or the dead one is
+  turned off), the row of a calendar that can't be read gaining the families of a calendar linked or
+  given the event meanwhile, each row and each run of rows read again just before it is written or
+  deleted (a row typed meanwhile untouched), a few full reads for 300 changes, the 10-second apply
+  budget with removals first (a moved event never has two rows) and the counts left, a run cut short
+  finished even when the events are back as they were before it, Off calendars, the 500 cap,
+  CALENDAR_DAYS, the
   reminder sent once even after an edit, calendars read outside the lock and written inside it,
   missing columns, Status lines, demo parity); `src/gas/calendar.test.ts` (Calendar service mapping,
   paging, the cap, missing advanced service, 404/403/scope/rate errors, a free/busy-only calendar

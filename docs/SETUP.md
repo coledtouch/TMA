@@ -657,8 +657,12 @@ type, and the Log tab says so once a day. Check the spelling.
 * Up to 10 calendars and 500 events per calendar. Repeating events are copied one row per day they
   happen. A repeating pattern the app can't follow is left out (Status counts it as unreadable),
   never guessed.
-* If a calendar can't be read (not shared any more, a broken link), its rows in Events stay as they
-  were, the other calendars still sync, and the Log tab gets one line about it per day.
+* If a calendar can't be read (not shared any more, a broken link), its rows stay in Events, the
+  other calendars still sync, and the Log tab gets one line about it per day.
+* **While any linked calendar can't be read, the app only adds schools and groups to copied events.
+  It takes none away**, so no family loses an event that is also on that calendar. If you make the
+  Schools or Groups of a calendar or an event narrower, that shows once every calendar can be read
+  again. If a calendar is gone for good, set its **On** to `FALSE`.
 * **Don't rename or delete the Calendars tab.** To stop copying a calendar, set its **On** to
   `FALSE`: its upcoming rows then leave Events. Without the tab, the copied rows stay but are no
   longer updated, so a cancelled event would still get its reminder.
@@ -836,7 +840,9 @@ needs step 3 (deploy a new version). What each report shows: [SHEET.md → Repor
   group name in the Calendars tab, or in an event's description, is misspelled (or was renamed in
   Settings). Fix it to match Settings `SCHOOLS` or `ENSEMBLES`.
 * **An event shows for the wrong families.** Check the calendar's Schools and Groups in the Calendars
-  tab, and any *Schools:* / *Groups:* lines in the event's description (step F).
+  tab, and any *Schools:* / *Groups:* lines in the event's description (step F). If it still goes to
+  a school or group you took off, look at Status: while any linked calendar can't be read, the app
+  takes no school or group away from copied events. Fix that calendar, or set its **On** to `FALSE`.
 
 **PayPal**
 
