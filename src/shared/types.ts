@@ -457,7 +457,7 @@ export interface TickReport {
 export interface CalendarTickReport {
   /** Calendars read this run. */
   read: number;
-  /** Calendars that could not be read; their rows in the Events tab were left as they were. */
+  /** Calendars that could not be read; their rows in the Events tab were kept. */
   failed: number;
   /** Events tab rows added, changed and removed. */
   added: number;

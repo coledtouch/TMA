@@ -345,15 +345,17 @@ families and the dashboard see.
   the row goes into the cache key `report-log-pending`: a JSON list of the Log details not written
   yet, oldest first. Each ends " at <when the roster was viewed, New York time> (noted late: the app
   was busy)", e.g. "… viewed by <admin email> at Oct 21, 2026 10:00 AM (noted late: the app was
-  busy)", because its Log row carries the later time it is written. The list is kept for 6 hours
+  busy)", because its Log row's own time is that of the sync or view that writes it, not of the view
+  it records. The list is kept for 6 hours
   (`PENDING_REPORT_LOG_SECONDS`) and holds at most 20 rows (`MAX_PENDING_REPORT_LOGS`; past that the
   oldest is dropped). `flushPendingReportLogs`, called only under the write lock, queues them as
   `report` Log rows and removes the key. The next roster view that gets the lock calls it before
   adding its own row, and every sync calls it as its last step (§7), so a kept row reaches the Log
   within about 15 minutes. A row written before an error (releasing the lock, say) counts as written
   and is not kept to write again. A cache error is logged to the console only and never fails the
-  report or the sync. Only a row the cache drops early, or one that no sync or roster view writes
-  within those 6 hours, stays missing.
+  report or the sync. A kept row still goes missing when the cache drops it early, when no sync or
+  roster view writes it within those 6 hours, when the Log append itself fails (logged to the
+  console only, as for every Log row), or when it is kept in the instant another run clears the list.
 * Ledger and Payments rows with no date can't be placed in a date range: they are left out and counted
   in a note.
 * A StudentID on two Students rows counts once, as its first row, as everywhere in the app. The
@@ -558,7 +560,7 @@ work for them unchanged.
   means 180). At most `MAX_CALENDARS` = 10 calendars and `MAX_EVENTS_PER_CALENDAR` = 500 events each.
   No new calendar is started after 120 s (it is reported and tried next time). A calendar that fails
   becomes a plain reason and never stops the others or the rest of the sync. It never throws; no
-  Calendars tab → null. Under the lock `syncCalendars` runs last, on a fresh read of Events
+  Calendars tab → null. Under the lock `syncCalendars` runs after steps 1–3, on a fresh read of Events
   (`inWriteLock` resets the Db). With null (the tab renamed or deleted) it changes nothing, but while
   Events still has upcoming copied rows (Date from today on) they are no longer kept up to date, so it
   adds `Calendars: The Calendars tab is missing …` to `errors` every run and the Log once a day: rename
