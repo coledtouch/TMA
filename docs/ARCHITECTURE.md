@@ -216,9 +216,11 @@ Passwordless email codes. No Google account is required for parents.
      `withLock(fn, {waitMs})`: 5000 ms for a sign-in (`SIGN_IN_LOCK_WAIT_MS`), 1500 ms for an opening
      (`OPENED_LOCK_WAIT_MS`). It reads the tab fresh under it and upserts (duplicates merged, §3). A busy
      lock, a failed write or a cache error is logged to the console only and never fails the sign-in or
-     the bootstrap. After a skipped write the cache key is set for 10 minutes (`OPENED_RETRY_SECONDS`),
-     so the app tries again later rather than on every page load. The tab is created by Set up, or by
-     the first write if Set up hasn't run.
+     the bootstrap. After a skipped opening the cache key is set for 10 minutes (`OPENED_RETRY_SECONDS`),
+     so the app tries again later rather than on every page load. After a skipped sign-in the key is
+     removed instead, so the page load right after tries once more (1500 ms) and adds it. A row written
+     before an error (releasing the lock, say) counts as written: the sign-in is not kept to add again.
+     The tab is created by Set up, or by the first write if Set up hasn't run.
    * A **skipped sign-in is kept**, not lost: the cache key `signin-pending:<email>` holds
      `{count, first, last}` for 6 hours (`PENDING_SIGN_IN_SECONDS`). The next write for that email that
      gets the lock (an opening or a sign-in) reads it under the lock, adds it (count + its count; Last

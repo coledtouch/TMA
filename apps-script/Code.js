@@ -3160,18 +3160,20 @@ var TMA = (() => {
         () => {
           const pending = readPending(ctx, email2);
           upsert(ctx, email2, familyId, activity, pending);
+          written = true;
           if (pending) forgetPending(ctx, email2);
         },
         { waitMs: activity === "sign-in" ? SIGN_IN_LOCK_WAIT_MS : OPENED_LOCK_WAIT_MS }
       );
-      written = true;
     } catch (err) {
       const what = activity === "sign-in" ? "the sign-in" : "that the app was opened";
       ctx.s.logger.error(`Could not note ${what} (Sign-ins tab); skipped`, errorMessage(err));
-      if (activity === "sign-in") keepPending(ctx, email2);
+      if (activity === "sign-in" && !written) keepPending(ctx, email2);
     }
     try {
-      ctx.s.cache.put(openedKey(email2), "1", written ? OPENED_EVERY_SECONDS : OPENED_RETRY_SECONDS);
+      if (written) ctx.s.cache.put(openedKey(email2), "1", OPENED_EVERY_SECONDS);
+      else if (activity === "sign-in") ctx.s.cache.remove(openedKey(email2));
+      else ctx.s.cache.put(openedKey(email2), "1", OPENED_RETRY_SECONDS);
     } catch (err) {
       ctx.s.logger.error("Could not write the cache", errorMessage(err));
     }

@@ -195,12 +195,49 @@ describe('never in the way', () => {
     const token = h.signIn(NGUYEN);
     expect(h.ok('me.bootstrap', {}, token).me.familyId).toBe('F0002');
     expect(JSON.stringify(h.rows('Sign-ins'))).toBe(before);
-    expect(waits).toEqual([SIGN_IN_LOCK_WAIT_MS]); // the bootstrap right after waits for the retry time
+    // The bootstrap right after tries once more, briefly, to add the skipped sign-in.
+    expect(waits).toEqual([SIGN_IN_LOCK_WAIT_MS, OPENED_LOCK_WAIT_MS]);
     expect(SIGN_IN_LOCK_WAIT_MS).toBeLessThanOrEqual(5000);
     expect(OPENED_LOCK_WAIT_MS).toBeLessThanOrEqual(2000);
     expect(h.services.logs.filter((l) => l.level === 'error').map((l) => l.message)).toEqual([
       'Could not note the sign-in (Sign-ins tab); skipped',
+      'Could not note that the app was opened (Sign-ins tab); skipped',
     ]);
+    // Later page loads wait for the retry time.
+    h.ok('me.bootstrap', {}, token);
+    expect(waits).toHaveLength(2);
+  });
+
+  it('adds a skipped sign-in on the page load right after, once the lock is free', () => {
+    const h = harness({ tables: { 'Sign-ins': [] } });
+    // An opening an hour ago (another phone) holds back openings for hours; a skipped sign-in clears it.
+    h.ok('me.bootstrap', {}, h.signIn(NGUYEN));
+    h.services.db.tables['Sign-ins'] = [];
+    h.services.setNow(later(60));
+    busyLock(h);
+    const token = h.signIn(NGUYEN); // skipped
+    h.services.withLock = <T>(fn: () => T): T => fn(); // free a second later
+    h.ok('me.bootstrap', {}, token);
+    expect(rowsFor(h, NGUYEN)).toEqual([
+      { Email: NGUYEN, FamilyID: 'F0002', 'First Signed In': '2026-10-21T15:00:00.000Z', 'Last Signed In': '2026-10-21T15:00:00.000Z', 'Last Opened App': '2026-10-21T15:00:00.000Z', 'Sign-ins': 1 },
+    ]);
+    expect(h.services.cache.get(pendingSignInKey(NGUYEN))).toBeNull();
+  });
+
+  it('does not count a sign-in twice when an error comes after its row was written', () => {
+    const h = harness({ tables: { 'Sign-ins': [] } });
+    // The row is written, then releasing the lock fails (a flush error, say).
+    h.services.withLock = <T>(fn: () => T): T => {
+      fn();
+      throw new Error('Service Spreadsheets failed');
+    };
+    const token = h.signIn(NGUYEN);
+    expect(rowsFor(h, NGUYEN)[0]['Sign-ins']).toBe(1);
+    expect(h.services.cache.get(pendingSignInKey(NGUYEN))).toBeNull();
+    h.services.withLock = <T>(fn: () => T): T => fn();
+    h.services.setNow(later(6 * 60 + 1));
+    h.ok('me.bootstrap', {}, token);
+    expect(rowsFor(h, NGUYEN)[0]['Sign-ins']).toBe(1);
   });
 
   it('tries an opening again after 10 minutes, not on every page load', () => {
@@ -231,7 +268,7 @@ describe('never in the way', () => {
     h.services.withLock = <T>(fn: () => T): T => fn(); // free again
     h.services.setNow(later(11)); // past the 10-minute retry
     h.ok('me.bootstrap', {}, token);
-    expect(waits).toEqual([SIGN_IN_LOCK_WAIT_MS]);
+    expect(waits).toEqual([SIGN_IN_LOCK_WAIT_MS, OPENED_LOCK_WAIT_MS]);
     expect(rowsFor(h, NGUYEN)).toEqual([
       { Email: NGUYEN, FamilyID: 'F0002', 'First Signed In': NOW, 'Last Signed In': NOW, 'Last Opened App': '2026-10-21T14:11:00.000Z', 'Sign-ins': 1 },
     ]);

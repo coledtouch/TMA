@@ -78,18 +78,23 @@ function note(ctx: Ctx, email: string, activity: Activity): void {
         // Read under the lock, so two writes at once can't both add the same skipped sign-in.
         const pending = readPending(ctx, email);
         upsert(ctx, email, familyId, activity, pending);
+        // Written: an error after this (releasing the lock) must not keep the sign-in to add again.
+        written = true;
         if (pending) forgetPending(ctx, email);
       },
       { waitMs: activity === 'sign-in' ? SIGN_IN_LOCK_WAIT_MS : OPENED_LOCK_WAIT_MS },
     );
-    written = true;
   } catch (err) {
     const what = activity === 'sign-in' ? 'the sign-in' : 'that the app was opened';
     ctx.s.logger.error(`Could not note ${what} (Sign-ins tab); skipped`, errorMessage(err));
-    if (activity === 'sign-in') keepPending(ctx, email);
+    if (activity === 'sign-in' && !written) keepPending(ctx, email);
   }
   try {
-    ctx.s.cache.put(openedKey(email), '1', written ? OPENED_EVERY_SECONDS : OPENED_RETRY_SECONDS);
+    if (written) ctx.s.cache.put(openedKey(email), '1', OPENED_EVERY_SECONDS);
+    // A skipped sign-in: the next opening (usually the page load right after) tries again at once
+    // and adds it, so it is written long before it leaves the cache.
+    else if (activity === 'sign-in') ctx.s.cache.remove(openedKey(email));
+    else ctx.s.cache.put(openedKey(email), '1', OPENED_RETRY_SECONDS);
   } catch (err) {
     ctx.s.logger.error('Could not write the cache', errorMessage(err));
   }
