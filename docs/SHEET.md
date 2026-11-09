@@ -320,7 +320,9 @@ before (in the morning run, about 8 AM).
 **Rows with a Source come from a linked calendar. Change those in the calendar, not here.** At each
 sync the app updates them from the calendar: what you type into them is replaced within a few hours,
 and a row whose event was cancelled, deleted or made private is removed (only for dates from yesterday
-on; rows of past events stay as history). The app gives them IDs like `CAL-3f2a9c1b7e`. Rows without
+on; rows of past events stay as history). The app gives them IDs like `CAL-3f2a9c1b7e`, and formats
+their Title, Location and Details cells as *Plain text*, so a title like `0042` or `12/5` stays as
+written instead of turning into a number or a date. Rows without
 a Source are yours: the app never changes or removes them. If you clear a copied row's Source, that row
 becomes yours too: the app stops updating it and doesn't copy that event again (not from another
 linked calendar either).

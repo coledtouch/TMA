@@ -301,6 +301,42 @@ describe('SheetStore.append', () => {
     store().append('Ledger', []);
     expect(gas.spreadsheet.sheets).toHaveLength(0);
   });
+
+  it('formats the text columns’ cells as plain text before writing them, and no other cell', () => {
+    expect(TABLES.Events.text).toEqual(['Title', 'Location', 'Details']);
+    const sheet = gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [
+        ['ID', 'Date', 'Time', 'Title', 'Location', 'Details', 'Source'],
+        ['EV-1', '2026-11-10', '7:00 PM', 'Typed by hand', 'TRHS', '', ''],
+      ]),
+    );
+    const day = new Date(2026, 11, 5);
+    store().append('Events', [
+      // Sheets would store these as the number 42, the date 12/5 and 0.5.
+      { ID: 'CAL-1', Date: day, Time: '6:30 PM', Title: '0042', Location: '12/5', Details: '50%', Source: 'Music Dept' },
+      { ID: 'CAL-2', Date: day, Title: '6:30 PM call', Location: 12, Source: 'Music Dept' },
+      { ID: 'CAL-3', Date: day, Title: '=HYPERLINK("http://x")', Location: 'TRHS', Details: '-bring music', Source: 'Music Dept' },
+    ]);
+    // One call per column, Location split around its number; all before the values.
+    expect(sheet.ops).toEqual([
+      'setNumberFormat R3C4:3x1 @',
+      'setNumberFormat R3C5:1x1 @',
+      'setNumberFormat R5C5:1x1 @',
+      'setNumberFormat R3C6:3x1 @',
+      'setValues R3C1:3x7',
+    ]);
+    expect([...sheet.numberFormats.keys()].sort()).toEqual(['3,4', '3,5', '3,6', '4,4', '4,6', '5,4', '5,5', '5,6']);
+    // Formula-looking text still gets Sheets' text marker.
+    expect(sheet.raw(5, 4)).toBe('\'=HYPERLINK("http://x")');
+    expect(sheet.raw(5, 6)).toBe("'-bring music");
+    expect(sheet.raw(4, 5)).toBe(12);
+
+    // Tabs without text columns: no format is touched (an Announcements Title is not one).
+    const news = gas.spreadsheet.addSheet(FakeSheet.withRows('Announcements', [['ID', 'Title'], ['A-1', 'Hi']]));
+    store().append('Announcements', [{ ID: 'A-2', Title: '0042' }]);
+    expect(news.ops).toEqual(['setValues R3C1:1x2']);
+    expect(news.numberFormats.size).toBe(0);
+  });
 });
 
 describe('SheetStore.update', () => {
@@ -335,6 +371,28 @@ describe('SheetStore.update', () => {
       '',
       '2026-10-21',
     ]);
+  });
+
+  it('formats only the patched text cells as plain text, one call per run, before writing them', () => {
+    const sheet = gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [
+        [...TABLES.Events.headers],
+        ['CAL-1', '2026-11-10', '7:00 PM', 'Concert', 'TRHS', '', '', '', 'Music Dept', 'abc'],
+      ]),
+    );
+    store().update('Events', 2, { Date: '2026-12-05', Time: '6:30 PM', Title: '0042', Location: '12/5', Details: '50%', Source: 'Music Dept' });
+    expect(sheet.ops).toEqual(['setNumberFormat R2C4:1x3 @', 'setValues R2C2:1x5', 'setValues R2C9:1x1']);
+    expect([...sheet.numberFormats.keys()].sort()).toEqual(['2,4', '2,5', '2,6']);
+  });
+
+  it('with the columns moved, formats each group of adjacent text cells, and never a cell that gets a number', () => {
+    const sheet = gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [['Title', 'Schools', 'Location', 'Details', 'Date'], ['A', '', 'B', 'C', '2026-11-10']]),
+    );
+    store().update('Events', 2, { Title: '12/5', Schools: 'High School', Location: 42, Details: '-1 day', Date: new Date(2026, 11, 5) });
+    expect(sheet.ops).toEqual(['setNumberFormat R2C1:1x1 @', 'setNumberFormat R2C4:1x1 @', 'setValues R2C1:1x5']);
+    expect([...sheet.numberFormats.keys()].sort()).toEqual(['2,1', '2,4']);
+    expect(sheet.raw(2, 4)).toBe("'-1 day");
   });
 
   it('rejects row numbers outside the data', () => {

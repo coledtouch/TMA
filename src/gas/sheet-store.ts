@@ -9,6 +9,9 @@
  * - Headers are matched with normalizeHeader + TABLES[...].aliases, so column
  *   order, spelling and extra treasurer columns never matter.
  * - Text that Sheets would evaluate as a formula is written as plain text.
+ * - Sheets reads text from setValues as if it were typed ("0042" -> 42, "6:30 PM" -> a time), so
+ *   cells of a table's `text` columns (TABLES[...].text) are formatted as plain text ("@") just
+ *   before text is written into them. No other column's format is ever changed.
  * - Date cells: Sheets keeps wall-clock dates and times in the SPREADSHEET's
  *   time zone (File → Settings), while this script's Dates (and the core's
  *   getFullYear/getDate/getHours) use the SCRIPT's zone (appsscript.json,
@@ -30,6 +33,8 @@ const MAX_CELL_CHARS = 50000;
 /** A leading = + - @ makes Sheets parse text as a formula; a leading ' is eaten as a text marker. */
 const FORMULA_START = /^[=+\-@']/;
 const NUMERIC_TEXT = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+/** Sheets' "Plain text" number format: what is written is kept as text. */
+const PLAIN_TEXT = '@';
 /** Utilities.formatDate/parseDate pattern for a wall-clock time. */
 export const WALL_CLOCK_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS";
 const WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/;
@@ -112,6 +117,17 @@ function isBlank(value: unknown): boolean {
 
 function pad(n: number, width: number): string {
   return String(n).padStart(width, '0');
+}
+
+/** Ascending numbers -> runs of consecutive ones: [2, 3, 4, 7] -> [{start: 2, count: 3}, {start: 7, count: 1}]. */
+function consecutiveRuns(sorted: readonly number[]): Array<{ start: number; count: number }> {
+  const runs: Array<{ start: number; count: number }> = [];
+  for (const n of sorted) {
+    const last = runs[runs.length - 1];
+    if (last && n === last.start + last.count) last.count += 1;
+    else runs.push({ start: n, count: 1 });
+  }
+  return runs;
 }
 
 /** A Date at this wall-clock time in the script's (= the runtime's local) time zone; any year, unlike new Date(y, …). */
@@ -294,6 +310,12 @@ class SpreadsheetStore implements SheetStore {
       if (column !== undefined && value !== undefined) cells.push({ column, value: toSheetValue(value, this.toSheetDate) });
     }
     cells.sort((a, b) => a.column - b.column);
+    // Plain text first, one call per run of adjacent text cells, so Sheets keeps the text as written.
+    const text = new Set(this.textColumns(layout));
+    const textCells = cells.filter((c) => text.has(c.column) && typeof c.value === 'string').map((c) => c.column);
+    for (const run of consecutiveRuns(textCells)) {
+      layout.sheet.getRange(rowNumber, run.start, 1, run.count).setNumberFormat(PLAIN_TEXT);
+    }
     // One setValues per run of adjacent columns; untouched cells are never rewritten.
     let i = 0;
     while (i < cells.length) {
@@ -462,6 +484,22 @@ class SpreadsheetStore implements SheetStore {
     const { sheet } = layout;
     const lastNeeded = startRow + rows.length - 1;
     if (lastNeeded > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), lastNeeded - sheet.getMaxRows());
+    // Plain text first, for the cells of text columns that get text (normally one call per column).
+    for (const column of this.textColumns(layout)) {
+      if (column < first || column > last) continue;
+      const textRows = matrix.flatMap((line, r) => (typeof line[column - first] === 'string' ? [startRow + r] : []));
+      for (const run of consecutiveRuns(textRows)) sheet.getRange(run.start, column, run.count, 1).setNumberFormat(PLAIN_TEXT);
+    }
     sheet.getRange(startRow, first, rows.length, last - first + 1).setValues(matrix);
+  }
+
+  /** Where the tab's `text` columns are (TABLES[...].text): their cells are written as plain text. */
+  private textColumns(layout: Layout): number[] {
+    const columns: number[] = [];
+    for (const header of TABLES[layout.table].text ?? []) {
+      const column = layout.columns.get(header);
+      if (column !== undefined) columns.push(column);
+    }
+    return columns;
   }
 }

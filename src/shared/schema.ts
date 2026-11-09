@@ -34,6 +34,12 @@ export interface TableDef {
   headers: readonly string[];
   /** canonical header -> other accepted spellings */
   aliases?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Columns always kept as plain text. Sheets reads text written to a cell as if it were typed
+   * ("0042" becomes 42, "6:30 PM" a time, "12/5" a date), so the Apps Script store formats these
+   * cells as plain text before writing text into them.
+   */
+  text?: readonly string[];
   /** Maintained by the app; hidden in the sheet. */
   system?: boolean;
   /** One-line purpose, shown in docs and in the sheet's header note. */
@@ -158,6 +164,8 @@ export const TABLES: Readonly<Record<TableName, TableDef>> = {
       Source: ['Calendar Name', 'From Calendar'],
       'Calendar Event': ['Calendar Event ID', 'Calendar Key'],
     },
+    // Copied from linked calendars as is: a title like "0042", "12/5" or "6:30 PM" must stay text.
+    text: ['Title', 'Location', 'Details'],
     note: 'Concerts, meetings, deadlines. Families get a reminder the day before. Rows with a Source are copied from a linked calendar (Calendars tab): change those in the calendar, not here.',
   },
   Calendars: {

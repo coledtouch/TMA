@@ -244,9 +244,10 @@ export interface CalendarWindow {
 
 /**
  * Why a calendar couldn't be read. `not_found`: no such calendar, or not shared with this Google
- * account (Google answers 404 for both). `not_shared`: Google refused (403). `no_service`: the
- * Calendar advanced service isn't in appsscript.json. `no_permission`: the read-only calendar
- * permission hasn't been approved yet. `busy`: try again later (429, 5xx, rate limits).
+ * account (Google answers 404 for both). `not_shared`: Google refused (403). `free_busy`: shared
+ * as free/busy only, so events come without names or details. `no_service`: the Calendar advanced
+ * service isn't in appsscript.json. `no_permission`: the read-only calendar permission hasn't been
+ * approved yet. `busy`: try again later (429, 5xx, rate limits).
  */
 export type CalendarProblem =
   | 'bad_address'
@@ -254,6 +255,7 @@ export type CalendarProblem =
   | 'no_permission'
   | 'not_found'
   | 'not_shared'
+  | 'free_busy'
   | 'busy'
   | 'link_failed'
   | 'not_ical'

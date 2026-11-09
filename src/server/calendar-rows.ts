@@ -139,6 +139,8 @@ export function calendarProblemText(problem: CalendarProblem | 'blank' | 'http' 
       return `not found, or not shared with this Google account${extra}. Check the Calendar ID, and share the calendar with TMA's Google account (or make it public)`;
     case 'not_shared':
       return `not shared with this Google account${extra}. Share it with TMA's Google account ("See all event details"), or make it public`;
+    case 'free_busy':
+      return `shared with this Google account as free/busy only, so event names and details can't be read. Share it with TMA's Google account with "See all event details"`;
     case 'busy':
       return `Google was busy${extra}. The app tries again at the next sync`;
     case 'link_failed':

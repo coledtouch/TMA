@@ -823,6 +823,10 @@ needs step 3 (deploy a new version). What each report shows: [SHEET.md → Repor
   gives the same answer for a wrong ID and for a calendar TMA's account can't see.
 * **"not shared with this Google account".** The calendar is shared, but not with event details, or
   the owner's organization (often a school district) doesn't allow it. Use its iCal address (step D).
+* **"shared with this Google account as free/busy only".** TMA's account can see when the calendar is
+  busy but not what the events are, so nothing is copied. The owner changes TMA's account to *See all
+  event details* in the calendar's **Settings and sharing** (step C), or, for a public calendar, sets
+  *Make available to public* to *See all event details*.
 * **"the iCal link failed (HTTP 404)" or "didn't return a calendar".** The address is wrong, or the
   calendar isn't published any more. Copy its iCal address again.
 * **"The Calendars tab is missing".** Someone renamed or deleted it. Rename it back to `Calendars`.

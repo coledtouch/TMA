@@ -250,6 +250,7 @@ export class FakeRange {
   }
 
   setNumberFormat(format: string): FakeRange {
+    this.sheet.ops.push(`setNumberFormat ${this.a1()} ${format}`);
     for (let c = 0; c < this.numColumns; c += 1) {
       for (let r = 0; r < this.numRows; r += 1) this.sheet.numberFormats.set(`${this.row + r},${this.column + c}`, format);
     }
@@ -268,7 +269,7 @@ export class FakeSheet {
   readonly fontWeights = new Map<string, string>();
   /** "row,column" -> number format, e.g. "$#,##0.00". */
   readonly numberFormats = new Map<string, string>();
-  /** Log of write operations, e.g. "setValues R5C1:1x8". */
+  /** Log of write operations, e.g. "setValues R5C1:1x8" or "setNumberFormat R5C4:1x3 @". */
   readonly ops: string[] = [];
   frozenRows = 0;
   hidden = false;

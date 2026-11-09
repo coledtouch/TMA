@@ -149,6 +149,9 @@ e2e/          Playwright tests (demo, demo inside a live build) and README scree
 * **Events**: a row needs a Date and a Title. `Source` (shown in the app as `EventItem.source`) and
   `Calendar Event` are filled only on rows the app copies from a linked calendar (§7); rows without a
   Source are the treasurer's and the app never changes them. `Groups` is accepted for `Ensembles`.
+  `Title`, `Location` and `Details` are its `text` columns (`TableDef.text`): the Apps Script store
+  formats their cells as plain text before writing text into them (§9), so a copied `0042`, `12/5`
+  or `6:30 PM` stays text.
 * **Calendars**: `Name | Calendar | Schools | Groups | On` (aliases: Calendar ID / Calendar Link / iCal
   Link / Link / Address; Ensembles; Enabled / Active). `On` blank = on. Rows with no Name and no
   Calendar are ignored. Read by §7 "Linked calendars".
@@ -592,7 +595,9 @@ work for them unchanged.
   `APPLY_BUDGET_MS` = 10 s (the clock port; other writers wait at most 20 s for the lock). The rest
   waits for the next sync (a note; the fingerprint isn't stored). The append always runs.
   Formula-looking text needs nothing special: the SheetStore writes text starting with `=` `+` `-` `@`
-  `'` with Sheets' text marker (§9).
+  `'` with Sheets' text marker (§9). Nor does text Sheets would re-type (`0042` → 42, `12/5` → a date,
+  `50%` → 0.5): Title, Location and Details are written into plain-text cells (§3, §9), so they read
+  back as written and compare equal.
 * **Write only when something changed.** A fingerprint (SHA-256 of the range, the hashes read and
   failed, and every wanted row) equal to the cache's `calendar-sync:fingerprint` (6 h) means the
   Events tab isn't even read. It is stored only after a complete apply. With it forgotten, an unchanged
@@ -610,7 +615,8 @@ work for them unchanged.
   The same once-a-day rule applies to the missing Calendars tab (`The Calendars tab is missing …`).
 * **Reasons** (`calendarProblemText`, plain words for Status, reports and the Log): `not_found` (404:
   "not found, or not shared with this Google account"; Google answers the same for both),
-  `not_shared` (403), `no_service` ("the Google Calendar service is missing … Paste the new
+  `not_shared` (403), `free_busy` ("shared with this Google account as free/busy only, so event names
+  and details can't be read"), `no_service` ("the Google Calendar service is missing … Paste the new
   appsscript.json"), `no_permission` (the read-only scope not approved yet), `busy` (429, 5xx),
   `link_failed` (HTTP code, or "no answer"), `not_ical`, `too_big`, and the Calendar column's own
   problems (blank, `http://`, not an ID or link).
@@ -718,6 +724,13 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
   those rows, fresh, with one `getRange(first, 1, count, last mapped column).getValues()`, mapped as a
   read maps rows (headers, aliases, dates); blank rows and rows past the end → null.
   Header row → canonical map via normalizeHeader+aliases. append uses one `setValues` call. Hide `system` tabs.
+  Sheets reads text from `setValues` as if it were typed (`0042` → 42, `6:30 PM` → a time, `12/5` → a
+  date, `50%` → 0.5), so before writing, the cells of a table's `text` columns (`TableDef.text`: Events
+  Title, Location, Details) that get text are formatted plain text (`setNumberFormat('@')`): on append
+  and overwrite one range per column (split only around a cell that gets a number, date or boolean),
+  on update one per run of adjacent text cells. No other column's format is touched (Date and Time
+  stay dates), and formula-looking text still gets its leading apostrophe. The memory store needs
+  nothing: it keeps values as written.
   Add the header note from `TABLES[t].note` to A1 when creating. Dates are converted between the
   spreadsheet's and the script's time zones when they differ (`SheetTimeZone`, see §3 "Dates"); the
   two zones are looked up once per execution.
@@ -791,10 +804,13 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
   events it copies, or the reason; with no Calendars rows, "none linked" and no request.
 * **Calendars** (`src/gas/calendar.ts`, the `CalendarSource`): Google Calendar IDs through the Calendar
   advanced service: `Calendar.Events.list(id, {timeMin, timeMax, singleEvents: true, orderBy:
-  'startTime', showDeleted: false, maxResults: 250, fields: 'nextPageToken,items(id,status,summary,
-  description,location,start,end,visibility,eventType)', pageToken})`, up to 10 pages (never attendees
-  or organizers). The service is looked up when used (`typeof Calendar`), so an old manifest without it
-  reports `no_service` instead of failing to load. Errors are mapped from the message: rate limits →
+  'startTime', showDeleted: false, maxResults: 250, fields: 'accessRole,nextPageToken,items(id,status,
+  summary,description,location,start,end,visibility,eventType)', pageToken})`, up to 10 pages (never
+  attendees or organizers). The service is looked up when used (`typeof Calendar`), so an old manifest
+  without it reports `no_service` instead of failing to load. A first page with `accessRole`
+  `freeBusyReader` (shared, or public, as *See only free/busy*) → `free_busy`: its events come without
+  summary or description, so each busy time, personal ones included, would otherwise be copied as an
+  `Untitled event` with a reminder to every family. Errors are mapped from the message: rate limits →
   `busy`, scopes/authorization → `no_permission`, "has not been used in project"/accessNotConfigured →
   `no_service`, Not Found → `not_found`, Forbidden → `not_shared`, Backend Error/5xx/timeouts → `busy`,
   Bad Request → `not_found`. iCal links: `https://` only, `UrlFetchApp.fetch(url, {muteHttpExceptions,
@@ -1154,7 +1170,8 @@ export function PayPalCheckout(props: {
   recorders for mail/sms/push, a fake PaymentGateway).
 * `src/gas`: Vitest with hand-written mocks of SpreadsheetApp/Utilities/UrlFetchApp/Session/etc. (headers,
   aliasing, date conversion between a far-away spreadsheet zone and the script zone, which must pass
-  whatever the machine's own time zone is, PayPal request bodies, push Worker requests: 5-message batches, payload limits, 401 re-registration and
+  whatever the machine's own time zone is, plain-text format on exactly the text columns' cells before
+  their values, PayPal request bodies, push Worker requests: 5-message batches, payload limits, 401 re-registration and
   `no_keys` recovery). `src/gas/bundle.test.ts` checks the generated `apps-script/Code.js` itself (plain
   script, no service calls at load time, every entry point) and drives it end to end against those fakes,
   including setup linking the Worker, `push.register`, a sync push and a linked Google Calendar copied
@@ -1175,10 +1192,12 @@ export function PayPalCheckout(props: {
   the 10-second apply budget, Off calendars, the 500 cap, CALENDAR_DAYS, the
   reminder sent once even after an edit, calendars read outside the lock and written inside it,
   missing columns, Status lines, demo parity); `src/gas/calendar.test.ts` (Calendar service mapping,
-  paging, the cap, missing advanced service, 404/403/scope/rate errors; iCal fetch: https only, HTTP
+  paging, the cap, missing advanced service, 404/403/scope/rate errors, a free/busy-only calendar
+  refused; iCal fetch: https only, HTTP
   errors, no answer without leaking the link, size cap, not a calendar, zones through Utilities; the
-  sync through the SheetStore: text kept as text, nothing written the second time, whole rows deleted,
-  an old manifest reported once a day).
+  sync through the SheetStore: text kept as text, Title/Location/Details cells formatted plain text
+  before the values, nothing written the second time, whole rows deleted, an old manifest reported
+  once a day, a free/busy-only calendar failing with no rows copied).
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
   status and filter, validation messages, admin-only, the row cap and the roster's Log row.
 * `src/server/sign-ins.test.ts`: the Sign-ins upsert (new row, update, household filled in later, no

@@ -82,7 +82,7 @@ describe('Google Calendar (Calendar advanced service)', () => {
       orderBy: 'startTime',
       showDeleted: false,
       maxResults: 250,
-      fields: 'nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)',
+      fields: 'accessRole,nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)',
     });
     expect(gas.calendar.calls[1].args.pageToken).toBe('p2');
   });
@@ -97,6 +97,15 @@ describe('Google Calendar (Calendar advanced service)', () => {
     expect(feed.events).toHaveLength(300);
     expect(feed.capped).toBe(true);
     expect(gas.calendar.calls).toHaveLength(2);
+  });
+
+  it('refuses a calendar shared as free/busy only (its events have no names); a reader’s is read', () => {
+    const busy = { id: 'busy-1', start: { dateTime: '2026-11-12T19:00:00-05:00' }, end: { dateTime: '2026-11-12T20:00:00-05:00' } };
+    gas.calendar.handler = () => ({ accessRole: 'freeBusyReader', items: [busy], nextPageToken: 'p2' });
+    expect(problem(() => readGoogleCalendar(BOARD, RANGE))).toEqual({ problem: 'free_busy', detail: '' });
+    expect(gas.calendar.calls).toHaveLength(1);
+    gas.calendar.handler = () => ({ accessRole: 'reader', items: [{ ...busy, summary: 'Pops concert' }] });
+    expect(readGoogleCalendar(BOARD, RANGE).events.map((e) => e.title)).toEqual(['Pops concert']);
   });
 
   it('reports a missing advanced service (old appsscript.json) instead of crashing', () => {
@@ -234,6 +243,43 @@ describe('the sync through the real sheet adapter', () => {
       '=HYPERLINK("https://evil.example","Tickets")',
       'Winter break',
     ]);
+  });
+
+  it('formats the copied Title, Location and Details cells as plain text before writing them; Date and Time keep theirs', () => {
+    const { app, events } = sheetWithCalendar();
+    gas.calendar.handler = () => ({
+      items: [{ id: 'n', summary: '0042', location: '12/5', description: '50%', start: { dateTime: '2026-11-12T18:30:00-05:00' } }],
+    });
+    expect(app.syncTick().calendars).toMatchObject({ added: 1 });
+    const sheet = events();
+    const header = sheet.dump()[0] as string[];
+    const col = (name: string) => header.indexOf(name) + 1;
+    expect(sheet.dump()[2].slice(col('Time') - 1, col('Details'))).toEqual(['6:30 PM', '0042', '12/5', '50%']);
+    // Plain text on exactly those three cells, then the values.
+    expect(sheet.ops.filter((op) => op.includes(' R3C'))).toEqual([
+      `setNumberFormat R3C${col('Title')}:1x1 @`,
+      `setNumberFormat R3C${col('Location')}:1x1 @`,
+      `setNumberFormat R3C${col('Details')}:1x1 @`,
+      `setValues R3C1:1x${header.length}`,
+    ]);
+    expect([...sheet.numberFormats.keys()].filter((key) => key.startsWith('3,'))).toHaveLength(3);
+  });
+
+  it('a calendar shared as free/busy only fails with what to do, and copies no rows', () => {
+    const { app, events } = sheetWithCalendar();
+    const busy = { id: 'busy-1', start: { dateTime: '2026-11-12T19:00:00-05:00' }, end: { dateTime: '2026-11-12T20:00:00-05:00' } };
+    gas.calendar.handler = () => ({ accessRole: 'freeBusyReader', items: [busy] });
+    const report = app.syncTick();
+    expect(report.calendars).toEqual({ read: 0, failed: 1, added: 0, updated: 0, removed: 0 });
+    expect(report.errors).toEqual([
+      'Calendar "Music Dept": shared with this Google account as free/busy only, so event names and details can\'t be read. Share it with TMA\'s Google account with "See all event details".',
+    ]);
+    expect(events().dump().slice(1).map((r) => r[3])).toEqual(['Typed by hand']);
+
+    // Shared again with all event details: copied.
+    gas.calendar.handler = () => ({ accessRole: 'reader', items: [{ ...busy, summary: 'Pops concert' }] });
+    expect(app.syncTick().calendars).toEqual({ read: 1, failed: 0, added: 1, updated: 0, removed: 0 });
+    expect(events().dump().slice(1).map((r) => r[3])).toEqual(['Typed by hand', 'Pops concert']);
   });
 
   it('with the Calendars tab deleted, keeps the copied rows and says what to do (not silently frozen)', () => {

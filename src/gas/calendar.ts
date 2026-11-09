@@ -6,6 +6,8 @@
  *   calendar.readonly. It reads calendars shared with the TMA Google account
  *   and public calendars, and expands repeating events (singleEvents). Only
  *   the fields the app copies are requested: never attendees or organizers.
+ *   A calendar TMA's account may only see as free/busy is refused (`free_busy`):
+ *   Google would list its busy times without names, every one an "Untitled event".
  *   With an old manifest the service is missing: that is reported, never a crash.
  * - iCal links: UrlFetchApp (https only, at most 2 MB), parsed by the core's
  *   reader (src/server/ics.ts) with time zones resolved by Utilities.
@@ -23,7 +25,7 @@ import { isRecord } from './util';
 export const MAX_ICS_CHARS = 2000000;
 const PAGE_SIZE = 250;
 const MAX_PAGES = 10;
-const EVENT_FIELDS = 'nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)';
+const EVENT_FIELDS = 'accessRole,nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)';
 
 /** IANA zone names Utilities understands (anything else would silently become GMT). */
 const IANA_ZONE =
@@ -139,6 +141,9 @@ export function readGoogleCalendar(id: string, range: CalendarWindow): CalendarF
     } catch (err) {
       throw googleCalendarError(err);
     }
+    // Free/busy only: the events come without names or details. Copying them would add a nameless
+    // row, with a reminder to every family, for each busy time (personal ones included).
+    if (page === 0 && isRecord(response) && response.accessRole === 'freeBusyReader') throw new CalendarReadError('free_busy');
     const items = isRecord(response) && Array.isArray(response.items) ? response.items : [];
     for (const item of items) {
       if (events.length >= range.maxEvents) {
