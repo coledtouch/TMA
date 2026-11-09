@@ -194,6 +194,8 @@ var TMA = (() => {
         Source: ["Calendar Name", "From Calendar"],
         "Calendar Event": ["Calendar Event ID", "Calendar Key"]
       },
+      // Copied from linked calendars as is: a title like "0042", "12/5" or "6:30 PM" must stay text.
+      text: ["Title", "Location", "Details"],
       note: "Concerts, meetings, deadlines. Families get a reminder the day before. Rows with a Source are copied from a linked calendar (Calendars tab): change those in the calendar, not here."
     },
     Calendars: {
@@ -2323,6 +2325,20 @@ var TMA = (() => {
       this.cache.delete(table);
       this.bump(table);
     }
+    /**
+     * Sheet rows firstRow … firstRow + count − 1 as they are now (null: blank, or past the end), to
+     * check rows just before writing to them. Reads only those rows when the store can (its readRows),
+     * else the whole tab again.
+     */
+    readRows(table, firstRow, count2) {
+      if (this.store.readRows) return this.store.readRows(table, firstRow, count2);
+      this.refresh(table);
+      const byNumber = new Map(this.rows(table).map((r) => [r.rowNumber, r.data]));
+      return Array.from({ length: count2 }, (_, i) => {
+        const data = byNumber.get(firstRow + i);
+        return data ? { ...data } : null;
+      });
+    }
     /** Canonical headers the tab has; null = the tab is missing; undefined = the store can't tell. */
     columns(table) {
       return this.store.columns ? this.store.columns(table) : void 0;
@@ -3591,6 +3607,8 @@ var TMA = (() => {
         return `not found, or not shared with this Google account${extra}. Check the Calendar ID, and share the calendar with TMA's Google account (or make it public)`;
       case "not_shared":
         return `not shared with this Google account${extra}. Share it with TMA's Google account ("See all event details"), or make it public`;
+      case "free_busy":
+        return `shared with this Google account as free/busy only, so event names and details can't be read. Share it with TMA's Google account with "See all event details"`;
       case "busy":
         return `Google was busy${extra}. The app tries again at the next sync`;
       case "link_failed":
@@ -3757,6 +3775,7 @@ var TMA = (() => {
   var MAX_CALENDARS = 10;
   var MAX_EVENTS_PER_CALENDAR = 500;
   var MAX_ROW_CHANGES = 300;
+  var APPLY_BUDGET_MS = 1e4;
   var FETCH_BUDGET_MS = 12e4;
   var FINGERPRINT_KEY = "calendar-sync:fingerprint";
   var CACHE_TTL_SECONDS = 21600;
@@ -3897,17 +3916,21 @@ var TMA = (() => {
       const date = parseDate(row.data.Date);
       return date !== null && date >= range.from && date <= range.to;
     };
+    const remove = (row, key) => plan.deletes.push({ row: row.rowNumber, source: str(row.data.Source), key });
     const byKey = /* @__PURE__ */ new Map();
-    const handKeys = /* @__PURE__ */ new Set();
+    const held = /* @__PURE__ */ new Set();
     for (const row of rows) {
-      if (!str(row.data.Source)) {
-        const typedKey = str(row.data["Calendar Event"]);
-        if (typedKey) handKeys.add(typedKey);
-        continue;
-      }
       const key = str(row.data["Calendar Event"]);
       const hash = key ? calendarKeyHash(key) : null;
-      if (!hash || failed.has(hash)) continue;
+      if (!str(row.data.Source)) {
+        if (hash) held.add(calendarEventIdentity(key));
+        continue;
+      }
+      if (!hash) continue;
+      if (failed.has(hash)) {
+        held.add(calendarEventIdentity(key));
+        continue;
+      }
       const list2 = (_a = byKey.get(key)) != null ? _a : [];
       list2.push(row);
       byKey.set(key, list2);
@@ -3915,7 +3938,7 @@ var TMA = (() => {
     byKey.forEach((list2, key) => {
       const want = wanted.get(key);
       if (!want) {
-        for (const row of list2) if (inWindow(row)) plan.deletes.push(row.rowNumber);
+        for (const row of list2) if (inWindow(row)) remove(row, key);
         return;
       }
       const [first, ...repeats] = list2;
@@ -3924,13 +3947,13 @@ var TMA = (() => {
         if (!sameValue(column, first.data[column], want.row[column], known)) patch[column] = want.row[column];
       }
       if (Object.keys(patch).length > 0) plan.updates.push({ row: first.rowNumber, key, patch });
-      for (const row of repeats) plan.deletes.push(row.rowNumber);
+      for (const row of repeats) remove(row, key);
     });
     wanted.forEach((want, key) => {
       var _a2;
-      if (!byKey.has(key) && !handKeys.has(key) && read.has((_a2 = calendarKeyHash(key)) != null ? _a2 : "")) plan.inserts.push({ ...want.row });
+      if (!byKey.has(key) && !held.has(calendarEventIdentity(key)) && read.has((_a2 = calendarKeyHash(key)) != null ? _a2 : "")) plan.inserts.push({ ...want.row });
     });
-    plan.deletes.sort((a, b) => b - a);
+    plan.deletes.sort((a, b) => b.row - a.row);
     return plan;
   }
   function logOncePerDay(ctx, prefix, detail) {
@@ -3965,10 +3988,56 @@ var TMA = (() => {
     }));
     return ctx.s.crypto.hmacSha256Hex("tma-calendars", JSON.stringify([fetched.from, fetched.to, read.slice().sort(), failed.slice().sort(), rows]));
   }
-  function rowHolding(ctx, key) {
+  function keyPositions(ctx) {
     ctx.db.refresh("Events");
-    const row = ctx.db.rows("Events").find((r) => str(r.data.Source) !== "" && str(r.data["Calendar Event"]) === key);
-    return row ? row.rowNumber : null;
+    const positions = /* @__PURE__ */ new Map();
+    for (const row of ctx.db.rows("Events")) {
+      const key = str(row.data["Calendar Event"]);
+      if (key && str(row.data.Source) !== "" && !positions.has(key)) positions.set(key, row.rowNumber);
+    }
+    return positions;
+  }
+  function holdsKey(ctx, row, key) {
+    if (row === void 0) return false;
+    const [data] = ctx.db.readRows("Events", row, 1);
+    return data !== null && data !== void 0 && str(data.Source) !== "" && str(data["Calendar Event"]) === key;
+  }
+  function applyUpdates(ctx, updates, stop) {
+    if (updates.length === 0) return 0;
+    let positions = keyPositions(ctx);
+    let written = 0;
+    for (const u of updates) {
+      if (stop()) break;
+      let row = positions.get(u.key);
+      if (!holdsKey(ctx, row, u.key)) {
+        positions = keyPositions(ctx);
+        row = positions.get(u.key);
+        if (!holdsKey(ctx, row, u.key)) continue;
+      }
+      ctx.db.update("Events", row, u.patch);
+      written++;
+    }
+    return written;
+  }
+  function applyDeletes(ctx, deletes, stop) {
+    let deleted = 0;
+    let i = 0;
+    while (i < deletes.length) {
+      let j = i + 1;
+      while (j < deletes.length && deletes[j].row === deletes[j - 1].row - 1) j += 1;
+      const run = deletes.slice(i, j).reverse();
+      if (stop()) break;
+      const now = ctx.db.readRows("Events", run[0].row, run.length);
+      const same = run.every((d, k) => {
+        const data = now[k];
+        return data !== null && data !== void 0 && str(data.Source) === d.source && str(data["Calendar Event"]) === d.key;
+      });
+      if (!same) break;
+      ctx.db.deleteRows("Events", run.map((d) => d.row), CALENDAR_ROW_COLUMNS);
+      deleted += run.length;
+      i = j;
+    }
+    return deleted;
   }
   function reportMissingTab(ctx, report) {
     const upcoming = ctx.db.rows("Events").filter((r) => {
@@ -4061,24 +4130,21 @@ var TMA = (() => {
     const readSet = new Set(read);
     const failedSet = new Set(failed);
     const planNow = () => planCalendarRows(ctx.db.rows("Events"), wanted, readSet, failedSet, range, known);
+    const started = ctx.s.clock.now().getTime();
+    const outOfTime = () => ctx.s.clock.now().getTime() - started > APPLY_BUDGET_MS;
     const plan = planNow();
     const total = plan.updates.length + plan.inserts.length + plan.deletes.length;
-    const updates = plan.updates.slice(0, MAX_ROW_CHANGES);
     const inserts = plan.inserts;
-    for (const u of updates) {
-      const rowNumber = rowHolding(ctx, u.key);
-      if (rowNumber === null) continue;
-      ctx.db.update("Events", rowNumber, u.patch);
-      summary.updated++;
-    }
+    summary.updated = applyUpdates(ctx, plan.updates.slice(0, MAX_ROW_CHANGES), outOfTime);
     let deletesLeft = 0;
     if (plan.deletes.length > 0) {
-      ctx.db.refresh("Events");
-      const all = planNow().deletes;
-      const deletes = all.slice(0, Math.max(0, MAX_ROW_CHANGES - updates.length));
-      if (deletes.length > 0) ctx.db.deleteRows("Events", deletes, CALENDAR_ROW_COLUMNS);
-      summary.removed = deletes.length;
-      deletesLeft = all.length - deletes.length;
+      let deletes = plan.deletes;
+      if (!outOfTime()) {
+        ctx.db.refresh("Events");
+        deletes = planNow().deletes;
+        summary.removed = applyDeletes(ctx, deletes.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.updated)), outOfTime);
+      }
+      deletesLeft = deletes.length - summary.removed;
     }
     if (inserts.length > 0) ctx.db.append("Events", inserts);
     summary.added = inserts.length;
@@ -4852,6 +4918,7 @@ var TMA = (() => {
     "app-activity": "Who's using the app"
   };
   var MAX_REPORT_ROWS = 5e3;
+  var REPORT_LOG_LOCK_WAIT_MS = 3e3;
   var FILTERS_FOR = {
     "trip-balances": ["activityId", "school", "ensemble", "includePaid"],
     "student-funds": ["school", "ensemble"],
@@ -4871,10 +4938,10 @@ var TMA = (() => {
     if (kind === "roster") logContactReport(ctx, adminEmail, report);
     return { report, options };
   }
-  function buildReport(ctx, kind, filters) {
+  function buildReport(ctx, kind, filters, options = {}) {
     const k = oneOf(kind, "Report", REPORT_KINDS);
     const applied = reportFilters(ctx, k, filters);
-    return finish(ctx, k, applied, BUILDERS[k](ctx, applied));
+    return finish(ctx, k, applied, BUILDERS[k](ctx, applied), options);
   }
   function reportOptions(ctx) {
     const settings = ctx.m.settings().pub;
@@ -4892,7 +4959,7 @@ var TMA = (() => {
     const scope = [report.filters.school, report.filters.ensemble].filter(Boolean).join(", ") || "all students";
     const detail = `Roster with contact details (${scope}, ${plural(report.rows.length, "student")}) viewed by ${adminEmail}`;
     try {
-      inWriteLock(ctx, () => ctx.log("report", detail));
+      inWriteLock(ctx, () => ctx.log("report", detail), { waitMs: REPORT_LOG_LOCK_WAIT_MS });
     } catch (err) {
       ctx.s.logger.error("Could not write the Log row", errorMessage(err));
     }
@@ -5000,14 +5067,19 @@ var TMA = (() => {
     }
     return false;
   }
-  function finish(ctx, kind, filters, table) {
-    var _a;
+  function narrowAdvice(kind, table, options) {
+    if (!options.sheet || FILTERS_FOR[kind].length === 0) return table.narrow;
+    return `Use the Reports screen in the app (Board tools → Reports) to narrow it. ${table.narrow}`;
+  }
+  function finish(ctx, kind, filters, table, options) {
+    var _a, _b;
     const notes = table.notes.slice();
+    const max = (_a = options.maxRows) != null ? _a : MAX_REPORT_ROWS;
     let rows = table.rows;
-    if (rows.length > MAX_REPORT_ROWS) {
+    if (rows.length > max) {
       const totals = table.totals ? " (the totals include all of them)" : "";
-      notes.push(`Showing the first ${count(MAX_REPORT_ROWS)} of ${count(rows.length)} rows${totals}. ${table.narrow}`);
-      rows = rows.slice(0, MAX_REPORT_ROWS);
+      notes.push(`Showing the first ${count(max)} of ${count(rows.length)} rows${totals}. ${narrowAdvice(kind, table, options)}`);
+      rows = rows.slice(0, max);
     }
     const report = {
       kind,
@@ -5017,7 +5089,7 @@ var TMA = (() => {
       filters,
       columns: table.columns,
       rows,
-      containsContactInfo: (_a = table.contactInfo) != null ? _a : hasContactInfo(table.columns, rows)
+      containsContactInfo: (_b = table.contactInfo) != null ? _b : hasContactInfo(table.columns, rows)
     };
     if (table.totals) report.totals = table.totals;
     if (notes.length > 0) report.notes = notes;
@@ -7576,11 +7648,13 @@ var TMA = (() => {
     { kind: "app-usage", fn: "reportAppUsage" },
     { kind: "app-activity", fn: "reportAppActivity" }
   ];
+  var MAX_SHEET_REPORT_ROWS = 5e4;
   var FORMATS = {
     money: "$#,##0.00",
     date: "m/d/yyyy",
     number: "#,##0"
   };
+  var PLAIN_TEXT = "@";
   var MAX_CELL_CHARS = 5e4;
   var FORMULA_START = /^[=+\-@']/;
   var SHEETS_EPOCH = "1899-12-30";
@@ -7660,11 +7734,13 @@ var TMA = (() => {
     if (filters) values.push(line(filters));
     for (const note2 of (_b = report.notes) != null ? _b : []) values.push(line(`Note: ${note2}`));
     const formats = [];
+    const textColumns = [];
     columns.forEach((c, i) => {
       const format = FORMATS[c.type];
       if (format) formats.push({ column: i + 1, format });
+      else textColumns.push(i + 1);
     });
-    return { values, width, headerRow, firstDataRow: headerRow + 1, formattedRows, boldRows, formats };
+    return { values, width, headerRow, firstDataRow: headerRow + 1, formattedRows, boldRows, formats, textColumns };
   }
   function reportTab(spreadsheet, name) {
     const wanted = name.toLowerCase();
@@ -7679,14 +7755,15 @@ var TMA = (() => {
     const rows = layout.values.length;
     if (rows > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), rows - sheet.getMaxRows());
     if (layout.width > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), layout.width - sheet.getMaxColumns());
+    for (const column of layout.textColumns) sheet.getRange(layout.firstDataRow, column, layout.formattedRows, 1).setNumberFormat(PLAIN_TEXT);
     sheet.getRange(1, 1, rows, layout.width).setValues(layout.values);
     for (const f of layout.formats) sheet.getRange(layout.firstDataRow, f.column, layout.formattedRows, 1).setNumberFormat(f.format);
     for (const row of layout.boldRows) sheet.getRange(row, 1, 1, layout.width).setFontWeight("bold");
     sheet.setFrozenRows(layout.headerRow);
     return sheet;
   }
-  function runSheetReport(services, spreadsheet, kind) {
-    const report = buildReport(createCtx(services), kind);
+  function runSheetReport(services, spreadsheet, kind, maxRows = MAX_SHEET_REPORT_ROWS) {
+    const report = buildReport(createCtx(services), kind, void 0, { maxRows, sheet: true });
     return { report, sheet: writeReportTab(spreadsheet, report) };
   }
 
@@ -8543,6 +8620,7 @@ Email from the TMA app is working.
   var MAX_CELL_CHARS2 = 5e4;
   var FORMULA_START2 = /^[=+\-@']/;
   var NUMERIC_TEXT = /^[+-]?(\d+(\.\d*)?|\.\d+)$/;
+  var PLAIN_TEXT2 = "@";
   var WALL_CLOCK_FORMAT = "yyyy-MM-dd'T'HH:mm:ss.SSS";
   var WALL_CLOCK_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})$/;
   function createSheetStore(spreadsheet, options = {}) {
@@ -8588,6 +8666,15 @@ Email from the TMA app is working.
   }
   function pad(n, width) {
     return String(n).padStart(width, "0");
+  }
+  function consecutiveRuns(sorted) {
+    const runs = [];
+    for (const n of sorted) {
+      const last = runs[runs.length - 1];
+      if (last && n === last.start + last.count) last.count += 1;
+      else runs.push({ start: n, count: 1 });
+    }
+    return runs;
   }
   function localDate(year, month, day, hour, minute, second, ms) {
     const d = new Date(2e3, 0, 1, 0, 0, 0, 0);
@@ -8704,6 +8791,23 @@ Email from the TMA app is working.
       }
       return rows.map((row) => ({ rowNumber: row.rowNumber, data: { ...row.data } }));
     }
+    /**
+     * A few rows read now with one getValues() (to check them just before a write), mapped as read()
+     * maps rows, under the header layout the writes use. The memoized rows are neither used nor changed.
+     */
+    readRows(table, firstRow, count2) {
+      const rows = [];
+      for (let i = 0; i < count2; i += 1) rows.push(null);
+      const layout = this.layout(table);
+      if (!layout || layout.columns.size === 0 || !Number.isInteger(firstRow) || firstRow < 2) return rows;
+      const n = Math.min(rows.length, layout.sheet.getLastRow() - firstRow + 1);
+      if (n < 1) return rows;
+      const values = layout.sheet.getRange(firstRow, 1, n, Math.max(...layout.columns.values())).getValues();
+      values.forEach((line, i) => {
+        rows[i] = this.rowData(layout.columns, line);
+      });
+      return rows;
+    }
     append(table, rows) {
       if (rows.length === 0) return;
       this.withLock(() => {
@@ -8726,6 +8830,11 @@ Email from the TMA app is working.
         if (column !== void 0 && value !== void 0) cells.push({ column, value: toSheetValue(value, this.toSheetDate) });
       }
       cells.sort((a, b) => a.column - b.column);
+      const text2 = new Set(this.textColumns(layout));
+      const textCells = cells.filter((c) => text2.has(c.column) && typeof c.value === "string").map((c) => c.column);
+      for (const run of consecutiveRuns(textCells)) {
+        layout.sheet.getRange(rowNumber, run.start, 1, run.count).setNumberFormat(PLAIN_TEXT2);
+      }
       let i = 0;
       while (i < cells.length) {
         let j = i + 1;
@@ -8806,18 +8915,22 @@ Email from the TMA app is working.
       this.layouts.set(table, { table, sheet, columns });
       const rows = [];
       for (let r = 1; r < values.length; r += 1) {
-        const line = values[r];
-        const data = {};
-        let blank = true;
-        for (const [header, column] of columns) {
-          const raw = line[column - 1];
-          const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
-          data[header] = value;
-          if (!isBlank2(value)) blank = false;
-        }
-        if (!blank) rows.push({ rowNumber: r + 1, data });
+        const data = this.rowData(columns, values[r]);
+        if (data) rows.push({ rowNumber: r + 1, data });
       }
       return rows;
+    }
+    /** One sheet row (as getValues() returns it) under canonical headers; null when it is blank. */
+    rowData(columns, line) {
+      const data = {};
+      let blank = true;
+      for (const [header, column] of columns) {
+        const raw = line[column - 1];
+        const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
+        data[header] = value;
+        if (!isBlank2(value)) blank = false;
+      }
+      return blank ? null : data;
     }
     /** Layout for a write: creates the tab if needed and adds any canonical columns the rows use. */
     writableLayout(table, rows) {
@@ -8875,7 +8988,22 @@ Email from the TMA app is working.
       const { sheet } = layout;
       const lastNeeded = startRow + rows.length - 1;
       if (lastNeeded > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), lastNeeded - sheet.getMaxRows());
+      for (const column of this.textColumns(layout)) {
+        if (column < first || column > last) continue;
+        const textRows = matrix.flatMap((line, r) => typeof line[column - first] === "string" ? [startRow + r] : []);
+        for (const run of consecutiveRuns(textRows)) sheet.getRange(run.start, column, run.count, 1).setNumberFormat(PLAIN_TEXT2);
+      }
       sheet.getRange(startRow, first, rows.length, last - first + 1).setValues(matrix);
+    }
+    /** Where the tab's `text` columns are (TABLES[...].text): their cells are written as plain text. */
+    textColumns(layout) {
+      var _a;
+      const columns = [];
+      for (const header of (_a = TABLES[layout.table].text) != null ? _a : []) {
+        const column = layout.columns.get(header);
+        if (column !== void 0) columns.push(column);
+      }
+      return columns;
     }
   };
 
@@ -8883,7 +9011,7 @@ Email from the TMA app is working.
   var MAX_ICS_CHARS = 2e6;
   var PAGE_SIZE = 250;
   var MAX_PAGES = 10;
-  var EVENT_FIELDS = "nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)";
+  var EVENT_FIELDS = "accessRole,nextPageToken,items(id,status,summary,description,location,start,end,visibility,eventType)";
   var IANA_ZONE = /^(?:(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc)\/[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)?|(?:US|Canada|Mexico|Brazil|Chile)\/[A-Za-z_-]+|EST5EDT|CST6CDT|MST7MDT|PST8PDT)$/;
   function pad3(n, width = 2) {
     return String(n).padStart(width, "0");
@@ -8979,6 +9107,7 @@ Email from the TMA app is working.
       } catch (err) {
         throw googleCalendarError(err);
       }
+      if (page === 0 && isRecord2(response) && response.accessRole === "freeBusyReader") throw new CalendarReadError("free_busy");
       const items = isRecord2(response) && Array.isArray(response.items) ? response.items : [];
       for (const item of items) {
         if (events.length >= range.maxEvents) {
