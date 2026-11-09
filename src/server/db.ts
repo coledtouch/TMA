@@ -96,6 +96,21 @@ export class Db {
     this.bump(table);
   }
 
+  /**
+   * Sheet rows firstRow … firstRow + count − 1 as they are now (null: blank, or past the end), to
+   * check rows just before writing to them. Reads only those rows when the store can (its readRows),
+   * else the whole tab again.
+   */
+  readRows(table: TableName, firstRow: number, count: number): Array<RowData | null> {
+    if (this.store.readRows) return this.store.readRows(table, firstRow, count);
+    this.refresh(table);
+    const byNumber = new Map(this.rows(table).map((r) => [r.rowNumber, r.data]));
+    return Array.from({ length: count }, (_, i) => {
+      const data = byNumber.get(firstRow + i);
+      return data ? { ...data } : null;
+    });
+  }
+
   /** Canonical headers the tab has; null = the tab is missing; undefined = the store can't tell. */
   columns(table: TableName): readonly string[] | null | undefined {
     return this.store.columns ? this.store.columns(table) : undefined;

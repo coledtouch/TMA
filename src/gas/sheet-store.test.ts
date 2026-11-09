@@ -116,6 +116,40 @@ describe('SheetStore.read', () => {
   });
 });
 
+describe('SheetStore.readRows', () => {
+  it('reads just the rows asked for, fresh, mapped as read() maps them (aliases, dates); null for blank rows and past the end', () => {
+    // A spreadsheet zone far from the script's, so a Date read without the conversion shows another day.
+    const farZone = hostTimeZone() === 'Pacific/Kiritimati' ? 'Pacific/Pago_Pago' : 'Pacific/Kiritimati';
+    gas.spreadsheet.timeZone = farZone;
+    const typedDate = instantIn({ year: 2026, month: 12, day: 10, hour: 0, minute: 0, second: 0, ms: 0 }, farZone);
+    const sheet = gas.spreadsheet.addSheet(
+      FakeSheet.withRows('Events', [
+        ['Treasurer notes', 'Title', 'Date', 'Groups', 'Calendar Key', 'From Calendar'],
+        ['keep me', 'Concert', typedDate, 'Band', 'k1', 'Music Dept'],
+        ['only a note', '', '', '', '', ''],
+        ['', 'Typed', '2026-12-11', '', '', ''],
+      ]),
+    );
+    const s = store();
+    const [concert, typed] = s.read('Events');
+    expect(concert.data).toMatchObject({ Title: 'Concert', Ensembles: 'Band', 'Calendar Event': 'k1', Source: 'Music Dept' });
+    expect(s.readRows('Events', 2, 4)).toEqual([concert.data, null, typed.data, null]);
+    expect(parseDate(s.readRows('Events', 2, 1)[0]?.Date)).toBe('2026-12-10');
+
+    // Fresh, with one getRange over the mapped columns: an edit in the sheet shows at once, while
+    // read() keeps its memo and the tab is not read again.
+    sheet.write(4, 2, 'Typed (moved)');
+    const getRange = vi.spyOn(sheet, 'getRange');
+    expect(s.readRows('Events', 4, 3)).toEqual([{ ...typed.data, Title: 'Typed (moved)' }, null, null]);
+    expect(getRange.mock.calls).toEqual([[4, 1, 1, 6]]);
+    expect(s.read('Events')[1].data.Title).toBe('Typed');
+    expect(sheet.ops.filter((op) => op === 'getDataRange')).toHaveLength(1);
+
+    expect(s.readRows('Events', 1, 1)).toEqual([null]); // the header row
+    expect(s.readRows('Calendars', 2, 2)).toEqual([null, null]); // a missing tab
+  });
+});
+
 describe('SheetStore.columns', () => {
   it('lists the canonical columns a tab has (aliases included), and null for a missing tab', () => {
     gas.spreadsheet.addSheet(FakeSheet.withRows('Ledger', [['Student ID', 'Amount (USD)', 'Amount ($)', 'Notes'], ['S1', 5, 5, '']]));

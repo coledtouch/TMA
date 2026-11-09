@@ -154,6 +154,13 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
     if (!headers) return;
     for (const row of rows) for (const key of Object.keys(row)) if (!headers.includes(key)) headers.push(key);
   };
+  /** A stored row as read() returns its data (only the headers the tab has); null when blank. */
+  const view = (table: TableName, row: RowData): RowData | null => {
+    const headers = visible(table);
+    const data = clean(table, row);
+    if (headers) for (const key of Object.keys(data)) if (!headers.includes(key)) delete data[key];
+    return isBlankRow(data) ? null : data;
+  };
 
   return {
     columns(table) {
@@ -170,14 +177,21 @@ export function createMemoryStore(db: MemoryDb, changed: () => void = () => unde
     },
     read(table) {
       if (visible(table) === null) return [];
-      const headers = visible(table);
       const rows = db.tables[table] ?? [];
       const out: StoredRow[] = [];
       rows.forEach((row, i) => {
-        const data = clean(table, row);
-        if (headers) for (const key of Object.keys(data)) if (!headers.includes(key)) delete data[key];
-        if (!isBlankRow(data)) out.push({ rowNumber: i + 2, data });
+        const data = view(table, row);
+        if (data) out.push({ rowNumber: i + 2, data });
       });
+      return out;
+    },
+    readRows(table, firstRow, count) {
+      const rows = visible(table) === null ? [] : (db.tables[table] ?? []);
+      const out: Array<RowData | null> = [];
+      for (let n = firstRow; n < firstRow + count; n += 1) {
+        const row = n >= 2 ? rows[n - 2] : undefined;
+        out.push(row ? view(table, row) : null);
+      }
       return out;
     },
     append(table, rows) {

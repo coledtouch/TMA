@@ -322,7 +322,8 @@ sync the app updates them from the calendar: what you type into them is replaced
 and a row whose event was cancelled, deleted or made private is removed (only for dates from yesterday
 on; rows of past events stay as history). The app gives them IDs like `CAL-3f2a9c1b7e`. Rows without
 a Source are yours: the app never changes or removes them. If you clear a copied row's Source, that row
-becomes yours too: the app stops updating it and doesn't copy that event again.
+becomes yours too: the app stops updating it and doesn't copy that event again (not from another
+linked calendar either).
 
 ### Calendars
 
@@ -342,7 +343,8 @@ School` or `Groups: Jazz Band, Chorus` to the event's description in the calenda
 see those lines.
 
 An event that is on two linked calendars gets one row in Events, under the Name of the calendar
-higher in this tab. It goes to the families of both calendars, with one reminder.
+higher in this tab. It goes to the families of both calendars, with one reminder. While that
+calendar can't be read, its row stays the event's only row.
 
 The app only **reads** these calendars, never changes them, and never copies private events.
 *TMA App → Status* shows one line per calendar: *OK* with how many events it copies, or why it can't

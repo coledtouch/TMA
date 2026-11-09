@@ -571,14 +571,26 @@ work for them unchanged.
   first row gets only the changed columns (compared as read back: `parseDate`, `parseTimeText`,
   `parseList`), further rows with that key are deleted; an unwanted key → deleted when its Date is in
   the range (yesterday through the end), so rows of past events stay as history. Wanted keys with no
-  row → appended in one write. Rows of a calendar no longer read (row removed, `On` FALSE, over the
-  limit) → deleted when in the range. Rows of a calendar that couldn't be read → untouched. Rows typed
-  by hand (no Source) → never touched. Order: updates, then deletes (bottom-up), then the append. The
-  treasurer can sort, insert or delete rows while these writes run (the script lock doesn't stop
-  that), so no write uses a row number read earlier: each update reads Events again (`Db.refresh`) and
-  goes to the row that now holds its key (`rowHolding`; none → skipped, retried next sync), and the
-  deletes are planned again (`planCalendarRows`) on a read made just before `deleteRows`. At
-  most `MAX_ROW_CHANGES` = 300 updates and deletes per run; the rest at the next sync (a note).
+  row → appended in one write, unless the event's row is held (by `calendarEventIdentity`, so across
+  calendars): a row of a calendar that couldn't be read, or a row whose Source a volunteer cleared
+  (no Source, the app's key). So while the calendar listed first can't be read, its row stays the
+  event's only row (one reminder) even though another linked calendar has the event too. Rows of a
+  calendar no longer read (row removed, `On` FALSE, over the limit) → deleted when in the range. Rows
+  of a calendar that couldn't be read → untouched. Rows typed by hand (no Source) → never touched.
+  Order: updates, then deletes (bottom-up), then the append. The treasurer can sort, insert or delete
+  rows while these writes run (the script lock doesn't stop that), so no write trusts a row number
+  read earlier; nor is the whole tab read again before every write (a renamed calendar would mean
+  hundreds of full reads under the lock). Updates: Events is read once (`Db.refresh`) to find each
+  key's first row with a Source (`keyPositions`); just before each write that one row is read again
+  (`Db.readRows`, the Store's optional `readRows`; without it the whole tab) and must still hold a
+  Source and the key; if not, Events is read once more to find the key, and a key no row holds is
+  retried next sync. Deletes: planned again (`planCalendarRows`) on a read made after the updates, as
+  `{row, source, key}`; one `deleteRows` per run of adjacent rows, bottom-up, each run read again just
+  before (`Db.readRows`) and deleted only when every row still holds its planned Source and Calendar
+  Event; on a mismatch nothing more is deleted this sync (the next one plans again). At most
+  `MAX_ROW_CHANGES` = 300 updates and deletes per run, and none is started once the apply has taken
+  `APPLY_BUDGET_MS` = 10 s (the clock port; other writers wait at most 20 s for the lock). The rest
+  waits for the next sync (a note; the fingerprint isn't stored). The append always runs.
   Formula-looking text needs nothing special: the SheetStore writes text starting with `=` `+` `-` `@`
   `'` with Sheets' text marker (§9).
 * **Write only when something changed.** A fingerprint (SHA-256 of the range, the hashes read and
@@ -702,6 +714,9 @@ Return the `SetupReport`. On an existing sheet Set up also adds the Calendars ta
 * `doGet(e)`: `?action=health` → `{ok:true, data:{version, time}}`. Otherwise a few lines of plain text pointing to APP_URL. Never an HtmlService page: every page it served would give its visitors `google.script.run`, which calls any top-level function in Code.js as the owner.
 * SheetStore: `SpreadsheetApp.getActive()`. The script is **container-bound** (created from the sheet via
   Extensions → Apps Script), so it only ever touches that one spreadsheet. Read with one `getDataRange().getValues()` per table per request (memoize per execution).
+  `readRows(table, first, count)` (a check just before a write, used by linked calendars) reads only
+  those rows, fresh, with one `getRange(first, 1, count, last mapped column).getValues()`, mapped as a
+  read maps rows (headers, aliases, dates); blank rows and rows past the end → null.
   Header row → canonical map via normalizeHeader+aliases. append uses one `setValues` call. Hide `system` tabs.
   Add the header note from `TABLES[t].note` to A1 when creating. Dates are converted between the
   spreadsheet's and the script's time zones when they differ (`SheetTimeZone`, see §3 "Dates"); the
@@ -1154,7 +1169,10 @@ export function PayPalCheckout(props: {
   late-evening and DST dates, all-day and "Through", limits, formula-looking text, stable keys and
   IDs); `src/server/calendars.test.ts` (insert/update/delete within the range, past rows kept, rows
   typed by hand never touched, duplicate keys, two calendars, a second run writing nothing, a failing
-  calendar's rows kept and its Log row once a day, Off calendars, the 500 cap, CALENDAR_DAYS, the
+  calendar's rows kept and its Log row once a day, an event shared with a failing calendar or held by
+  a volunteer's row not copied twice (one reminder), each row and each run of rows read again just
+  before it is written or deleted (a row typed meanwhile untouched), a few full reads for 300 changes,
+  the 10-second apply budget, Off calendars, the 500 cap, CALENDAR_DAYS, the
   reminder sent once even after an edit, calendars read outside the lock and written inside it,
   missing columns, Status lines, demo parity); `src/gas/calendar.test.ts` (Calendar service mapping,
   paging, the cap, missing advanced service, 404/403/scope/rate errors; iCal fetch: https only, HTTP

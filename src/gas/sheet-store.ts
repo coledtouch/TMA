@@ -5,6 +5,7 @@
  *   rest of the execution. Any write to a tab drops its memoized rows, so the
  *   next read sees what Sheets actually stored (Sheets converts typed text such
  *   as "TRUE" or "50" into booleans/numbers on write). Header layouts are kept.
+ *   readRows reads just a few rows, fresh, for a check right before a write.
  * - Headers are matched with normalizeHeader + TABLES[...].aliases, so column
  *   order, spelling and extra treasurer columns never matter.
  * - Text that Sheets would evaluate as a formula is written as plain text.
@@ -38,6 +39,8 @@ export interface SheetStore extends Store {
   invalidate(table?: TableName): void;
   /** Canonical headers the tab has (from its header row), or null when the tab is missing. */
   columns(table: TableName): readonly string[] | null;
+  /** A few rows read fresh from the sheet (see Store.readRows). */
+  readRows(table: TableName, firstRow: number, count: number): Array<RowData | null>;
 }
 
 export interface SheetStoreOptions {
@@ -249,6 +252,24 @@ class SpreadsheetStore implements SheetStore {
     return rows.map((row) => ({ rowNumber: row.rowNumber, data: { ...row.data } }));
   }
 
+  /**
+   * A few rows read now with one getValues() (to check them just before a write), mapped as read()
+   * maps rows, under the header layout the writes use. The memoized rows are neither used nor changed.
+   */
+  readRows(table: TableName, firstRow: number, count: number): Array<RowData | null> {
+    const rows: Array<RowData | null> = [];
+    for (let i = 0; i < count; i += 1) rows.push(null);
+    const layout = this.layout(table);
+    if (!layout || layout.columns.size === 0 || !Number.isInteger(firstRow) || firstRow < 2) return rows;
+    const n = Math.min(rows.length, layout.sheet.getLastRow() - firstRow + 1);
+    if (n < 1) return rows;
+    const values = layout.sheet.getRange(firstRow, 1, n, Math.max(...layout.columns.values())).getValues();
+    values.forEach((line, i) => {
+      rows[i] = this.rowData(layout.columns, line);
+    });
+    return rows;
+  }
+
   append(table: TableName, rows: RowData[]): void {
     if (rows.length === 0) return;
     this.withLock(() => {
@@ -360,18 +381,23 @@ class SpreadsheetStore implements SheetStore {
     this.layouts.set(table, { table, sheet, columns });
     const rows: StoredRow[] = [];
     for (let r = 1; r < values.length; r += 1) {
-      const line = values[r];
-      const data: RowData = {};
-      let blank = true;
-      for (const [header, column] of columns) {
-        const raw = line[column - 1] as CellValue;
-        const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
-        data[header] = value;
-        if (!isBlank(value)) blank = false;
-      }
-      if (!blank) rows.push({ rowNumber: r + 1, data });
+      const data = this.rowData(columns, values[r]);
+      if (data) rows.push({ rowNumber: r + 1, data });
     }
     return rows;
+  }
+
+  /** One sheet row (as getValues() returns it) under canonical headers; null when it is blank. */
+  private rowData(columns: Map<string, number>, line: readonly unknown[]): RowData | null {
+    const data: RowData = {};
+    let blank = true;
+    for (const [header, column] of columns) {
+      const raw = line[column - 1] as CellValue;
+      const value = raw instanceof Date ? this.timeZone.fromSheet(raw) : raw;
+      data[header] = value;
+      if (!isBlank(value)) blank = false;
+    }
+    return blank ? null : data;
   }
 
   /** Layout for a write: creates the tab if needed and adds any canonical columns the rows use. */

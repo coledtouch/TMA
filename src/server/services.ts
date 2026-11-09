@@ -57,6 +57,13 @@ export interface Store {
    * rows instead. Callers pass row numbers from a fresh read made under the write lock.
    */
   deleteRows?(table: TableName, rowNumbers: readonly number[]): void;
+  /**
+   * Sheet rows firstRow … firstRow + count − 1, read from the sheet now (not from what read()
+   * memoized) and mapped as read() maps them; null for a blank row or a row past the end. Optional:
+   * without it the core reads the whole tab again. Lets a writer check a row just before writing to
+   * it without reading the whole tab every time.
+   */
+  readRows?(table: TableName, firstRow: number, count: number): Array<RowData | null>;
 }
 
 export interface Cache {

@@ -56,6 +56,11 @@ export const MAX_CALENDARS = 10;
 export const MAX_EVENTS_PER_CALENDAR = 500;
 /** Row changes per run; more wait for the next sync (each changed row is one write to the sheet). */
 export const MAX_ROW_CHANGES = 300;
+/**
+ * Stop changing and removing rows after this long (they wait for the next sync): the sync holds the
+ * script's write lock meanwhile, and other writes (a family's payment) wait for it only 20 s.
+ */
+export const APPLY_BUDGET_MS = 10000;
 /** Stop starting new calendar reads after this long, so a sync always finishes. */
 const FETCH_BUDGET_MS = 120000;
 const FINGERPRINT_KEY = 'calendar-sync:fingerprint';
@@ -259,10 +264,11 @@ export function rowsForCalendar(def: CalendarDef, feed: CalendarFeed, range: { f
 // ---------------------------------------------------------------------------
 
 export interface CalendarPlan {
-  /** `key`: the row's Calendar Event, to find it again just before writing (see rowHolding). */
+  /** `key`: the row's Calendar Event, to find it again just before writing (see applyUpdates). */
   updates: Array<{ row: number; key: string; patch: RowData }>;
   inserts: RowData[];
-  deletes: number[];
+  /** Bottom-up. `source` and `key`: what the row held, checked again just before deleting it (see applyDeletes). */
+  deletes: Array<{ row: number; source: string; key: string }>;
 }
 
 /** Values as compared: what the app would read back from the sheet. */
@@ -282,7 +288,9 @@ function sameValue(column: string, stored: unknown, wanted: unknown, known: Audi
  *   their date is inside the window;
  * - of a calendar no longer listed (removed, turned off): removed when inside the window;
  * - of a calendar that couldn't be read (`failed`): left alone.
- * Past rows (before the window) are always kept. A key on several rows keeps the first one.
+ * Past rows (before the window) are always kept. A key on several rows keeps the first one. An event
+ * whose row is held, by a calendar that couldn't be read or by a volunteer who cleared its Source, is
+ * not added again from another calendar (calendarEventIdentity): one event, one row, one reminder.
  */
 export function planCalendarRows(
   rows: readonly StoredRow[],
@@ -297,19 +305,24 @@ export function planCalendarRows(
     const date = parseDate(row.data.Date);
     return date !== null && date >= range.from && date <= range.to;
   };
+  const remove = (row: StoredRow, key: string) => plan.deletes.push({ row: row.rowNumber, source: str(row.data.Source), key });
   const byKey = new Map<string, StoredRow[]>();
-  // Keys on rows without a Source: a volunteer cleared it, which makes the row theirs. It is left
-  // alone, and its event is not copied again (that would give two rows with the same ID).
-  const handKeys = new Set<string>();
+  // Events (calendarEventIdentity, so across calendars) whose row stays as it is and must not be
+  // copied again beside it (two rows, two IDs, two reminders): rows a volunteer made theirs by clearing
+  // the Source, and rows of a calendar that couldn't be read this run.
+  const held = new Set<string>();
   for (const row of rows) {
-    if (!str(row.data.Source)) {
-      const typedKey = str(row.data['Calendar Event']);
-      if (typedKey) handKeys.add(typedKey);
-      continue; // typed by hand: never touched
-    }
     const key = str(row.data['Calendar Event']);
     const hash = key ? calendarKeyHash(key) : null;
-    if (!hash || failed.has(hash)) continue;
+    if (!str(row.data.Source)) {
+      if (hash) held.add(calendarEventIdentity(key));
+      continue; // typed by hand: never touched
+    }
+    if (!hash) continue;
+    if (failed.has(hash)) {
+      held.add(calendarEventIdentity(key));
+      continue;
+    }
     const list = byKey.get(key) ?? [];
     list.push(row);
     byKey.set(key, list);
@@ -317,7 +330,7 @@ export function planCalendarRows(
   byKey.forEach((list, key) => {
     const want = wanted.get(key);
     if (!want) {
-      for (const row of list) if (inWindow(row)) plan.deletes.push(row.rowNumber);
+      for (const row of list) if (inWindow(row)) remove(row, key);
       return;
     }
     const [first, ...repeats] = list;
@@ -326,12 +339,12 @@ export function planCalendarRows(
       if (!sameValue(column, first.data[column], want.row[column], known)) patch[column] = want.row[column];
     }
     if (Object.keys(patch).length > 0) plan.updates.push({ row: first.rowNumber, key, patch });
-    for (const row of repeats) plan.deletes.push(row.rowNumber);
+    for (const row of repeats) remove(row, key);
   });
   wanted.forEach((want, key) => {
-    if (!byKey.has(key) && !handKeys.has(key) && read.has(calendarKeyHash(key) ?? '')) plan.inserts.push({ ...want.row });
+    if (!byKey.has(key) && !held.has(calendarEventIdentity(key)) && read.has(calendarKeyHash(key) ?? '')) plan.inserts.push({ ...want.row });
   });
-  plan.deletes.sort((a, b) => b - a);
+  plan.deletes.sort((a, b) => b.row - a.row);
   return plan;
 }
 
@@ -380,15 +393,77 @@ function fingerprint(ctx: Ctx, fetched: CalendarFetch, read: string[], failed: s
 }
 
 /**
- * The Events row holding a calendar row's key right now (the first one, as planCalendarRows picks
- * it), or null when none does. The treasurer can sort, insert or delete rows while the sync writes,
- * and the script lock doesn't stop that, so Events is read again just before each write and the row
- * is found by its key, never by a row number read earlier: a typed row is never written to.
+ * Where each calendar row is: its key → the first Events row with a Source that holds it (the one
+ * planCalendarRows picks), from a read of the whole tab made now.
  */
-function rowHolding(ctx: Ctx, key: string): number | null {
+function keyPositions(ctx: Ctx): Map<string, number> {
   ctx.db.refresh('Events');
-  const row = ctx.db.rows('Events').find((r) => str(r.data.Source) !== '' && str(r.data['Calendar Event']) === key);
-  return row ? row.rowNumber : null;
+  const positions = new Map<string, number>();
+  for (const row of ctx.db.rows('Events')) {
+    const key = str(row.data['Calendar Event']);
+    if (key && str(row.data.Source) !== '' && !positions.has(key)) positions.set(key, row.rowNumber);
+  }
+  return positions;
+}
+
+/** Whether Events row `row` holds the calendar row with this key right now (just that row is read). */
+function holdsKey(ctx: Ctx, row: number | undefined, key: string): row is number {
+  if (row === undefined) return false;
+  const [data] = ctx.db.readRows('Events', row, 1);
+  return data !== null && data !== undefined && str(data.Source) !== '' && str(data['Calendar Event']) === key;
+}
+
+/**
+ * Write the planned updates; returns how many were written. The treasurer can sort, insert or delete
+ * rows while the sync writes, and the script lock doesn't stop that, so no row number read earlier is
+ * trusted: Events is read once, and each row is read again just before it is written and must still
+ * hold the key (a row typed by hand is never written to). If it doesn't, Events is read again once to
+ * find the key; a key no row holds any more waits for the next sync. Stops when `stop()` says so.
+ */
+function applyUpdates(ctx: Ctx, updates: CalendarPlan['updates'], stop: () => boolean): number {
+  if (updates.length === 0) return 0;
+  let positions = keyPositions(ctx);
+  let written = 0;
+  for (const u of updates) {
+    if (stop()) break;
+    let row = positions.get(u.key);
+    if (!holdsKey(ctx, row, u.key)) {
+      positions = keyPositions(ctx); // sorted, or rows added or removed meanwhile
+      row = positions.get(u.key);
+      if (!holdsKey(ctx, row, u.key)) continue; // removed meanwhile: looked at again at the next sync
+    }
+    ctx.db.update('Events', row, u.patch);
+    written++;
+  }
+  return written;
+}
+
+/**
+ * Delete the planned rows (bottom-up, from a read made just now), one deleteRows per run of adjacent
+ * rows; returns how many were deleted. Each deleteRows takes time in Sheets and the treasurer may
+ * insert, delete or sort rows in between, so just before each run its rows are read again and must
+ * still hold the planned Source and Calendar Event. When one doesn't, nothing more is deleted this
+ * sync (the next one plans again): a row typed by hand is never deleted. Stops when `stop()` says so.
+ */
+function applyDeletes(ctx: Ctx, deletes: CalendarPlan['deletes'], stop: () => boolean): number {
+  let deleted = 0;
+  let i = 0;
+  while (i < deletes.length) {
+    let j = i + 1;
+    while (j < deletes.length && deletes[j].row === deletes[j - 1].row - 1) j += 1;
+    const run = deletes.slice(i, j).reverse(); // top to bottom
+    if (stop()) break;
+    const now = ctx.db.readRows('Events', run[0].row, run.length);
+    const same = run.every((d, k) => {
+      const data = now[k];
+      return data !== null && data !== undefined && str(data.Source) === d.source && str(data['Calendar Event']) === d.key;
+    });
+    if (!same) break;
+    ctx.db.deleteRows('Events', run.map((d) => d.row), CALENDAR_ROW_COLUMNS);
+    deleted += run.length;
+    i = j;
+  }
+  return deleted;
 }
 
 /**
@@ -503,26 +578,24 @@ export function syncCalendars(ctx: Ctx, report: TickReport, fetched: CalendarFet
   const readSet = new Set(read);
   const failedSet = new Set(failed);
   const planNow = () => planCalendarRows(ctx.db.rows('Events'), wanted, readSet, failedSet, range, known);
+  // ctx.now is fixed for the whole call: the time spent is measured with the clock port.
+  const started = ctx.s.clock.now().getTime();
+  const outOfTime = () => ctx.s.clock.now().getTime() - started > APPLY_BUDGET_MS;
   const plan = planNow();
   const total = plan.updates.length + plan.inserts.length + plan.deletes.length;
-  const updates = plan.updates.slice(0, MAX_ROW_CHANGES);
-  const inserts = plan.inserts; // one write for all of them
+  const inserts = plan.inserts; // one write for all of them, always made
 
-  for (const u of updates) {
-    const rowNumber = rowHolding(ctx, u.key);
-    if (rowNumber === null) continue; // removed meanwhile: looked at again at the next sync
-    ctx.db.update('Events', rowNumber, u.patch);
-    summary.updated++;
-  }
+  summary.updated = applyUpdates(ctx, plan.updates.slice(0, MAX_ROW_CHANGES), outOfTime);
   let deletesLeft = 0;
   if (plan.deletes.length > 0) {
-    // Row numbers from a read made just now, found by key as in planCalendarRows (see rowHolding).
-    ctx.db.refresh('Events');
-    const all = planNow().deletes;
-    const deletes = all.slice(0, Math.max(0, MAX_ROW_CHANGES - updates.length));
-    if (deletes.length > 0) ctx.db.deleteRows('Events', deletes, CALENDAR_ROW_COLUMNS);
-    summary.removed = deletes.length;
-    deletesLeft = all.length - deletes.length;
+    let deletes = plan.deletes;
+    if (!outOfTime()) {
+      // Planned again on a read made just now: the updates took time, and rows may have moved.
+      ctx.db.refresh('Events');
+      deletes = planNow().deletes;
+      summary.removed = applyDeletes(ctx, deletes.slice(0, Math.max(0, MAX_ROW_CHANGES - summary.updated)), outOfTime);
+    }
+    deletesLeft = deletes.length - summary.removed;
   }
   if (inserts.length > 0) ctx.db.append('Events', inserts);
   summary.added = inserts.length;

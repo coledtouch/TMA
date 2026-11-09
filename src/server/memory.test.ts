@@ -36,6 +36,16 @@ describe('memory store', () => {
     row.data.Kind = 'changed';
     expect(store.read('Log')[0].data.Kind).toBe('k');
   });
+
+  it('readRows: the rows asked for as read() has them; null for blank rows, the header and past the end', () => {
+    const db: MemoryDb = { tables: { Events: [{ ID: 'E1', Groups: 'Band', Bogus: 'x' }, { ID: '' }, { ID: 'E3', Title: 'Concert' }] } };
+    const store = createMemoryStore(db);
+    const [e1, e3] = store.read('Events');
+    expect(store.readRows!('Events', 1, 5)).toEqual([null, e1.data, null, e3.data, null]);
+    db.tables.Events![2].Title = 'Moved';
+    expect(store.readRows!('Events', 4, 1)).toEqual([{ ID: 'E3', Title: 'Moved' }]);
+    expect(store.readRows!('Calendars', 2, 1)).toEqual([null]);
+  });
 });
 
 describe('memory cache', () => {
