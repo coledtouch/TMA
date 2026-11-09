@@ -113,6 +113,9 @@ The numbers are worked out the same way as everywhere else in the app, so they m
 * The app never reads them. The 15-minute sync and *Set up / repair tabs* leave them alone.
 * You can delete a report tab any time. It comes back the next time you run that report. Delete the
   roster tab when you're done if other people can open the spreadsheet.
+* A report tab holds up to 50,000 rows. If a report is longer, a note under it says so; open the
+  report in the app (*Board tools → Reports*) and pick a shorter date range, one activity, or a school
+  or group.
 
 ---
 

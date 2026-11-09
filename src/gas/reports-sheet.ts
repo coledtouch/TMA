@@ -9,8 +9,10 @@
  * header (rows 1–2 frozen), then the rows, a bold totals row, and under them the
  * report's description, filters and notes. Money goes in as dollars formatted
  * $#,##0.00, dates as real dates (sheet serial numbers, which no time zone can
- * shift). Text that Sheets would read as a formula (= + - @) gets a leading
- * apostrophe, so it shows as typed and never runs.
+ * shift). Text columns are set to plain text first, so Sheets keeps "0456" or
+ * "10-12" as written instead of reading a number or date into it. Text that
+ * Sheets would read as a formula (= + - @) also gets a leading apostrophe, so it
+ * shows as typed and never runs. A tab holds up to MAX_SHEET_REPORT_ROWS rows.
  */
 import { createCtx } from '../server/context';
 import { buildReport, REPORT_TITLES } from '../server/reports';
@@ -38,11 +40,19 @@ export const SHEET_REPORTS: ReadonlyArray<{ kind: ReportKind; fn: string }> = [
   { kind: 'app-activity', fn: 'reportAppActivity' },
 ];
 
+/**
+ * Most rows a report tab gets. The menu always uses the default filters (this school year…), so it
+ * allows far more than the app's MAX_REPORT_ROWS; past it, the note points to the app's Reports screen.
+ */
+export const MAX_SHEET_REPORT_ROWS = 50_000;
+
 const FORMATS: Readonly<Partial<Record<ReportColumnType, string>>> = {
   money: '$#,##0.00',
   date: 'm/d/yyyy',
   number: '#,##0',
 };
+/** Plain text: set on every other column (text, email, phone) before the values go in. */
+const PLAIN_TEXT = '@';
 
 /** Google Sheets rejects cells longer than this. */
 const MAX_CELL_CHARS = 50000;
@@ -111,7 +121,10 @@ export interface ReportLayout {
   /** Rows from firstDataRow that take the columns' number formats: report rows and totals. */
   formattedRows: number;
   boldRows: number[];
+  /** Money, date and number columns, formatted after the values go in. */
   formats: Array<{ column: number; format: string }>;
+  /** The other columns (1-based), set to plain text before the values go in, so "0456" or "10-12" stays as written. */
+  textColumns: number[];
 }
 
 /** Where every cell of the tab goes (pure, so it can be checked without a sheet). */
@@ -158,11 +171,13 @@ export function reportLayout(report: Report): ReportLayout {
   for (const note of report.notes ?? []) values.push(line(`Note: ${note}`));
 
   const formats: ReportLayout['formats'] = [];
+  const textColumns: number[] = [];
   columns.forEach((c, i) => {
     const format = FORMATS[c.type];
     if (format) formats.push({ column: i + 1, format });
+    else textColumns.push(i + 1);
   });
-  return { values, width, headerRow, firstDataRow: headerRow + 1, formattedRows, boldRows, formats };
+  return { values, width, headerRow, firstDataRow: headerRow + 1, formattedRows, boldRows, formats, textColumns };
 }
 
 /** The report's tab: found by name (capitals ignored, as Sheets does), else added at the end. Cleared either way. */
@@ -181,6 +196,8 @@ export function writeReportTab(spreadsheet: Spreadsheet, report: Report): Sheet 
   const rows = layout.values.length;
   if (rows > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), rows - sheet.getMaxRows());
   if (layout.width > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), layout.width - sheet.getMaxColumns());
+  // setValues reads text as if typed: without this a check number "0456" becomes 456 and "10-12" a date.
+  for (const column of layout.textColumns) sheet.getRange(layout.firstDataRow, column, layout.formattedRows, 1).setNumberFormat(PLAIN_TEXT);
   sheet.getRange(1, 1, rows, layout.width).setValues(layout.values);
   for (const f of layout.formats) sheet.getRange(layout.firstDataRow, f.column, layout.formattedRows, 1).setNumberFormat(f.format);
   for (const row of layout.boldRows) sheet.getRange(row, 1, 1, layout.width).setFontWeight('bold');
@@ -188,8 +205,16 @@ export function writeReportTab(spreadsheet: Spreadsheet, report: Report): Sheet 
   return sheet;
 }
 
-/** Build `kind` from this sheet with its default filters (this school year, open activities…) and write its tab. */
-export function runSheetReport(services: Services, spreadsheet: Spreadsheet, kind: ReportKind): { report: Report; sheet: Sheet } {
-  const report = buildReport(createCtx(services), kind);
+/**
+ * Build `kind` from this sheet with its default filters (this school year, open activities…) and write its
+ * tab, up to `maxRows` rows (tests pass a small cap).
+ */
+export function runSheetReport(
+  services: Services,
+  spreadsheet: Spreadsheet,
+  kind: ReportKind,
+  maxRows = MAX_SHEET_REPORT_ROWS,
+): { report: Report; sheet: Sheet } {
+  const report = buildReport(createCtx(services), kind, undefined, { maxRows, sheet: true });
   return { report, sheet: writeReportTab(spreadsheet, report) };
 }

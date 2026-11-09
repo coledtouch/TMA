@@ -1,5 +1,6 @@
 import * as nodeCrypto from 'node:crypto';
 import { createApp } from '../server/app';
+import { MAX_REPORT_ROWS } from '../server/reports';
 import { sampleCalendarEvents, sampleData } from '../server/sample-data';
 import type { CellValue, RowData } from '../server/services';
 import { TEST_NOW } from '../server/test-helpers';
@@ -7,6 +8,7 @@ import { TABLE_ORDER, TABLES, type TableName } from '../shared/schema';
 import type { Report } from '../shared/types';
 import {
   filtersLine,
+  MAX_SHEET_REPORT_ROWS,
   nyTimestamp,
   reportLayout,
   reportTabName,
@@ -17,7 +19,7 @@ import {
   writeReportTab,
 } from './reports-sheet';
 import { createGasServices, type GasServices } from './services';
-import { calendarApiItems, FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
+import { calendarApiItems, FakeRange, FakeSheet, installGasFakes, uninstallGasFakes, type GasFakes } from './testing/fakes';
 
 type Spreadsheet = GoogleAppsScript.Spreadsheet.Spreadsheet;
 
@@ -45,9 +47,11 @@ function cell(value: CellValue | undefined): string | number | boolean | Date {
   return value === null || value === undefined ? '' : value;
 }
 
-/** The sample sheet as of TEST_NOW (Wed 2026-10-21, 10:00 New York), without the queued announcement. */
-function sampleSheet(): GasServices {
-  loadTabs({ ...sampleData(TEST_NOW, { demoSettings: true }), Announcements: [] });
+/** The sample sheet as of TEST_NOW (Wed 2026-10-21, 10:00 New York), without the queued announcement, plus `more` rows. */
+function sampleSheet(more: Partial<Record<TableName, RowData[]>> = {}): GasServices {
+  const tables: Partial<Record<TableName, RowData[]>> = { ...sampleData(TEST_NOW, { demoSettings: true }), Announcements: [] };
+  for (const [table, rows] of Object.entries(more) as Array<[TableName, RowData[]]>) tables[table] = [...(tables[table] ?? []), ...rows];
+  loadTabs(tables);
   // The sample's linked "Music Dept" calendar, through the Calendar advanced service.
   gas.calendar.handler = () => ({ items: calendarApiItems(sampleCalendarEvents(TEST_NOW)) });
   const services = createGasServices();
@@ -138,7 +142,10 @@ describe('writeReportTab', () => {
     expect(t.numberFormats.get('3,16')).toBe('m/d/yyyy');
     expect(t.numberFormats.get('8,17')).toBe('m/d/yyyy');
     expect(t.numberFormats.get('9,10')).toBeUndefined();
-    expect(t.numberFormats.get('3,1')).toBeUndefined();
+    // Text columns are plain text on the same rows.
+    expect(t.numberFormats.get('3,1')).toBe('@');
+    expect(t.numberFormats.get('8,18')).toBe('@');
+    expect(t.numberFormats.get('9,1')).toBeUndefined();
     // One setValues for the whole block.
     expect(t.ops.filter((op) => op.startsWith('setValues'))).toEqual(['setValues R1C1:12x18']);
   });
@@ -238,6 +245,95 @@ describe('writeReportTab', () => {
     expect(t.value(3, at('Parent 1 phone'))).toBe('+1 603 555 0100');
     // No written cell anywhere starts like a formula without the apostrophe.
     for (const line of t.cells) for (const value of line) if (typeof value === 'string') expect(value).not.toMatch(/^[=+\-@]/);
+  });
+
+  it('sets text, email and phone columns to plain text before writing, so "0456", "10-12" and "50%" stay as written', () => {
+    const report: Report = {
+      kind: 'payments',
+      title: 'Payments',
+      description: 'Payments.',
+      generatedAt: '2026-10-21T14:00:00.000Z',
+      filters: {},
+      columns: [
+        { key: 'date', label: 'Date', type: 'date' },
+        { key: 'reference', label: 'Reference', type: 'text' },
+        { key: 'amount', label: 'Amount', type: 'money' },
+        { key: 'payer', label: 'Payer email', type: 'email' },
+        { key: 'phone', label: 'Phone', type: 'phone' },
+        { key: 'count', label: 'Count', type: 'number' },
+      ],
+      rows: [
+        { date: '2026-10-12', reference: '0456', amount: 5000, payer: 'a@example.com', phone: '0603 555 0100', count: 1 },
+        { date: '2026-10-13', reference: '10-12', amount: 2500, payer: null, phone: null, count: 2 },
+        { date: '2026-10-14', reference: '50%', amount: 100, payer: null, phone: '+1 603 555 0100', count: 3 },
+      ],
+      totals: { amount: 7600, count: 6 },
+      notes: ['A note.'],
+      containsContactInfo: true,
+    };
+    // Every number format and the one setValues, in order.
+    const steps: string[] = [];
+    const setNumberFormat = FakeRange.prototype.setNumberFormat;
+    const setValues = FakeRange.prototype.setValues;
+    vi.spyOn(FakeRange.prototype, 'setNumberFormat').mockImplementation(function (this: FakeRange, format: string) {
+      steps.push(`${format} R${this.row}C${this.column}:${this.numRows}x${this.numColumns}`);
+      return setNumberFormat.call(this, format);
+    });
+    vi.spyOn(FakeRange.prototype, 'setValues').mockImplementation(function (this: FakeRange, values) {
+      steps.push(`setValues R${this.row}C${this.column}:${this.numRows}x${this.numColumns}`);
+      return setValues.call(this, values);
+    });
+
+    writeReportTab(spreadsheet(), report);
+    // Plain text on the text, email and phone columns of the data and totals rows (3–6) first; the
+    // money, date and number formats after, as before.
+    expect(steps).toEqual([
+      '@ R3C2:4x1',
+      '@ R3C4:4x1',
+      '@ R3C5:4x1',
+      'setValues R1C1:9x6',
+      'm/d/yyyy R3C1:4x1',
+      '$#,##0.00 R3C3:4x1',
+      '#,##0 R3C6:4x1',
+    ]);
+    const t = tab('Report: Payments');
+    expect(t.dump().slice(2, 6).map((r) => r[1])).toEqual(['0456', '10-12', '50%', '']);
+    // Text that starts like a formula still gets its apostrophe.
+    expect(t.raw(5, 5)).toBe("'+1 603 555 0100");
+    expect(t.numberFormats.get('2,2')).toBeUndefined(); // header
+    expect(t.numberFormats.get('7,2')).toBeUndefined(); // below the totals
+  });
+
+  it('writes more rows than the app shows: the menu cannot pick filters to narrow a long report', () => {
+    const raffle: RowData[] = [];
+    for (let i = 0; i < MAX_REPORT_ROWS + 1; i++) raffle.push({ Date: '2026-09-01', StudentID: 'S0004', Type: 'Fundraiser', Description: `Raffle ticket ${i}`, Amount: 1 });
+    const services = sampleSheet({ Ledger: raffle });
+    const { report } = runSheetReport(services, spreadsheet(), 'fund-activity');
+    // The sample's 10 rows this school year plus the raffle, all of them.
+    expect(report.rows).toHaveLength(MAX_REPORT_ROWS + 11);
+    expect(report.notes?.filter((n) => n.startsWith('Showing the first'))).toEqual([]);
+    const rows = tab('Report: Fund activity').dump();
+    expect(rows.filter((r) => String(r[4]).startsWith('Raffle ticket'))).toHaveLength(MAX_REPORT_ROWS + 1);
+    // The newest row, the first a 5,000-row cap would drop, is on the tab.
+    expect(rows[2 + MAX_REPORT_ROWS + 10].slice(0, 6)).toEqual([serial(-12), 'Ethan Nguyen', 'S0004', 'Fundraiser', 'Poinsettia sale', 35]);
+    expect(rows[2 + MAX_REPORT_ROWS + 11].slice(0, 6)).toEqual(['Credits', '', '', '', '', 1060 + 5001]);
+    expect(MAX_SHEET_REPORT_ROWS).toBe(50_000);
+  });
+
+  it("past its cap, says to narrow the report on the app's Reports screen, and still totals every row", () => {
+    const services = sampleSheet();
+    const { report } = runSheetReport(services, spreadsheet(), 'fund-activity', 3);
+    expect(report.rows).toHaveLength(3);
+    const note =
+      'Showing the first 3 of 10 rows (the totals include all of them). Use the Reports screen in the app (Board tools → Reports) to narrow it. Pick a shorter date range or one activity to see the rest.';
+    expect(report.notes).toContain(note);
+    const rows = tab('Report: Fund activity').dump();
+    expect(rows.slice(5, 8).map((r) => [r[0], r[5]])).toEqual([
+      ['Credits', 1060],
+      ['Debits', -350],
+      ['Net', 710],
+    ]);
+    expect(rows.map((r) => r[0])).toContain(`Note: ${note}`);
   });
 
   it('touches no other tab, and Set up and the sync leave the report tabs alone', () => {

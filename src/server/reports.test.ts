@@ -1,6 +1,7 @@
 import type { ActivityAccount, Report, ReportKind } from '../shared/types';
-import { MAX_REPORT_ROWS, REPORT_KINDS, schoolYear, tripStatus } from './reports';
-import type { RowData } from './services';
+import { createCtx } from './context';
+import { buildReport, MAX_REPORT_ROWS, REPORT_KINDS, REPORT_LOG_LOCK_WAIT_MS, schoolYear, tripStatus } from './reports';
+import type { LockOptions, RowData } from './services';
 import { harness, NGUYEN, PARENT, PARENT2, TREASURER, type Harness } from './test-helpers';
 
 // The sample data is relative to TEST_NOW (Wed 2026-10-21, New York), so these dates are fixed:
@@ -468,6 +469,30 @@ describe('fund-activity', () => {
     );
     expect(r.totals).toEqual({ credits: 106000 + 500100, debits: -35000, net: 71000 + 500100 });
   });
+
+  it("takes another cap, and for the sheet menu (which can't pick filters) points to the app's Reports screen", () => {
+    const ctx = createCtx(harness().services);
+    const app = buildReport(ctx, 'fund-activity', undefined, { maxRows: 3 });
+    expect(app.rows).toHaveLength(3);
+    expect(app.notes).toContain(
+      'Showing the first 3 of 10 rows (the totals include all of them). Pick a shorter date range or one activity to see the rest.',
+    );
+    expect(app.totals).toEqual({ credits: 106000, debits: -35000, net: 71000 });
+
+    const sheet = buildReport(ctx, 'fund-activity', undefined, { maxRows: 3, sheet: true });
+    expect(sheet.rows).toEqual(app.rows);
+    expect(sheet.notes).toContain(
+      'Showing the first 3 of 10 rows (the totals include all of them). Use the Reports screen in the app (Board tools → Reports) to narrow it. Pick a shorter date range or one activity to see the rest.',
+    );
+    expect(sheet.totals).toEqual(app.totals);
+
+    // Open items has no filters in the app either, so the sheet keeps its own advice.
+    const items = buildReport(ctx, 'open-items').rows.length;
+    expect(items).toBeGreaterThan(1);
+    expect(buildReport(ctx, 'open-items', undefined, { maxRows: 1, sheet: true }).notes).toContain(
+      `Showing the first 1 of ${items} rows. Work through the oldest items first.`,
+    );
+  });
 });
 
 describe('payments', () => {
@@ -556,6 +581,24 @@ describe('roster', () => {
     };
     expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
     expect(h.services.logs.some((l) => l.message === 'Could not write the Log row')).toBe(true);
+  });
+
+  it('waits only briefly for the lock to add the Log row, and answers when it is busy', () => {
+    const h = harness();
+    const admin = h.signIn(TREASURER);
+    const before = h.rows('Log').length;
+    // Another execution (a long sync) holds the lock: a short wait gives up, the usual 20 s would stall.
+    const waits: Array<number | undefined> = [];
+    h.services.withLock = <T>(fn: () => T, options?: LockOptions): T => {
+      waits.push(options?.waitMs);
+      if (options?.waitMs !== undefined) throw new Error('Lock timeout: another process was holding the lock for too long.');
+      return fn();
+    };
+    expect(report(h, 'roster', {}, admin).rows).toHaveLength(5);
+    expect(waits).toEqual([REPORT_LOG_LOCK_WAIT_MS]);
+    expect(REPORT_LOG_LOCK_WAIT_MS).toBeLessThanOrEqual(5000);
+    expect(h.rows('Log')).toHaveLength(before);
+    expect(h.services.logs.filter((l) => l.level === 'error').map((l) => l.message)).toEqual(['Could not write the Log row']);
   });
 
   it('does not log the other reports', () => {

@@ -79,6 +79,19 @@ export const REPORT_TITLES: Readonly<Record<ReportKind, string>> = {
 /** Most rows one report returns. Past it, a note says how many were left out (totals still count them). */
 export const MAX_REPORT_ROWS = 5000;
 
+/** Longest wait for the script lock before the roster's Log row is skipped (the report is still returned). */
+export const REPORT_LOG_LOCK_WAIT_MS = 3000;
+
+export interface BuildReportOptions {
+  /** Most rows to return (default MAX_REPORT_ROWS). */
+  maxRows?: number;
+  /**
+   * For the sheet menu, which always uses the default filters: past maxRows, the note sends the
+   * reader to the app's Reports screen, where the filters can be picked.
+   */
+  sheet?: boolean;
+}
+
 /** Which filters each report uses; the others are validated and then dropped. */
 const FILTERS_FOR: Readonly<Record<ReportKind, ReadonlyArray<keyof ReportFilters>>> = {
   'trip-balances': ['activityId', 'school', 'ensemble', 'includePaid'],
@@ -103,7 +116,7 @@ interface Table {
   notes: string[];
   /** Forced true for the roster; otherwise worked out from the cells. */
   contactInfo?: boolean;
-  /** How to see rows past MAX_REPORT_ROWS. */
+  /** How to see rows past the cap, by picking the app's filters. */
   narrow: string;
 }
 
@@ -123,10 +136,10 @@ export function runReport(ctx: Ctx, adminEmail: string, params: v.Params): { rep
 }
 
 /** Build one report. Filters are validated here (BAD_REQUEST), so the API and the sheet menu share the rules. */
-export function buildReport(ctx: Ctx, kind: ReportKind, filters?: ReportFilters): Report {
+export function buildReport(ctx: Ctx, kind: ReportKind, filters?: ReportFilters, options: BuildReportOptions = {}): Report {
   const k = v.oneOf(kind, 'Report', REPORT_KINDS);
   const applied = reportFilters(ctx, k, filters);
-  return finish(ctx, k, applied, BUILDERS[k](ctx, applied));
+  return finish(ctx, k, applied, BUILDERS[k](ctx, applied), options);
 }
 
 /** Choices for the Reports screen: activities (open first, then by name), schools and groups from Settings. */
@@ -145,14 +158,15 @@ export function reportOptions(ctx: Ctx): ReportOptions {
 
 /**
  * Who looked at families' contact details goes in the Log tab. A report only reads, so this takes
- * the write lock just for that one row (as auth.ts does for its rate-limit row); if the lock is
- * busy the row is skipped, never the report.
+ * the write lock just for that one row (as auth.ts does for its rate-limit row), waiting at most
+ * REPORT_LOG_LOCK_WAIT_MS so a long sync doesn't hold up the report; if the lock is busy the row
+ * is skipped, never the report.
  */
 function logContactReport(ctx: Ctx, adminEmail: string, report: Report): void {
   const scope = [report.filters.school, report.filters.ensemble].filter(Boolean).join(', ') || 'all students';
   const detail = `Roster with contact details (${scope}, ${plural(report.rows.length, 'student')}) viewed by ${adminEmail}`;
   try {
-    inWriteLock(ctx, () => ctx.log('report', detail));
+    inWriteLock(ctx, () => ctx.log('report', detail), { waitMs: REPORT_LOG_LOCK_WAIT_MS });
   } catch (err) {
     ctx.s.logger.error('Could not write the Log row', errorMessage(err));
   }
@@ -304,13 +318,20 @@ function hasContactInfo(columns: readonly ReportColumn[], rows: readonly Row[]):
   return false;
 }
 
-function finish(ctx: Ctx, kind: ReportKind, filters: ReportFilters, table: Table): Report {
+/** What the note past the cap advises. The sheet menu can't pick filters, so a report the app can narrow sends the reader there. */
+function narrowAdvice(kind: ReportKind, table: Table, options: BuildReportOptions): string {
+  if (!options.sheet || FILTERS_FOR[kind].length === 0) return table.narrow;
+  return `Use the Reports screen in the app (Board tools → Reports) to narrow it. ${table.narrow}`;
+}
+
+function finish(ctx: Ctx, kind: ReportKind, filters: ReportFilters, table: Table, options: BuildReportOptions): Report {
   const notes = table.notes.slice();
+  const max = options.maxRows ?? MAX_REPORT_ROWS;
   let rows = table.rows;
-  if (rows.length > MAX_REPORT_ROWS) {
+  if (rows.length > max) {
     const totals = table.totals ? ' (the totals include all of them)' : '';
-    notes.push(`Showing the first ${count(MAX_REPORT_ROWS)} of ${count(rows.length)} rows${totals}. ${table.narrow}`);
-    rows = rows.slice(0, MAX_REPORT_ROWS);
+    notes.push(`Showing the first ${count(max)} of ${count(rows.length)} rows${totals}. ${narrowAdvice(kind, table, options)}`);
+    rows = rows.slice(0, max);
   }
   const report: Report = {
     kind,

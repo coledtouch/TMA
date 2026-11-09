@@ -260,7 +260,7 @@ and sent after it is released (§6), so slow email, push or SMS calls never keep
 | `admin.reviewHousehold` | approve: Family Status → Active. For each `links` entry: the existing student gets FamilyID=this family and Status Active; the pending student → Status Inactive (and log "merged into"). Remaining pending students of that family → Active. Notify the family: "Your TMA account is verified". reject: Family Status → Inactive, its pending students → Inactive. |
 | `admin.announce` | Refuse (`CONFLICT` "already sent N minutes ago") the same title and body sent within the last 15 minutes, so a retry after the app gave up waiting can't send it twice. Append an Announcements row (ID, Date today, Title, Body, Schools, Ensembles, Link, Sent=now) and deliver (§6) on the channels the admin ticked, still filtered by each recipient's prefs. The app waits up to 6 minutes for this and for `admin.runSync` (30 s for everything else). |
 | `admin.runSync` | Run `syncTick()` and return its report. As in the scheduled run, linked calendars are read before the write lock is taken (the route's `prepare`) and applied under it. |
-| `admin.report` | Read-only, no write lock. Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
+| `admin.report` | Read-only, no write lock (the roster's Log row takes it briefly, §5.4). Validate `kind` and `filters`, build the report from the sheet and return it with the filter choices (`ReportOptions`: activities open first, then by name; Settings schools and groups). See §5.4. |
 
 ### 5.1 Bootstrap
 
@@ -331,11 +331,16 @@ families and the dashboard see.
   school year.
 * **Size**: at most `MAX_REPORT_ROWS` = 5,000 rows. Past that, the first 5,000 in sort order are returned,
   a note says how many there were and how to narrow the report, and the totals still cover every row.
+  `buildReport` takes another cap (`maxRows`): the sheet menu, which always uses the default filters,
+  allows `MAX_SHEET_REPORT_ROWS` = 50,000, and past that its note says to narrow the report on the app's
+  Reports screen (reports with no filters, such as open items, keep their own advice).
 * **Privacy**: admin-only. No push tokens, notification JSON or secrets ever appear. Running a report
   never writes a Sign-ins row (only `auth.verifyCode` and `me.bootstrap` do). A roster request
   (contact details) adds one Log row, `report` "Roster with contact details (<school, group or all
   students>, N students) viewed by <admin email>", taking the write lock just for that row as auth's
-  rate-limit row does; if the lock is busy, only the row is skipped. Other reports log nothing.
+  rate-limit row does. It waits at most `REPORT_LOG_LOCK_WAIT_MS` (3 s) for the lock, so a long sync
+  doesn't hold up the report; if the lock is busy, only the row is skipped (a console error says so).
+  Other reports log nothing.
 * Ledger and Payments rows with no date can't be placed in a date range: they are left out and counted
   in a note.
 * A StudentID on two Students rows counts once, as its first row, as everywhere in the app. The
@@ -360,9 +365,12 @@ logged (whoever can run the menu can already open Families). Row 1 says "Generat
 time you run it; edit the other tabs, not this one."; row 2 is the bold header; rows 1–2 are frozen.
 Money is written in dollars formatted `$#,##0.00`, dates as sheet serial numbers formatted `m/d/yyyy`
 (no time zone can shift them), counts `#,##0`. A bold totals row follows, then the description, filters
-and notes. Text starting with `=`, `+`, `-`, `@` or `'` gets a leading apostrophe, so Sheets shows it as
-typed and never runs it as a formula. The app never reads these tabs: the Store finds its tables by
-their exact names (§9), and Set up only creates the tabs in `TABLE_ORDER`.
+and notes. The other columns (text, email, phone) are set to plain text (`@`) on the data and totals rows
+before the one `setValues`, which otherwise reads text as if typed: a check number `0456` would become
+456, `10-12` a date and `50%` 0.5. Text starting with `=`, `+`, `-`, `@` or `'` also gets a leading
+apostrophe, so Sheets shows it as typed and never runs it as a formula. A tab holds up to
+`MAX_SHEET_REPORT_ROWS` = 50,000 rows (see **Size** above). The app never reads these tabs: the Store
+finds its tables by their exact names (§9), and Set up only creates the tabs in `TABLE_ORDER`.
 
 ## 6. Notifications (src/server/notify.ts)
 
@@ -1177,7 +1185,8 @@ export function PayPalCheckout(props: {
   including setup linking the Worker, `push.register`, a sync push and a linked Google Calendar copied
   into Events and listed in Status; it is skipped until `npm run build:gas` has run. It also checks
   `apps-script/appsscript.json`: the Calendar advanced service and exactly the expected scopes. `src/gas/reports-sheet.test.ts` checks the report tabs: layout, number
-  formats, formula-looking text kept as text, no other tab touched, and Set up and the sync leaving them alone.
+  formats, text columns set to plain text before the values go in, formula-looking text kept as text, the
+  sheet's row cap and its note, no other tab touched, and Set up and the sync leaving them alone.
 * Linked calendars: `src/server/ics.test.ts` (unfolding, parameters, escapes, UTC/TZID/floating/all-day
   times, unknown zones, cancelled and private flags, the range and the cap, garbage input; RRULE DAILY
   /WEEKLY/MONTHLY/YEARLY with COUNT, UNTIL, INTERVAL, BYDAY, WKST, BYSETPOS, EXDATE, RDATE, RECURRENCE-ID,
@@ -1199,7 +1208,8 @@ export function PayPalCheckout(props: {
   before the values, nothing written the second time, whole rows deleted, an old manifest reported
   once a day, a free/busy-only calendar failing with no rows copied).
 * `src/server/reports.test.ts`: every report against the sample data with hand-computed numbers, each
-  status and filter, validation messages, admin-only, the row cap and the roster's Log row.
+  status and filter, validation messages, admin-only, the row cap (and the sheet's cap and note), and the
+  roster's Log row with its short lock wait.
 * `src/server/sign-ins.test.ts`: the Sign-ins upsert (new row, update, household filled in later, no
   code or device stored), the 6-hour throttle on openings, a busy lock or failing write or cache
   that skips the row without breaking sign-in or bootstrap, a skipped sign-in kept and added by the
